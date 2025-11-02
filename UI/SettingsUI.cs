@@ -56,11 +56,21 @@ public sealed class SettingsUI : Window
 
     public override void Draw()
     {
+        // Subtle accent header bar for branding
+        var headerStart = ImGui.GetCursorScreenPos();
+        var headerWidth = Math.Max(1f, ImGui.GetContentRegionAvail().X);
+        var headerEnd = new Vector2(headerStart.X + headerWidth, headerStart.Y + 2f);
+        ImGui.GetWindowDrawList().AddRectFilled(headerStart, headerEnd, ShrinkUColors.ToImGuiColor(ShrinkUColors.Accent));
+        ImGui.Dummy(new Vector2(0, 6f));
+
         if (ImGui.BeginTabBar("SettingsTabs"))
         {
             if (ImGui.BeginTabItem("General"))
             {
-                ImGui.TextColored(new Vector4(0.90f, 0.77f, 0.35f, 1f), "Texture Settings");
+                ImGui.SetWindowFontScale(1.15f);
+                ImGui.TextColored(ShrinkUColors.Accent, "Texture Settings");
+                ImGui.Dummy(new Vector2(0, 6f));
+                ImGui.SetWindowFontScale(1.0f);
                 var mode = _configService.Current.TextureProcessingMode;
                 if (ImGui.BeginCombo("Mode", mode.ToString()))
                 {
@@ -113,6 +123,9 @@ public sealed class SettingsUI : Window
                 ImGui.Text("Backup Folder:");
                 ImGui.SameLine();
                 ImGui.TextWrapped(_configService.Current.BackupFolderPath);
+                ImGui.PushStyleColor(ImGuiCol.Button, ShrinkUColors.Accent);
+                ImGui.PushStyleColor(ImGuiCol.ButtonHovered, ShrinkUColors.AccentHovered);
+                ImGui.PushStyleColor(ImGuiCol.ButtonActive, ShrinkUColors.AccentActive);
                 var browseClicked = ImGui.Button("Browse...");
                 ShowTooltip("Choose where ShrinkU stores its backup files.");
                 if (browseClicked)
@@ -139,13 +152,17 @@ public sealed class SettingsUI : Window
                     }
                     catch { }
                 }
+                ImGui.PopStyleColor(3);
 
                 ImGui.EndTabItem();
             }
 
             if (ImGui.BeginTabItem("Extras"))
             {
-                ImGui.TextColored(new Vector4(0.90f, 0.77f, 0.35f, 1f), "Filters");
+                ImGui.SetWindowFontScale(1.15f);
+                ImGui.TextColored(ShrinkUColors.Accent, "Filters");
+                ImGui.Dummy(new Vector2(0, 6f));
+                ImGui.SetWindowFontScale(1.0f);
                 ImGui.Text("Excluded tags:");
                 ImGui.SameLine();
                 ImGui.SetNextItemWidth(220f);

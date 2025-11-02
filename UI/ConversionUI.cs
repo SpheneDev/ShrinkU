@@ -497,7 +497,13 @@ public sealed class ConversionUI : Window, IDisposable
                 _loadingModPaths = false;
             });
         }
-        
+        // Subtle accent header bar for branding
+        var headerStart = ImGui.GetCursorScreenPos();
+        var headerWidth = Math.Max(1f, ImGui.GetContentRegionAvail().X);
+        var headerEnd = new Vector2(headerStart.X + headerWidth, headerStart.Y + 2f);
+        ImGui.GetWindowDrawList().AddRectFilled(headerStart, headerEnd, ShrinkUColors.ToImGuiColor(ShrinkUColors.Accent));
+        ImGui.Dummy(new Vector2(0, 6f));
+
         var avail = ImGui.GetContentRegionAvail();
         var totalWidth = Math.Max(520f, avail.X);
         if (!_leftWidthInitialized)
@@ -555,7 +561,10 @@ public sealed class ConversionUI : Window, IDisposable
     private void DrawSettings()
     {
         // Render general settings directly without tabs. Extras were moved to SettingsUI.
-        ImGui.TextColored(new Vector4(0.90f, 0.77f, 0.35f, 1f), "Texture Settings");
+        ImGui.SetWindowFontScale(1.15f);
+        ImGui.TextColored(ShrinkUColors.Accent, "Texture Settings");
+        ImGui.Dummy(new Vector2(0, 6f));
+        ImGui.SetWindowFontScale(1.0f);
         var mode = _configService.Current.TextureProcessingMode;
         if (ImGui.BeginCombo("Mode", mode.ToString()))
         {
@@ -908,14 +917,14 @@ else
                         if (hasBackup)
                         {
                             ImGui.PushStyleColor(ImGuiCol.Button, new Vector4(0.90f, 0.65f, 0.25f, 1f));
-                            ImGui.PushStyleColor(ImGuiCol.ButtonHovered, new Vector4(0.95f, 0.75f, 0.35f, 1f));
-                            ImGui.PushStyleColor(ImGuiCol.ButtonActive, new Vector4(0.85f, 0.55f, 0.20f, 1f));
+                            ImGui.PushStyleColor(ImGuiCol.ButtonHovered, ShrinkUColors.AccentHovered);
+                            ImGui.PushStyleColor(ImGuiCol.ButtonActive, ShrinkUColors.AccentActive);
                         }
                         else
                         {
                             ImGui.PushStyleColor(ImGuiCol.Button, new Vector4(0.25f, 0.80f, 0.35f, 1f));
-                            ImGui.PushStyleColor(ImGuiCol.ButtonHovered, new Vector4(0.30f, 0.90f, 0.45f, 1f));
-                            ImGui.PushStyleColor(ImGuiCol.ButtonActive, new Vector4(0.20f, 0.70f, 0.30f, 1f));
+                            ImGui.PushStyleColor(ImGuiCol.ButtonHovered, ShrinkUColors.AccentHovered);
+                            ImGui.PushStyleColor(ImGuiCol.ButtonActive, ShrinkUColors.AccentActive);
                         }
 
                         ImGui.BeginDisabled(excluded);
@@ -1024,9 +1033,12 @@ else
 
     private void DrawActions()
     {
-        ImGui.TextColored(new Vector4(0.90f, 0.77f, 0.35f, 1f), "Actions");
+        ImGui.SetWindowFontScale(1.15f);
+        ImGui.TextColored(ShrinkUColors.Accent, "Actions");
+        ImGui.Dummy(new Vector2(0, 6f));
+        ImGui.SetWindowFontScale(1.0f);
         ImGui.BeginDisabled(_running);
-        if (ImGui.Button("Scan All Mod Textures"))
+        if (ImGui.Button("Re-Scan All Mod Textures"))
         {
             _ = _conversionService.GetGroupedCandidateTexturesAsync().ContinueWith(t =>
             {
@@ -1069,7 +1081,6 @@ else
         }
         ShowTooltip("Scan all mods for candidate textures and refresh the table.");
         ImGui.EndDisabled();
-        // (Buttons moved below the Scanned Files Overview table)
 
         if (!_running)
         {
@@ -1384,6 +1395,8 @@ else
                 displayMod = dn;
 
             ImGui.Text($"Restoring: {displayMod}");
+            ImGui.PushStyleColor(ImGuiCol.PlotHistogram, ShrinkUColors.Accent);
+            ImGui.PushStyleColor(ImGuiCol.FrameBg, ShrinkUColors.WithAlpha(ShrinkUColors.Accent, 0.15f));
             var restoreFraction = _currentRestoreModTotal > 0 ? (float)_currentRestoreModIndex / _currentRestoreModTotal : 0f;
             ImGui.ProgressBar(restoreFraction, barSize, _currentRestoreModTotal > 0 ? $"{_currentRestoreModIndex}/{_currentRestoreModTotal}" : string.Empty);
 
@@ -1392,6 +1405,7 @@ else
             {
                 ImGui.ProgressBar(_backupTotal > 0 ? (float)_backupIndex / _backupTotal : 0f, barSize, _backupTotal > 0 ? $"{_backupIndex}/{_backupTotal}" : string.Empty);
             }
+            ImGui.PopStyleColor(2);
             return;
         }
 
@@ -1402,13 +1416,19 @@ else
             var currentModFraction = _currentModTotalFiles > 0 ? (float)_convertedCount / _currentModTotalFiles : 0f;
             var overallFraction = Math.Clamp(((float)completedMods + currentModFraction) / _totalMods, 0f, 1f);
             ImGui.Text($"Overall Mods: {_currentModIndex}/{_totalMods}");
+            ImGui.PushStyleColor(ImGuiCol.PlotHistogram, ShrinkUColors.Accent);
+            ImGui.PushStyleColor(ImGuiCol.FrameBg, ShrinkUColors.WithAlpha(ShrinkUColors.Accent, 0.15f));
             ImGui.ProgressBar(overallFraction, barSize, string.Empty);
+            ImGui.PopStyleColor(2);
         }
 
         // Current mod progress bar
         ImGui.Text($"Current Mod: {_currentModName}");
         var modFraction = _currentModTotalFiles > 0 ? (float)_convertedCount / _currentModTotalFiles : 0f;
+        ImGui.PushStyleColor(ImGuiCol.PlotHistogram, ShrinkUColors.Accent);
+        ImGui.PushStyleColor(ImGuiCol.FrameBg, ShrinkUColors.WithAlpha(ShrinkUColors.Accent, 0.15f));
         ImGui.ProgressBar(modFraction, barSize, _currentModTotalFiles > 0 ? $"{_convertedCount}/{_currentModTotalFiles}" : string.Empty);
+        ImGui.PopStyleColor(2);
 
         // Current file name
         ImGui.Text($"Current File: {_currentTexture}");
@@ -1467,7 +1487,10 @@ else
 
     private void DrawOverview()
     {
-        ImGui.TextColored(new Vector4(0.90f, 0.77f, 0.35f, 1f), "Scanned Files Overview");
+        ImGui.SetWindowFontScale(1.15f);
+        ImGui.TextColored(ShrinkUColors.Accent, "Scanned Files Overview");
+        ImGui.Dummy(new Vector2(0, 6f));
+        ImGui.SetWindowFontScale(1.0f);
         ImGui.SetNextItemWidth(180f);
         ImGui.InputTextWithHint("##scanFilter", "Filter by file or mod", ref _scanFilter, 128);
         ShowTooltip("Filter results by file name or mod name.");
@@ -1796,14 +1819,14 @@ else
                     if (hasBackup)
                     {
                         ImGui.PushStyleColor(ImGuiCol.Button, new Vector4(0.90f, 0.65f, 0.25f, 1f));
-                        ImGui.PushStyleColor(ImGuiCol.ButtonHovered, new Vector4(0.95f, 0.75f, 0.35f, 1f));
-                        ImGui.PushStyleColor(ImGuiCol.ButtonActive, new Vector4(0.85f, 0.55f, 0.20f, 1f));
+                        ImGui.PushStyleColor(ImGuiCol.ButtonHovered, ShrinkUColors.AccentHovered);
+                        ImGui.PushStyleColor(ImGuiCol.ButtonActive, ShrinkUColors.AccentActive);
                     }
                     else
                     {
                         ImGui.PushStyleColor(ImGuiCol.Button, new Vector4(0.25f, 0.80f, 0.35f, 1f));
-                        ImGui.PushStyleColor(ImGuiCol.ButtonHovered, new Vector4(0.30f, 0.90f, 0.45f, 1f));
-                        ImGui.PushStyleColor(ImGuiCol.ButtonActive, new Vector4(0.20f, 0.70f, 0.30f, 1f));
+                        ImGui.PushStyleColor(ImGuiCol.ButtonHovered, ShrinkUColors.AccentHovered);
+                        ImGui.PushStyleColor(ImGuiCol.ButtonActive, ShrinkUColors.AccentActive);
                     }
 
                     ImGui.BeginDisabled(excluded);
@@ -2027,6 +2050,9 @@ else
         bool hasOnlyRestorableMods = hasRestorableMods && !hasConvertableMods;
 
         ImGui.BeginDisabled(_running || hasOnlyRestorableMods || !hasConvertableMods);
+        ImGui.PushStyleColor(ImGuiCol.Button, ShrinkUColors.Accent);
+        ImGui.PushStyleColor(ImGuiCol.ButtonHovered, ShrinkUColors.AccentHovered);
+        ImGui.PushStyleColor(ImGuiCol.ButtonActive, ShrinkUColors.AccentActive);
         if (ImGui.Button("Backup and Convert"))
         {
             _running = true;
@@ -2037,6 +2063,7 @@ else
             _ = _conversionService.StartConversionAsync(toConvert);
         }
         ImGui.EndDisabled();
+        ImGui.PopStyleColor(3);
 
         if (ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
         {
@@ -2052,6 +2079,9 @@ else
         bool canRestore = restorableModsForAction.Count > 0;
 
         ImGui.BeginDisabled(_running || !canRestore);
+        ImGui.PushStyleColor(ImGuiCol.Button, ShrinkUColors.Accent);
+        ImGui.PushStyleColor(ImGuiCol.ButtonHovered, ShrinkUColors.AccentHovered);
+        ImGui.PushStyleColor(ImGuiCol.ButtonActive, ShrinkUColors.AccentActive);
         if (ImGui.Button("Restore Backups"))
         {
             _running = true;
@@ -2106,6 +2136,7 @@ else
                 _currentRestoreModTotal = 0;
             });
         }
+        ImGui.PopStyleColor(3);
         ImGui.EndDisabled();
 
         if (!canRestore && ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))

@@ -42,19 +42,26 @@ public sealed class FirstRunSetupUI : Window
 
     public override void Draw()
     {
-        ImGui.TextColored(new Vector4(0.95f, 0.85f, 0.35f, 1f), "Welcome to ShrinkU");
+        // Subtle accent header bar for branding
+        var headerStart = ImGui.GetCursorScreenPos();
+        var headerWidth = Math.Max(1f, ImGui.GetContentRegionAvail().X);
+        var headerEnd = new Vector2(headerStart.X + headerWidth, headerStart.Y + 2f);
+        ImGui.GetWindowDrawList().AddRectFilled(headerStart, headerEnd, ShrinkUColors.ToImGuiColor(ShrinkUColors.Accent));
+        ImGui.Dummy(new Vector2(0, 6f));
+
+        ImGui.TextColored(ShrinkUColors.Accent, "Welcome to ShrinkU");
         ImGui.Separator();
         ImGui.TextWrapped("ShrinkU helps you reduce texture sizes from Penumbra mods to save disk space and improve performance. It can back up originals and restore them later.");
 
         ImGui.Spacing();
-        ImGui.TextColored(new Vector4(0.85f, 0.95f, 0.85f, 1f), "What ShrinkU does:");
+        ImGui.TextColored(ShrinkUColors.Accent, "What ShrinkU does:");
         ImGui.BulletText("Scan Penumbra mod folders for textures");
         ImGui.BulletText("Optionally back up originals before conversion");
         ImGui.BulletText("Convert textures to smaller formats");
         ImGui.BulletText("Restore from backups if needed");
 
         ImGui.Spacing();
-        ImGui.TextColored(new Vector4(0.85f, 0.85f, 0.95f, 1f), "Before you start:");
+        ImGui.TextColored(ShrinkUColors.Accent, "Before you start:");
         ImGui.TextWrapped("Please choose a folder where ShrinkU will store backups. You can change this later in Settings.");
 
         ImGui.Spacing();
@@ -62,6 +69,9 @@ public sealed class FirstRunSetupUI : Window
         ImGui.SameLine();
         ImGui.TextWrapped(string.IsNullOrWhiteSpace(_selectedFolder) ? "(not selected)" : _selectedFolder);
 
+        ImGui.PushStyleColor(ImGuiCol.Button, ShrinkUColors.Accent);
+        ImGui.PushStyleColor(ImGuiCol.ButtonHovered, ShrinkUColors.AccentHovered);
+        ImGui.PushStyleColor(ImGuiCol.ButtonActive, ShrinkUColors.AccentActive);
         var browseClicked = ImGui.Button("Browse...");
         ShowTooltip("Choose the folder where backups will be stored.");
         if (browseClicked)
@@ -80,12 +90,16 @@ public sealed class FirstRunSetupUI : Window
         }
         if (!canOpen)
             ImGui.EndDisabled();
+        ImGui.PopStyleColor(3);
 
         ImGui.Spacing();
         bool canComplete = DirectoryExistsSafe(_selectedFolder);
         if (!canComplete)
             ImGui.BeginDisabled();
 
+        ImGui.PushStyleColor(ImGuiCol.Button, ShrinkUColors.Accent);
+        ImGui.PushStyleColor(ImGuiCol.ButtonHovered, ShrinkUColors.AccentHovered);
+        ImGui.PushStyleColor(ImGuiCol.ButtonActive, ShrinkUColors.AccentActive);
         var completeClicked = ImGui.Button("Complete Setup");
         ShowTooltip("Finish setup and enable the plugin.");
         if (completeClicked)
@@ -107,6 +121,7 @@ public sealed class FirstRunSetupUI : Window
 
             IsOpen = false;
         }
+        ImGui.PopStyleColor(3);
 
         if (!canComplete)
             ImGui.EndDisabled();
