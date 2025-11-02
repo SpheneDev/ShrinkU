@@ -44,6 +44,7 @@ public sealed class TextureBackupService
         public string OriginalFileName { get; set; } = string.Empty;
         public string OriginalPath { get; set; } = string.Empty;
         public string PrefixedOriginalPath { get; set; } = string.Empty;
+        public string ModRelativePath { get; set; } = string.Empty;
         public string? ModFolderName { get; set; }
         public DateTime CreatedUtc { get; set; } = DateTime.UtcNow;
     }
@@ -64,6 +65,7 @@ public sealed class TextureBackupService
         public string PrefixedOriginalPath { get; set; } = string.Empty;
         public string BackupFileName { get; set; } = string.Empty;
         public string OriginalFileName { get; set; } = string.Empty;
+        public string ModRelativePath { get; set; } = string.Empty;
         public string? ModFolderName { get; set; }
         public DateTime CreatedUtc { get; set; } = DateTime.UtcNow;
     }
@@ -195,9 +197,26 @@ public sealed class TextureBackupService
             var modName = ExtractModFolderName(prefixed) ?? "_unknown";
             var modDirInSession = Path.Combine(sessionDir, modName);
             try { Directory.CreateDirectory(modDirInSession); } catch { }
-            var target = Path.Combine(modDirInSession, Path.GetFileName(source));
+            // Determine path inside the mod by computing relative path from the mod root
+            string modRelativePath = Path.GetFileName(source);
             try
             {
+                var modAbsolute = GetModAbsolutePath(modName);
+                if (!string.IsNullOrWhiteSpace(modAbsolute))
+                {
+                    var rel = Path.GetRelativePath(modAbsolute, source);
+                    if (!string.IsNullOrWhiteSpace(rel) && !rel.StartsWith("..", StringComparison.Ordinal))
+                        modRelativePath = rel.Replace('/', '\\');
+                }
+            }
+            catch { }
+
+            var target = Path.Combine(modDirInSession, modRelativePath);
+            try
+            {
+                var targetDir = Path.GetDirectoryName(target);
+                if (!string.IsNullOrWhiteSpace(targetDir))
+                    Directory.CreateDirectory(targetDir);
                 File.Copy(source, target, overwrite: true);
                 progress?.Report((source, ++current, textures.Count));
                 _logger.LogDebug("Backed up texture {path}", source);
@@ -207,6 +226,7 @@ public sealed class TextureBackupService
                     PrefixedOriginalPath = prefixed,
                     BackupFileName = Path.GetFileName(source),
                     OriginalFileName = Path.GetFileName(source),
+                    ModRelativePath = modRelativePath,
                     ModFolderName = ExtractModFolderName(prefixed),
                     CreatedUtc = DateTime.UtcNow,
                 };
@@ -253,6 +273,7 @@ public sealed class TextureBackupService
                         PrefixedOriginalPath = e.PrefixedOriginalPath,
                         BackupFileName = e.BackupFileName,
                         OriginalFileName = e.OriginalFileName,
+                        ModRelativePath = e.ModRelativePath,
                         ModFolderName = e.ModFolderName,
                         CreatedUtc = e.CreatedUtc,
                     }).ToList() };
@@ -329,6 +350,7 @@ public sealed class TextureBackupService
                                 OriginalFileName = e.OriginalFileName,
                                 OriginalPath = e.OriginalPath,
                                 PrefixedOriginalPath = e.PrefixedOriginalPath,
+                                ModRelativePath = e.ModRelativePath,
                                 ModFolderName = e.ModFolderName,
                                 CreatedUtc = e.CreatedUtc,
                             });
@@ -363,6 +385,7 @@ public sealed class TextureBackupService
                             OriginalFileName = e.OriginalFileName,
                             OriginalPath = e.OriginalPath,
                             PrefixedOriginalPath = e.PrefixedOriginalPath,
+                            ModRelativePath = e.ModRelativePath,
                             ModFolderName = e.ModFolderName,
                             CreatedUtc = e.CreatedUtc,
                         });
@@ -410,12 +433,18 @@ public sealed class TextureBackupService
                         if (session.IsZip)
                         {
                             using var za = ZipFile.OpenRead(session.SourcePath);
-                            // Try simple name match first
-                            var zipEntry = za.Entries.FirstOrDefault(e => string.Equals(e.Name, entry.BackupFileName, StringComparison.OrdinalIgnoreCase));
+                            // Prefer relative path inside mod
+                            System.IO.Compression.ZipArchiveEntry? zipEntry = null;
+                            if (!string.IsNullOrWhiteSpace(entry.ModRelativePath))
+                            {
+                                var normalized = entry.ModRelativePath.Replace('\\', '/');
+                                zipEntry = za.Entries.FirstOrDefault(e => string.Equals(e.FullName, normalized, StringComparison.OrdinalIgnoreCase));
+                            }
                             if (zipEntry == null)
                             {
-                                // Fallback: full name match when backups are inside a folder
-                                zipEntry = za.Entries.FirstOrDefault(e => string.Equals(e.FullName, entry.BackupFileName, StringComparison.OrdinalIgnoreCase)
+                                // Fallbacks to name-based matching
+                                zipEntry = za.Entries.FirstOrDefault(e => string.Equals(e.Name, entry.BackupFileName, StringComparison.OrdinalIgnoreCase))
+                                          ?? za.Entries.FirstOrDefault(e => string.Equals(e.FullName, entry.BackupFileName, StringComparison.OrdinalIgnoreCase)
                                                                         || e.FullName.EndsWith($"/{entry.BackupFileName}", StringComparison.OrdinalIgnoreCase)
                                                                         || e.FullName.EndsWith($"\\{entry.BackupFileName}", StringComparison.OrdinalIgnoreCase));
                             }
@@ -424,16 +453,28 @@ public sealed class TextureBackupService
                         }
                         else
                         {
-                            // Session folder layout may store files directly or under mod subdirectories
-                            var direct = Path.Combine(session.SourcePath, entry.BackupFileName);
-                            var sub = !string.IsNullOrEmpty(entry.ModFolderName)
-                                ? Path.Combine(session.SourcePath, entry.ModFolderName, entry.BackupFileName)
-                                : direct;
-                            var candidate = File.Exists(direct) ? direct : sub;
-                            if (File.Exists(candidate))
+                            // Prefer relative path to avoid collisions
+                            var relCandidate = !string.IsNullOrWhiteSpace(entry.ModRelativePath)
+                                ? Path.Combine(session.SourcePath, entry.ModRelativePath)
+                                : string.Empty;
+                            if (!string.IsNullOrWhiteSpace(relCandidate) && File.Exists(relCandidate))
                             {
-                                var fi = new FileInfo(candidate);
+                                var fi = new FileInfo(relCandidate);
                                 backupBytes = fi.Length;
+                            }
+                            else
+                            {
+                                // Session folder layout may store files directly or under mod subdirectories
+                                var direct = Path.Combine(session.SourcePath, entry.BackupFileName);
+                                var sub = !string.IsNullOrEmpty(entry.ModFolderName)
+                                    ? Path.Combine(session.SourcePath, entry.ModFolderName, entry.BackupFileName)
+                                    : direct;
+                                var candidate = File.Exists(direct) ? direct : sub;
+                                if (File.Exists(candidate))
+                                {
+                                    var fi = new FileInfo(candidate);
+                                    backupBytes = fi.Length;
+                                }
                             }
                         }
                     }
@@ -512,10 +553,16 @@ public sealed class TextureBackupService
                         if (session.IsZip)
                         {
                             using var za = ZipFile.OpenRead(session.SourcePath);
-                            var zipEntry = za.Entries.FirstOrDefault(e => string.Equals(e.Name, entry.BackupFileName, StringComparison.OrdinalIgnoreCase));
+                            System.IO.Compression.ZipArchiveEntry? zipEntry = null;
+                            if (!string.IsNullOrWhiteSpace(entry.ModRelativePath))
+                            {
+                                var normalized = entry.ModRelativePath.Replace('\\', '/');
+                                zipEntry = za.Entries.FirstOrDefault(e => string.Equals(e.FullName, normalized, StringComparison.OrdinalIgnoreCase));
+                            }
                             if (zipEntry == null)
                             {
-                                zipEntry = za.Entries.FirstOrDefault(e => string.Equals(e.FullName, entry.BackupFileName, StringComparison.OrdinalIgnoreCase)
+                                zipEntry = za.Entries.FirstOrDefault(e => string.Equals(e.Name, entry.BackupFileName, StringComparison.OrdinalIgnoreCase))
+                                          ?? za.Entries.FirstOrDefault(e => string.Equals(e.FullName, entry.BackupFileName, StringComparison.OrdinalIgnoreCase)
                                                                         || e.FullName.EndsWith($"/{entry.BackupFileName}", StringComparison.OrdinalIgnoreCase)
                                                                         || e.FullName.EndsWith($"\\{entry.BackupFileName}", StringComparison.OrdinalIgnoreCase));
                             }
@@ -524,15 +571,26 @@ public sealed class TextureBackupService
                         }
                         else
                         {
-                            var direct = Path.Combine(session.SourcePath, entry.BackupFileName);
-                            var sub = !string.IsNullOrEmpty(entry.ModFolderName)
-                                ? Path.Combine(session.SourcePath, entry.ModFolderName, entry.BackupFileName)
-                                : direct;
-                            var candidate = File.Exists(direct) ? direct : sub;
-                            if (File.Exists(candidate))
+                            var relCandidate = !string.IsNullOrWhiteSpace(entry.ModRelativePath)
+                                ? Path.Combine(session.SourcePath, entry.ModRelativePath)
+                                : string.Empty;
+                            if (!string.IsNullOrWhiteSpace(relCandidate) && File.Exists(relCandidate))
                             {
-                                var fi = new FileInfo(candidate);
+                                var fi = new FileInfo(relCandidate);
                                 backupBytes = fi.Length;
+                            }
+                            else
+                            {
+                                var direct = Path.Combine(session.SourcePath, entry.BackupFileName);
+                                var sub = !string.IsNullOrEmpty(entry.ModFolderName)
+                                    ? Path.Combine(session.SourcePath, entry.ModFolderName, entry.BackupFileName)
+                                    : direct;
+                                var candidate = File.Exists(direct) ? direct : sub;
+                                if (File.Exists(candidate))
+                                {
+                                    var fi = new FileInfo(candidate);
+                                    backupBytes = fi.Length;
+                                }
                             }
                         }
                     }
@@ -624,6 +682,22 @@ public sealed class TextureBackupService
                 if (!string.IsNullOrEmpty(latestZip))
                 {
                     var zipSuccess = await RestoreFromZipAsync(latestZip, progress, token).ConfigureAwait(false);
+                    // If restore from zip succeeded, and mod folder became empty, remove the folder
+                    if (zipSuccess)
+                    {
+                        try
+                        {
+                            if (Directory.Exists(modDir) && !Directory.EnumerateFileSystemEntries(modDir).Any())
+                            {
+                                Directory.Delete(modDir, true);
+                                _logger.LogDebug("Deleted empty mod backup folder {dir}", modDir);
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger.LogWarning("Failed to delete mod backup folder {dir}: {error}", modDir, ex.Message);
+                        }
+                    }
                     return zipSuccess;
                 }
             }
@@ -637,6 +711,19 @@ public sealed class TextureBackupService
                 if (Directory.Exists(modSub) && File.Exists(manifestPath))
                 {
                     var sessionSuccess = await RestoreFromSessionAsync(modSub, progress, token).ConfigureAwait(false);
+                    // After restoring from session, also attempt to remove empty mod folder in root backup directory
+                    try
+                    {
+                        if (Directory.Exists(modDir) && !Directory.EnumerateFileSystemEntries(modDir).Any())
+                        {
+                            Directory.Delete(modDir, true);
+                            _logger.LogDebug("Deleted empty mod backup folder {dir}", modDir);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning("Failed to delete mod backup folder {dir}: {error}", modDir, ex.Message);
+                    }
                     return sessionSuccess;
                 }
             }
@@ -672,10 +759,19 @@ public sealed class TextureBackupService
             if (session.IsZip)
             {
                 using var za = ZipFile.OpenRead(session.SourcePath);
-                var zipEntry = za.Entries.FirstOrDefault(e => string.Equals(e.Name, entry.BackupFileName, StringComparison.OrdinalIgnoreCase)
+                System.IO.Compression.ZipArchiveEntry? zipEntry = null;
+                if (!string.IsNullOrWhiteSpace(entry.ModRelativePath))
+                {
+                    var normalized = entry.ModRelativePath.Replace('\\', '/');
+                    zipEntry = za.Entries.FirstOrDefault(e => string.Equals(e.FullName, normalized, StringComparison.OrdinalIgnoreCase));
+                }
+                if (zipEntry == null)
+                {
+                    zipEntry = za.Entries.FirstOrDefault(e => string.Equals(e.Name, entry.BackupFileName, StringComparison.OrdinalIgnoreCase)
                                                            || string.Equals(e.FullName, entry.BackupFileName, StringComparison.OrdinalIgnoreCase)
                                                            || e.FullName.EndsWith($"/{entry.BackupFileName}", StringComparison.OrdinalIgnoreCase)
                                                            || e.FullName.EndsWith($"\\{entry.BackupFileName}", StringComparison.OrdinalIgnoreCase));
+                }
                 
                 if (zipEntry == null)
                 {
@@ -690,12 +786,20 @@ public sealed class TextureBackupService
             }
             else
             {
-                var backupFile = Path.Combine(session.SourcePath, entry.BackupFileName);
-                if (!string.IsNullOrEmpty(entry.ModFolderName))
+                // Prefer the stored relative path to avoid collisions
+                var backupFile = !string.IsNullOrWhiteSpace(entry.ModRelativePath)
+                    ? Path.Combine(session.SourcePath, entry.ModRelativePath)
+                    : Path.Combine(session.SourcePath, entry.BackupFileName);
+
+                if (!File.Exists(backupFile))
                 {
-                    var modBackupFile = Path.Combine(session.SourcePath, entry.ModFolderName, entry.BackupFileName);
-                    if (File.Exists(modBackupFile))
-                        backupFile = modBackupFile;
+                    // Fallback to legacy layout under mod subdirectory
+                    if (!string.IsNullOrEmpty(entry.ModFolderName))
+                    {
+                        var modBackupFile = Path.Combine(session.SourcePath, entry.ModFolderName, entry.BackupFileName);
+                        if (File.Exists(modBackupFile))
+                            backupFile = modBackupFile;
+                    }
                 }
 
                 if (!File.Exists(backupFile))
@@ -856,12 +960,20 @@ public sealed class TextureBackupService
                     break;
                 }
 
-                var backupFile = Path.Combine(sessionPath, entry.BackupFileName);
-                if (!string.IsNullOrEmpty(entry.ModFolderName))
+                // Prefer the stored relative path inside the session (or mod subdir)
+                var backupFile = !string.IsNullOrWhiteSpace(entry.ModRelativePath)
+                    ? Path.Combine(sessionPath, entry.ModRelativePath)
+                    : Path.Combine(sessionPath, entry.BackupFileName);
+
+                if (!File.Exists(backupFile))
                 {
-                    var modBackupFile = Path.Combine(sessionPath, entry.ModFolderName, entry.BackupFileName);
-                    if (File.Exists(modBackupFile))
-                        backupFile = modBackupFile;
+                    // Fallback for legacy manifests
+                    if (!string.IsNullOrEmpty(entry.ModFolderName))
+                    {
+                        var modBackupFile = Path.Combine(sessionPath, entry.ModFolderName, entry.BackupFileName);
+                        if (File.Exists(modBackupFile))
+                            backupFile = modBackupFile;
+                    }
                 }
 
                 if (!File.Exists(backupFile))

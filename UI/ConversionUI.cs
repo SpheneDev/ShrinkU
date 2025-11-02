@@ -170,6 +170,9 @@ public sealed class ConversionUI : Window, IDisposable
                 var restoreToken = _restoreCancellationTokenSource.Token;
 
                 _running = true;
+                // Clear stale conversion/restore progress before starting a restore
+                ResetConversionProgress();
+                ResetRestoreProgress();
                 _currentRestoreMod = target;
                 _currentRestoreModIndex = 0;
                 _currentRestoreModTotal = 0;
@@ -921,35 +924,42 @@ else
                             _running = true;
                             if (hasBackup)
                             {
-                                _modsWithBackupCache.TryRemove(mod, out _);
-                                var progress = new Progress<(string, int, int)>(e => { _currentTexture = e.Item1; _backupIndex = e.Item2; _backupTotal = e.Item3; });
-                                _ = _backupService.RestoreLatestForModAsync(mod, progress, CancellationToken.None)
-                                    .ContinueWith(_ => {
-                                        try { _backupService.RedrawPlayer(); } catch { }
-                                        _logger.LogDebug("Heavy scan triggered: restore completed (mod button in folder view)");
-                                        RefreshScanResults(true, "restore-folder-view");
-                                        TriggerMetricsRefresh();
-                                        _ = _backupService.HasBackupForModAsync(mod).ContinueWith(bt =>
-                                        {
-                                            if (bt.Status == TaskStatus.RanToCompletion)
-                                                _modsWithBackupCache[mod] = bt.Result;
-                                        });
-                                        _running = false;
+                            _modsWithBackupCache.TryRemove(mod, out _);
+                            // Reset progress state for restore and initialize current restore mod
+                            ResetConversionProgress();
+                            ResetRestoreProgress();
+                            _currentRestoreMod = mod;
+                            var progress = new Progress<(string, int, int)>(e => { _currentTexture = e.Item1; _backupIndex = e.Item2; _backupTotal = e.Item3; _currentRestoreModIndex = e.Item2; _currentRestoreModTotal = e.Item3; });
+                            _ = _backupService.RestoreLatestForModAsync(mod, progress, CancellationToken.None)
+                                .ContinueWith(_ => {
+                                    try { _backupService.RedrawPlayer(); } catch { }
+                                    _logger.LogDebug("Heavy scan triggered: restore completed (mod button in folder view)");
+                                    RefreshScanResults(true, "restore-folder-view");
+                                    TriggerMetricsRefresh();
+                                    _ = _backupService.HasBackupForModAsync(mod).ContinueWith(bt =>
+                                    {
+                                        if (bt.Status == TaskStatus.RanToCompletion)
+                                            _modsWithBackupCache[mod] = bt.Result;
                                     });
+                                    _running = false;
+                                });
                             }
                             else
                             {
-                                var toConvert = files.ToDictionary(f => f, f => Array.Empty<string>(), StringComparer.Ordinal);
-                                _ = _conversionService.StartConversionAsync(toConvert)
-                                    .ContinueWith(_ =>
+                            var toConvert = files.ToDictionary(f => f, f => Array.Empty<string>(), StringComparer.Ordinal);
+                            // Reset progress state for a fresh conversion
+                            ResetConversionProgress();
+                            ResetRestoreProgress();
+                            _ = _conversionService.StartConversionAsync(toConvert)
+                                .ContinueWith(_ =>
+                                {
+                                    _ = _backupService.HasBackupForModAsync(mod).ContinueWith(bt =>
                                     {
-                                        _ = _backupService.HasBackupForModAsync(mod).ContinueWith(bt =>
-                                        {
-                                            if (bt.Status == TaskStatus.RanToCompletion)
-                                                _modsWithBackupCache[mod] = bt.Result;
-                                        });
-                                        _running = false;
+                                        if (bt.Status == TaskStatus.RanToCompletion)
+                                            _modsWithBackupCache[mod] = bt.Result;
                                     });
+                                    _running = false;
+                                });
                             }
                         }
                         // Tooltip for action button (Convert/Restore)
@@ -1109,50 +1119,7 @@ else
                 }
             }
 
-            // Display stats
-            ImGui.Text($"Mods: {totalMods} | Restorable: {restorableModsCount} | Converted: {convertedModsCount} | Convertible: {convertibleModsCount}");
-            ImGui.Text($"Textures: {_texturesToConvert.Count} queued | Selected: {_selectedTextures.Count}");
-
-            if (_cachedBackupStorageInfo.fileCount > 0)
-            {
-                var sizeInMB = _cachedBackupStorageInfo.totalSize / (1024.0 * 1024.0);
-                ImGui.Text($"Backups: {_cachedBackupStorageInfo.fileCount} files, {sizeInMB:F2} MB");
-            }
-            else
-            {
-                ImGui.Text("Backups: none");
-            }
-
-            if (shouldUpdateMetrics)
-            {
-                if (_savingsInfoTask == null)
-                {
-                    _savingsInfoTask = _backupService.ComputeSavingsAsync();
-                }
-                if (_savingsInfoTask != null && _savingsInfoTask.IsCompleted)
-                {
-                    _cachedSavingsInfo = _savingsInfoTask.Result ?? new TextureBackupService.BackupSavingsStats();
-                }
-            }
-
-            if (_cachedSavingsInfo.ComparedFiles > 0)
-            {
-                var originalMB = _cachedSavingsInfo.OriginalTotalBytes / (1024.0 * 1024.0);
-                var currentMB = _cachedSavingsInfo.CurrentTotalBytes / (1024.0 * 1024.0);
-                var savedMB = Math.Max(0.0, (originalMB - currentMB));
-                var pct = _cachedSavingsInfo.OriginalTotalBytes > 0
-                    ? (100.0 * Math.Max(0.0, (_cachedSavingsInfo.OriginalTotalBytes - _cachedSavingsInfo.CurrentTotalBytes)) / _cachedSavingsInfo.OriginalTotalBytes)
-                    : 0.0;
-                ImGui.Text($"Savings: {savedMB:F2} MB ({pct:F1}%) over {_cachedSavingsInfo.ComparedFiles} files");
-                if (_cachedSavingsInfo.MissingCurrentFiles > 0)
-                {
-                    ImGui.Text($"Missing current files: {_cachedSavingsInfo.MissingCurrentFiles}");
-                }
-            }
-            else
-            {
-                ImGui.Text("Savings: no comparable backups found");
-            }
+            // Stats removed from action area; table now contains key information
 
         }
         else
@@ -1408,6 +1375,26 @@ else
         var avail = ImGui.GetContentRegionAvail();
         var barSize = new Vector2(Math.Max(120f, avail.X), 0);
 
+        // If a restore is in progress, show restore-oriented progress bars
+        var isRestoring = !string.IsNullOrEmpty(_currentRestoreMod) || (_restoreCancellationTokenSource != null && _backupTotal > 0);
+        if (isRestoring)
+        {
+            var displayMod = _currentRestoreMod;
+            if (!string.IsNullOrEmpty(displayMod) && _modDisplayNames.TryGetValue(displayMod, out var dn))
+                displayMod = dn;
+
+            ImGui.Text($"Restoring: {displayMod}");
+            var restoreFraction = _currentRestoreModTotal > 0 ? (float)_currentRestoreModIndex / _currentRestoreModTotal : 0f;
+            ImGui.ProgressBar(restoreFraction, barSize, _currentRestoreModTotal > 0 ? $"{_currentRestoreModIndex}/{_currentRestoreModTotal}" : string.Empty);
+
+            ImGui.Text($"Current File: {_currentTexture}");
+            if (_backupTotal > 0)
+            {
+                ImGui.ProgressBar(_backupTotal > 0 ? (float)_backupIndex / _backupTotal : 0f, barSize, _backupTotal > 0 ? $"{_backupIndex}/{_backupTotal}" : string.Empty);
+            }
+            return;
+        }
+
         // Overall mods progress: completed mods plus fraction of current mod
         if (_totalMods > 0)
         {
@@ -1430,6 +1417,30 @@ else
             ImGui.Text($"Backup: {_backupIndex}/{_backupTotal}");
         }
         ImGui.Text($"Converted (mod): {_convertedCount}");
+    }
+
+    // Reset all conversion-related progress state to avoid stale UI between operations
+    private void ResetConversionProgress()
+    {
+        _currentModName = string.Empty;
+        _currentModIndex = 0;
+        _totalMods = 0;
+        _currentModTotalFiles = 0;
+        _convertedCount = 0;
+        _currentTexture = string.Empty;
+        _backupIndex = 0;
+        _backupTotal = 0;
+    }
+
+    // Reset restore-related progress state to avoid stale UI between operations
+    private void ResetRestoreProgress()
+    {
+        _currentRestoreMod = string.Empty;
+        _currentRestoreModIndex = 0;
+        _currentRestoreModTotal = 0;
+        _currentTexture = string.Empty;
+        _backupIndex = 0;
+        _backupTotal = 0;
     }
 
     private void OpenFolderPicker()
@@ -1802,7 +1813,11 @@ else
                         if (hasBackup)
                         {
                             _modsWithBackupCache.TryRemove(mod, out _);
-                            var progress = new Progress<(string, int, int)>(e => { _currentTexture = e.Item1; _backupIndex = e.Item2; _backupTotal = e.Item3; });
+                            // Reset progress state for restore and initialize current restore mod
+                            ResetConversionProgress();
+                            ResetRestoreProgress();
+                            _currentRestoreMod = mod;
+                            var progress = new Progress<(string, int, int)>(e => { _currentTexture = e.Item1; _backupIndex = e.Item2; _backupTotal = e.Item3; _currentRestoreModIndex = e.Item2; _currentRestoreModTotal = e.Item3; });
                             _ = _backupService.RestoreLatestForModAsync(mod, progress, CancellationToken.None)
                                 .ContinueWith(_ => {
                                     try { _backupService.RedrawPlayer(); } catch { }
@@ -1820,6 +1835,9 @@ else
                         else
                         {
                             var toConvert = files.ToDictionary(f => f, f => Array.Empty<string>(), StringComparer.Ordinal);
+                            // Reset progress state for a fresh conversion
+                            ResetConversionProgress();
+                            ResetRestoreProgress();
                             _ = _conversionService.StartConversionAsync(toConvert)
                                 .ContinueWith(_ =>
                                 {
@@ -2013,6 +2031,9 @@ else
         {
             _running = true;
             var toConvert = GetConvertableTextures();
+            // Reset progress state for a fresh conversion
+            ResetConversionProgress();
+            ResetRestoreProgress();
             _ = _conversionService.StartConversionAsync(toConvert);
         }
         ImGui.EndDisabled();
@@ -2034,6 +2055,9 @@ else
         if (ImGui.Button("Restore Backups"))
         {
             _running = true;
+            // Reset progress state before bulk restore
+            ResetConversionProgress();
+            ResetRestoreProgress();
             var progress = new Progress<(string, int, int)>(e =>
             {
                 _currentTexture = e.Item1;
