@@ -110,6 +110,15 @@ public sealed class SettingsUI : Window
                 }
                 ShowTooltip("Delete uncompressed backup folders after ZIP is created.");
 
+                // Auto-restore for inefficient mods toggle
+                bool autoRestore = _configService.Current.AutoRestoreInefficientMods;
+                if (ImGui.Checkbox("Auto-restore backups for inefficient mods", ref autoRestore))
+                {
+                    _configService.Current.AutoRestoreInefficientMods = autoRestore;
+                    _configService.Save();
+                }
+                ShowTooltip("Automatically restore the latest backup when a mod becomes larger after conversion.");
+
                 // Overview table: show file rows toggle
                 bool showFiles = _configService.Current.ShowModFilesInOverview;
                 if (ImGui.Checkbox("Show file rows in overview", ref showFiles))

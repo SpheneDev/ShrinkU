@@ -40,6 +40,7 @@ public sealed class ConversionUI : Window, IDisposable
     private bool _initialScanQueued = false;
     private bool _filterPenumbraUsedOnly = false;
     private bool _filterNonConvertibleMods = true;
+    private bool _filterInefficientMods = false;
     private HashSet<string> _penumbraUsedFiles = new(StringComparer.OrdinalIgnoreCase);
     private bool _loadingPenumbraUsed = false;
 
@@ -434,6 +435,7 @@ public sealed class ConversionUI : Window, IDisposable
         _useFolderStructure = _configService.Current.UseFolderStructure;
         _filterPenumbraUsedOnly = _configService.Current.FilterPenumbraUsedOnly;
         _filterNonConvertibleMods = _configService.Current.FilterNonConvertibleMods;
+        _filterInefficientMods = _configService.Current.HideInefficientMods;
         _scanSortAsc = _configService.Current.ScanSortAsc;
         var sortKey = _configService.Current.ScanSortKey ?? "ModName";
         _scanSortKind = string.Equals(sortKey, "FileName", StringComparison.OrdinalIgnoreCase)
@@ -603,6 +605,14 @@ public sealed class ConversionUI : Window, IDisposable
             _configService.Save();
         }
         ShowTooltip("Remove original backup files after ZIP compression.");
+        bool autoRestore = _configService.Current.AutoRestoreInefficientMods;
+        if (ImGui.Checkbox("Auto-restore backups for inefficient mods", ref autoRestore))
+        {
+            _configService.Current.AutoRestoreInefficientMods = autoRestore;
+            _configService.Save();
+        }
+        ShowTooltip("Automatically restore the latest backup when a mod becomes larger after conversion.");
+
 
         ImGui.Text("Backup Folder:");
         ImGui.SameLine();
@@ -810,7 +820,10 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                     folderCompressedBytes += stats.CurrentBytes;
             }
             if (folderCompressedBytes > 0)
-                DrawRightAlignedSizeColored(folderCompressedBytes, _compressedTextColor);
+            {
+                var color = folderCompressedBytes > folderOriginalBytes ? ShrinkUColors.WarningLight : _compressedTextColor;
+                DrawRightAlignedSizeColored(folderCompressedBytes, color);
+            }
             else
                 DrawRightAlignedTextColored("-", _compressedTextColor);
 
@@ -882,6 +895,25 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                     ImGui.PopFont();
                     ImGui.SameLine();
                     ImGui.TextUnformatted(header);
+                    ImGui.SameLine();
+                    if (IsModInefficient(mod))
+                    {
+                        ImGui.PushFont(UiBuilder.IconFont);
+                        ImGui.TextColored(ShrinkUColors.WarningLight, FontAwesomeIcon.ExclamationTriangle.ToIconString());
+                        ImGui.PopFont();
+                        if (ImGui.IsItemHovered())
+                            ImGui.SetTooltip("This mod becomes larger after conversion");
+                        ImGui.SameLine();
+                    }
+                    if (hasBackup && _cachedPerModSavings.TryGetValue(mod, out var noteStats1) && noteStats1 != null && noteStats1.OriginalBytes > 0 && noteStats1.CurrentBytes > noteStats1.OriginalBytes)
+                    {
+                        ImGui.PushFont(UiBuilder.IconFont);
+                        ImGui.TextColored(ShrinkUColors.WarningLight, FontAwesomeIcon.ExclamationTriangle.ToIconString());
+                        ImGui.PopFont();
+                        if (ImGui.IsItemHovered())
+                            ImGui.SetTooltip("This mod is smaller when not converted");
+                        ImGui.SameLine();
+                    }
                     // Uncompressed and Compressed columns for mod row in folder view
                     ImGui.TableSetColumnIndex(3);
                     _cachedPerModSavings.TryGetValue(mod, out var modStats);
@@ -901,11 +933,14 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                     DrawRightAlignedSize(modOriginalBytes);
 
                     ImGui.TableSetColumnIndex(2);
-                    var modCurrentBytes = hasBackup ? (modStats?.CurrentBytes ?? 0) : 0;
-                    if (modCurrentBytes > 0)
-    DrawRightAlignedSizeColored(modCurrentBytes, _compressedTextColor);
-else
-    DrawRightAlignedTextColored("-", _compressedTextColor);
+                var modCurrentBytes = hasBackup ? (modStats?.CurrentBytes ?? 0) : 0;
+                if (modCurrentBytes > 0)
+                {
+                    var color = modCurrentBytes > modOriginalBytes ? ShrinkUColors.WarningLight : _compressedTextColor;
+                    DrawRightAlignedSizeColored(modCurrentBytes, color);
+                }
+                else
+                    DrawRightAlignedTextColored("-", _compressedTextColor);
 
                     // Action column
                     ImGui.TableSetColumnIndex(4);
@@ -1571,6 +1606,13 @@ else
         }
         ShowTooltip("Hide mods without convertible textures.");
 
+        ImGui.SameLine();
+        if (ImGui.Checkbox("Hide mods larger after conversion", ref _filterInefficientMods))
+        {
+            _configService.Current.HideInefficientMods = _filterInefficientMods;
+            _configService.Save();
+        }
+        ShowTooltip("Hide mods marked as inefficient (larger when converted).");
 
         if (!_selectedCollectionId.HasValue)
         {
@@ -1624,6 +1666,10 @@ else
 
             // Skip mods that have no convertible textures if the filter is enabled
             if (_filterNonConvertibleMods && files.Count == 0)
+                continue;
+
+            // Skip mods marked as inefficient when the filter is enabled
+            if (_filterInefficientMods && IsModInefficient(mod))
                 continue;
 
             // Include mods even if no filtered files, when filter matches the mod, or filter is empty
@@ -1777,6 +1823,20 @@ else
                 ImGui.PopFont();
                 ImGui.SameLine();
                 ImGui.TextUnformatted(header);
+                ImGui.SameLine();
+                if (IsModInefficient(mod))
+                {
+                    ImGui.PushFont(UiBuilder.IconFont);
+                    ImGui.TextColored(ShrinkUColors.WarningLight, FontAwesomeIcon.ExclamationTriangle.ToIconString());
+                    ImGui.PopFont();
+                    if (ImGui.IsItemHovered())
+                        ImGui.SetTooltip("This mod becomes larger after conversion");
+                    ImGui.SameLine();
+                }
+                if (hasBackup && _cachedPerModSavings.TryGetValue(mod, out var noteStats2) && noteStats2 != null && noteStats2.OriginalBytes > 0 && noteStats2.CurrentBytes > noteStats2.OriginalBytes)
+                {
+                    ImGui.TextColored(ShrinkUColors.WarningLight, "(This mod is smaller when not converted)");
+                }
 
 
                 // Uncompressed and Compressed columns for mod row
@@ -1803,7 +1863,10 @@ else
                 ImGui.TableSetColumnIndex(2);
                 var modCurrentBytes = hasBackup ? (modStats?.CurrentBytes ?? 0) : 0; // force 0 when no backup
                 if (modCurrentBytes > 0)
-                    DrawRightAlignedSizeColored(modCurrentBytes, _compressedTextColor);
+                {
+                    var color = modCurrentBytes > modOriginalBytes ? ShrinkUColors.WarningLight : _compressedTextColor;
+                    DrawRightAlignedSizeColored(modCurrentBytes, color);
+                }
                 else
                     DrawRightAlignedTextColored("-", _compressedTextColor);
 
@@ -2027,7 +2090,12 @@ else
                 ImGui.TextUnformatted($"Total saved ({reduction.ToString("0.00")}%)");
                 ImGui.TableSetColumnIndex(2);
                 if (totalCompressed > 0)
-                    DrawRightAlignedSizeColored(totalCompressed, _compressedTextColor);
+                {
+                    var color = (totalUncompressed > 0 && totalCompressed > totalUncompressed)
+                        ? ShrinkUColors.WarningLight
+                        : _compressedTextColor;
+                    DrawRightAlignedSizeColored(totalCompressed, color);
+                }
                 else
                     DrawRightAlignedTextColored("-", _compressedTextColor);
                 ImGui.TableSetColumnIndex(3);
@@ -2346,6 +2414,17 @@ else
                 if (_excludedTagsNormalized.Contains(nt))
                     return true;
             }
+        }
+        return false;
+    }
+
+    private bool IsModInefficient(string mod)
+    {
+        var list = _configService.Current.InefficientMods ?? new List<string>();
+        foreach (var m in list)
+        {
+            if (string.Equals(m, mod, StringComparison.OrdinalIgnoreCase))
+                return true;
         }
         return false;
     }

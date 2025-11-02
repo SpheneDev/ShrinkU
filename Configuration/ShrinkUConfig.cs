@@ -42,6 +42,11 @@ public sealed class ShrinkUConfig : IPluginConfiguration
     // Control visibility of individual file rows in the overview table
     public bool ShowModFilesInOverview { get; set; } = false;
 
+    // Inefficient mods handling
+    public List<string> InefficientMods { get; set; } = new List<string>();
+    public bool HideInefficientMods { get; set; } = false;
+    public bool AutoRestoreInefficientMods { get; set; } = true;
+
     // First-run setup gating
     public bool FirstRunCompleted { get; set; } = false;
 }

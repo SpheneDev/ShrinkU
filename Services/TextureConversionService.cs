@@ -4,6 +4,7 @@ using System;
 using Penumbra.Api.Enums;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -126,6 +127,41 @@ public sealed class TextureConversionService : IDisposable
                 if (_cancelRequested || token.IsCancellationRequested)
                 {
                     break;
+                }
+
+                // After conversion: evaluate per-mod savings and auto-restore if conversion made it larger.
+                try
+                {
+                    var perMod = await _backupService.ComputePerModSavingsAsync().ConfigureAwait(false);
+                    if (perMod.TryGetValue(modName, out var stats) && stats != null && stats.ComparedFiles > 0 && stats.CurrentBytes > stats.OriginalBytes)
+                    {
+                        // Persist inefficient mod marker
+                        _configService.Current.InefficientMods ??= new List<string>();
+                        if (!_configService.Current.InefficientMods.Any(m => string.Equals(m, modName, StringComparison.OrdinalIgnoreCase)))
+                        {
+                            _configService.Current.InefficientMods.Add(modName);
+                            _configService.Save();
+                            _logger.LogDebug("Marked mod {modName} as inefficient (larger after conversion)", modName);
+                        }
+
+                        // Auto-restore latest backup for this mod if enabled
+                        if (_configService.Current.AutoRestoreInefficientMods)
+                        {
+                            _logger.LogDebug("Auto-restoring mod {modName} due to increased size after conversion", modName);
+                            try
+                            {
+                                await _backupService.RestoreLatestForModAsync(modName, _backupProgress, token).ConfigureAwait(false);
+                            }
+                            catch (Exception rex)
+                            {
+                                _logger.LogDebug(rex, "Auto-restore failed for mod {modName}", modName);
+                            }
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogDebug(ex, "Failed to compute per-mod savings for {modName}", modName);
                 }
 
                 // Yield between mods to keep UI responsive
