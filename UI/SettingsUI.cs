@@ -135,6 +135,7 @@ public sealed class SettingsUI : Window
                 ImGui.PushStyleColor(ImGuiCol.Button, ShrinkUColors.Accent);
                 ImGui.PushStyleColor(ImGuiCol.ButtonHovered, ShrinkUColors.AccentHovered);
                 ImGui.PushStyleColor(ImGuiCol.ButtonActive, ShrinkUColors.AccentActive);
+                ImGui.PushStyleColor(ImGuiCol.Text, ShrinkUColors.ButtonTextOnAccent);
                 var browseClicked = ImGui.Button("Browse...");
                 ShowTooltip("Choose where ShrinkU stores its backup files.");
                 if (browseClicked)
@@ -161,7 +162,7 @@ public sealed class SettingsUI : Window
                     }
                     catch { }
                 }
-                ImGui.PopStyleColor(3);
+                ImGui.PopStyleColor(4);
 
                 ImGui.EndTabItem();
             }

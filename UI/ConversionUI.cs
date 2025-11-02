@@ -24,6 +24,7 @@ public sealed class ConversionUI : Window, IDisposable
     private readonly ShrinkUConfigService _configService;
     private readonly TextureConversionService _conversionService;
     private readonly TextureBackupService _backupService;
+    private readonly Action? _openSettings;
 
     private string _scanFilter = string.Empty;
     private float _leftPanelWidthRatio = 0.45f;
@@ -128,13 +129,14 @@ public sealed class ConversionUI : Window, IDisposable
     private readonly Action<Penumbra.Api.Enums.ModSettingChange, Guid, string, bool> _onPenumbraModSettingChanged;
     private readonly Action _onExcludedTagsUpdated;
 
-    public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureConversionService conversionService, TextureBackupService backupService)
+public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureConversionService conversionService, TextureBackupService backupService, Action? openSettings = null)
         : base("ShrinkU###ShrinkUConversionUI")
     {
         _logger = logger;
         _configService = configService;
         _conversionService = conversionService;
         _backupService = backupService;
+        _openSettings = openSettings;
 
         // Diagnostic marker to confirm updated ConversionUI is loaded and running
         _logger.LogDebug("ConversionUI initialized: DIAG-v2");
@@ -641,6 +643,18 @@ public sealed class ConversionUI : Window, IDisposable
             catch { }
         }
         ShowTooltip("Open the current backup folder in Explorer.");
+        ImGui.SameLine();
+        ImGui.PushStyleColor(ImGuiCol.Button, ShrinkUColors.Accent);
+        ImGui.PushStyleColor(ImGuiCol.ButtonHovered, ShrinkUColors.AccentHovered);
+        ImGui.PushStyleColor(ImGuiCol.ButtonActive, ShrinkUColors.AccentActive);
+        ImGui.PushStyleColor(ImGuiCol.Text, ShrinkUColors.ButtonTextOnAccent);
+        var openSettingsClicked = ImGui.Button("Settings");
+        ImGui.PopStyleColor(4);
+        ShowTooltip("Open ShrinkU Settings window.");
+        if (openSettingsClicked)
+        {
+            try { _openSettings?.Invoke(); } catch { }
+        }
     }
 
     // Nested folder tree for Table View
@@ -951,15 +965,17 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
 
                         if (hasBackup)
                         {
-                            ImGui.PushStyleColor(ImGuiCol.Button, new Vector4(0.90f, 0.65f, 0.25f, 1f));
-                            ImGui.PushStyleColor(ImGuiCol.ButtonHovered, ShrinkUColors.AccentHovered);
-                            ImGui.PushStyleColor(ImGuiCol.ButtonActive, ShrinkUColors.AccentActive);
+                            ImGui.PushStyleColor(ImGuiCol.Button, ShrinkUColors.RestoreButton);
+                            ImGui.PushStyleColor(ImGuiCol.ButtonHovered, ShrinkUColors.RestoreButtonHovered);
+                            ImGui.PushStyleColor(ImGuiCol.ButtonActive, ShrinkUColors.RestoreButtonActive);
+                            ImGui.PushStyleColor(ImGuiCol.Text, ShrinkUColors.ButtonTextOnAccent);
                         }
                         else
                         {
-                            ImGui.PushStyleColor(ImGuiCol.Button, new Vector4(0.25f, 0.80f, 0.35f, 1f));
-                            ImGui.PushStyleColor(ImGuiCol.ButtonHovered, ShrinkUColors.AccentHovered);
-                            ImGui.PushStyleColor(ImGuiCol.ButtonActive, ShrinkUColors.AccentActive);
+                            ImGui.PushStyleColor(ImGuiCol.Button, ShrinkUColors.ConvertButton);
+                            ImGui.PushStyleColor(ImGuiCol.ButtonHovered, ShrinkUColors.ConvertButtonHovered);
+                            ImGui.PushStyleColor(ImGuiCol.ButtonActive, ShrinkUColors.ConvertButtonActive);
+                            ImGui.PushStyleColor(ImGuiCol.Text, ShrinkUColors.ButtonTextOnAccent);
                         }
 
                         ImGui.BeginDisabled(excluded);
@@ -1007,6 +1023,7 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                             }
                         }
                         // Tooltip for action button (Convert/Restore)
+                        ImGui.PopStyleColor(1);
                         if (excluded && ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
                             ImGui.SetTooltip("Mod excluded by tags");
                         else
@@ -1881,15 +1898,17 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                     // Distinguish button colors for Convert vs Restore
                     if (hasBackup)
                     {
-                        ImGui.PushStyleColor(ImGuiCol.Button, new Vector4(0.90f, 0.65f, 0.25f, 1f));
-                        ImGui.PushStyleColor(ImGuiCol.ButtonHovered, ShrinkUColors.AccentHovered);
-                        ImGui.PushStyleColor(ImGuiCol.ButtonActive, ShrinkUColors.AccentActive);
+                        ImGui.PushStyleColor(ImGuiCol.Button, ShrinkUColors.RestoreButton);
+                        ImGui.PushStyleColor(ImGuiCol.ButtonHovered, ShrinkUColors.RestoreButtonHovered);
+                        ImGui.PushStyleColor(ImGuiCol.ButtonActive, ShrinkUColors.RestoreButtonActive);
+                        ImGui.PushStyleColor(ImGuiCol.Text, ShrinkUColors.ButtonTextOnAccent);
                     }
                     else
                     {
-                        ImGui.PushStyleColor(ImGuiCol.Button, new Vector4(0.25f, 0.80f, 0.35f, 1f));
-                        ImGui.PushStyleColor(ImGuiCol.ButtonHovered, ShrinkUColors.AccentHovered);
-                        ImGui.PushStyleColor(ImGuiCol.ButtonActive, ShrinkUColors.AccentActive);
+                        ImGui.PushStyleColor(ImGuiCol.Button, ShrinkUColors.ConvertButton);
+                        ImGui.PushStyleColor(ImGuiCol.ButtonHovered, ShrinkUColors.ConvertButtonHovered);
+                        ImGui.PushStyleColor(ImGuiCol.ButtonActive, ShrinkUColors.ConvertButtonActive);
+                        ImGui.PushStyleColor(ImGuiCol.Text, ShrinkUColors.ButtonTextOnAccent);
                     }
 
                     ImGui.BeginDisabled(excluded);
@@ -1938,6 +1957,7 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                                 });
                         }
                     }
+                    ImGui.PopStyleColor(1);
                     if (excluded && ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
                         ImGui.SetTooltip("Mod excluded by tags");
                     else
@@ -2121,6 +2141,7 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
         ImGui.PushStyleColor(ImGuiCol.Button, ShrinkUColors.Accent);
         ImGui.PushStyleColor(ImGuiCol.ButtonHovered, ShrinkUColors.AccentHovered);
         ImGui.PushStyleColor(ImGuiCol.ButtonActive, ShrinkUColors.AccentActive);
+        ImGui.PushStyleColor(ImGuiCol.Text, ShrinkUColors.ButtonTextOnAccent);
         if (ImGui.Button("Backup and Convert"))
         {
             _running = true;
@@ -2131,7 +2152,7 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
             _ = _conversionService.StartConversionAsync(toConvert);
         }
         ImGui.EndDisabled();
-        ImGui.PopStyleColor(3);
+        ImGui.PopStyleColor(4);
 
         if (ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
         {
@@ -2150,6 +2171,7 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
         ImGui.PushStyleColor(ImGuiCol.Button, ShrinkUColors.Accent);
         ImGui.PushStyleColor(ImGuiCol.ButtonHovered, ShrinkUColors.AccentHovered);
         ImGui.PushStyleColor(ImGuiCol.ButtonActive, ShrinkUColors.AccentActive);
+        ImGui.PushStyleColor(ImGuiCol.Text, ShrinkUColors.ButtonTextOnAccent);
         if (ImGui.Button("Restore Backups"))
         {
             _running = true;
@@ -2204,7 +2226,7 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                 _currentRestoreModTotal = 0;
             });
         }
-        ImGui.PopStyleColor(3);
+        ImGui.PopStyleColor(4);
         ImGui.EndDisabled();
 
         if (!canRestore && ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))

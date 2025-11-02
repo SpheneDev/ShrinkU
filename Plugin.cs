@@ -42,8 +42,8 @@ public sealed class Plugin : IDalamudPlugin
         _conversionService = new TextureConversionService(_logger, _penumbraIpc, _backupService, _configService);
 
         // Create UI windows and register
-        _conversionUi = new ConversionUI(_logger, _configService, _conversionService, _backupService);
         _settingsUi = new SettingsUI(_logger, _configService, _conversionService);
+        _conversionUi = new ConversionUI(_logger, _configService, _conversionService, _backupService, () => _settingsUi.IsOpen = true);
         _firstRunUi = new FirstRunSetupUI(_logger, _configService)
         {
             OnCompleted = () =>

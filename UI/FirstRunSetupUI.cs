@@ -72,6 +72,7 @@ public sealed class FirstRunSetupUI : Window
         ImGui.PushStyleColor(ImGuiCol.Button, ShrinkUColors.Accent);
         ImGui.PushStyleColor(ImGuiCol.ButtonHovered, ShrinkUColors.AccentHovered);
         ImGui.PushStyleColor(ImGuiCol.ButtonActive, ShrinkUColors.AccentActive);
+        ImGui.PushStyleColor(ImGuiCol.Text, ShrinkUColors.ButtonTextOnAccent);
         var browseClicked = ImGui.Button("Browse...");
         ShowTooltip("Choose the folder where backups will be stored.");
         if (browseClicked)
@@ -90,7 +91,7 @@ public sealed class FirstRunSetupUI : Window
         }
         if (!canOpen)
             ImGui.EndDisabled();
-        ImGui.PopStyleColor(3);
+        ImGui.PopStyleColor(4);
 
         ImGui.Spacing();
         bool canComplete = DirectoryExistsSafe(_selectedFolder);
@@ -100,6 +101,7 @@ public sealed class FirstRunSetupUI : Window
         ImGui.PushStyleColor(ImGuiCol.Button, ShrinkUColors.Accent);
         ImGui.PushStyleColor(ImGuiCol.ButtonHovered, ShrinkUColors.AccentHovered);
         ImGui.PushStyleColor(ImGuiCol.ButtonActive, ShrinkUColors.AccentActive);
+        ImGui.PushStyleColor(ImGuiCol.Text, ShrinkUColors.ButtonTextOnAccent);
         var completeClicked = ImGui.Button("Complete Setup");
         ShowTooltip("Finish setup and enable the plugin.");
         if (completeClicked)
