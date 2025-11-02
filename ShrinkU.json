@@ -1,0 +1,13 @@
+{
+  "Author": "ShrinkU",
+  "Name": "ShrinkU",
+  "Punchline": "Convert Penumbra textures to BC7 with backups.",
+  "Description": "Standalone texture conversion plugin.",
+  "InternalName": "shrinku",
+  "ApplicableVersion": "any",
+  "Tags": [
+    "textures",
+    "conversion",
+    "penumbra"
+  ]
+}
