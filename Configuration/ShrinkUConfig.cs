@@ -21,7 +21,8 @@ public sealed class ShrinkUConfig : IPluginConfiguration
     public bool DeleteOriginalBackupsAfterCompression { get; set; } = true;
     public bool StrictPerModRestore { get; set; } = true;
     // Conversion filters
-    public List<string> ExcludedModTags { get; set; } = new List<string>();
+    public List<string> ExcludedModTags { get; set; } = new List<string> { "UI" };
+    public List<string> KnownModTags { get; set; } = new List<string>();
     
     // Backup folder configuration
     public string BackupFolderPath { get; set; } = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "ShrinkU", "Backups");

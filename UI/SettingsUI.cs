@@ -1,4 +1,5 @@
 using Dalamud.Bindings.ImGui;
+using Dalamud.Interface;
 using Dalamud.Interface.Windowing;
 using Microsoft.Extensions.Logging;
 using ShrinkU.Configuration;
@@ -21,6 +22,7 @@ public sealed class SettingsUI : Window
 
     // Tag filtering input state (persisted via config on Apply)
     private string _excludedTagsInput = string.Empty;
+    private List<string> _excludedTagsEditable = new();
 
     public SettingsUI(ILogger logger, ShrinkUConfigService configService, TextureConversionService conversionService)
         : base("ShrinkU Settings###ShrinkUSettingsUI")
@@ -35,9 +37,14 @@ public sealed class SettingsUI : Window
             MaximumSize = new Vector2(1920, 1080),
         };
 
-        // Initialize excluded tags input from config
+        // Initialize excluded tags list from config; leave input empty for new additions only
         var savedTags = _configService.Current.ExcludedModTags ?? new List<string>();
-        _excludedTagsInput = string.Join(", ", savedTags);
+        _excludedTagsInput = string.Empty;
+        _excludedTagsEditable = savedTags
+            .Select(NormalizeTag)
+            .Where(s => s.Length > 0)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
     }
 
     // Helper to show a tooltip when the last item is hovered (also when disabled)
@@ -142,23 +149,105 @@ public sealed class SettingsUI : Window
                 ImGui.Text("Excluded tags:");
                 ImGui.SameLine();
                 ImGui.SetNextItemWidth(220f);
-                ImGui.InputTextWithHint("##excludedTagsSettings", "comma-separated", ref _excludedTagsInput, 256);
-                ShowTooltip("Enter comma-separated tags to exclude matching mods.");
-                ImGui.SameLine();
-                var applyClicked = ImGui.Button("Apply");
-                ShowTooltip("Save and apply excluded tags to future scans.");
-                if (applyClicked)
+                // Add tag on Enter and show it below in the list
+                var enterAdd = ImGui.InputTextWithHint("##excludedTagsAdd", "type tag and press Enter", ref _excludedTagsInput, 128, ImGuiInputTextFlags.EnterReturnsTrue);
+                ShowTooltip("Type a tag and press Enter to add it.");
+                if (enterAdd)
                 {
-                    var tags = _excludedTagsInput
-                        .Split(new[] {','}, StringSplitOptions.RemoveEmptyEntries)
-                        .Select(NormalizeTag)
-                        .Where(s => s.Length > 0)
-                        .Distinct(StringComparer.OrdinalIgnoreCase)
-                        .ToList();
-
-                    _configService.Current.ExcludedModTags = tags;
-                    _configService.Save();
+                    var tag = NormalizeTag(_excludedTagsInput);
+                    if (tag.Length > 0 && !_excludedTagsEditable.Contains(tag, StringComparer.OrdinalIgnoreCase))
+                    {
+                        _excludedTagsEditable.Add(tag);
+                        // Persist immediately and notify listeners
+                        var tags = _excludedTagsEditable
+                            .Select(NormalizeTag)
+                            .Where(s => s.Length > 0)
+                            .Distinct(StringComparer.OrdinalIgnoreCase)
+                            .ToList();
+                        _configService.UpdateExcludedTags(tags);
+                    }
+                    _excludedTagsInput = string.Empty;
                 }
+
+                // Show current excluded tags as chips with a trailing X to remove, wrapping inside a framed field
+                ImGui.Spacing();
+                ImGui.Text("Current excluded:");
+                var fieldSize = new Vector2(-1, 100f);
+                ImGui.BeginChild("##ExcludedTagsField", fieldSize, true);
+                var style = ImGui.GetStyle();
+                var itemSpacingX = style.ItemSpacing.X;
+                var chipPaddingX = 6f;
+                var chipPaddingY = 4f;
+                var chipRounding = 4f;
+                var chipSpacingX = itemSpacingX;
+                for (int i = 0; i < _excludedTagsEditable.Count; i++)
+                {
+                    var tag = _excludedTagsEditable[i];
+                    // Measure chip
+                    var textSize = ImGui.CalcTextSize(tag);
+                    var iconSize = ImGui.CalcTextSize(FontAwesomeIcon.Times.ToIconString());
+                    var xButtonWidth = iconSize.X + 6f;
+                    var chipHeight = ImGui.GetTextLineHeight() + (chipPaddingY * 2f);
+                    var chipWidth = textSize.X + xButtonWidth + (chipPaddingX * 2f) + 2f;
+
+                    // Wrap to next line if not enough width
+                    var availX = ImGui.GetContentRegionAvail().X;
+                    if (chipWidth > availX && ImGui.GetCursorPosX() > 0f)
+                    {
+                        ImGui.NewLine();
+                    }
+
+                    var startLocal = ImGui.GetCursorPos();
+                    var startScreen = ImGui.GetCursorScreenPos();
+                    var endScreen = new Vector2(startScreen.X + chipWidth, startScreen.Y + chipHeight);
+
+                    // Draw chip background
+                    var drawList = ImGui.GetWindowDrawList();
+                    var bgCol = ImGui.GetColorU32(ImGuiCol.FrameBg);
+                    drawList.AddRectFilled(startScreen, endScreen, bgCol, chipRounding);
+                    var borderCol = ImGui.GetColorU32(ImGuiCol.Border);
+                    drawList.AddRect(startScreen, endScreen, borderCol, chipRounding);
+
+                    // Calculate vertical centering for both text and button
+                    var textHeight = ImGui.GetTextLineHeight();
+                    var verticalCenter = startLocal.Y + (chipHeight - textHeight) * 0.5f;
+
+                    // Draw tag text
+                    ImGui.SetCursorPos(new Vector2(startLocal.X + chipPaddingX, verticalCenter));
+                    ImGui.TextUnformatted(tag);
+
+                    // Draw remove X button inside the chip
+                    var xPosLocal = new Vector2(startLocal.X + chipWidth - chipPaddingX - (xButtonWidth), verticalCenter);
+                    ImGui.SetCursorPos(xPosLocal);
+                    
+                    ImGui.PushFont(UiBuilder.IconFont);
+                    ImGui.PushStyleVar(ImGuiStyleVar.FramePadding, new Vector2(2f, 2f)); // Minimal button padding
+                    if (ImGui.SmallButton($"{FontAwesomeIcon.Times.ToIconString()}##remove-chip-{i}"))
+                    {
+                        ImGui.PopStyleVar(); 
+                        ImGui.PopFont();
+                        _excludedTagsEditable.RemoveAt(i);
+                        i--; // adjust index after removal
+                        // Persist immediately and notify listeners
+                        var tags = _excludedTagsEditable
+                            .Select(NormalizeTag)
+                            .Where(s => s.Length > 0)
+                            .Distinct(StringComparer.OrdinalIgnoreCase)
+                            .ToList();
+                        _configService.UpdateExcludedTags(tags);
+                        // After removal, continue to next chip position
+                        ImGui.SetCursorPos(new Vector2(startLocal.X + chipWidth + chipSpacingX, startLocal.Y));
+                        continue;
+                    }
+                    ImGui.PopStyleVar();
+                    ImGui.PopFont();
+
+                    // Advance cursor to next chip position
+                    ImGui.SetCursorPos(new Vector2(startLocal.X + chipWidth + chipSpacingX, startLocal.Y));
+                }
+                ImGui.EndChild();
+
+                // Apply button removed: changes are saved immediately on add/remove
                 ImGui.EndTabItem();
             }
 

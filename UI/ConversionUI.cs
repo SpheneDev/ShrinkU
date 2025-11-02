@@ -119,6 +119,7 @@ public sealed class ConversionUI : Window, IDisposable
     private readonly Action<string> _onPenumbraModAdded;
     private readonly Action<string> _onPenumbraModDeleted;
     private readonly Action<Penumbra.Api.Enums.ModSettingChange, Guid, string, bool> _onPenumbraModSettingChanged;
+    private readonly Action _onExcludedTagsUpdated;
 
     public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureConversionService conversionService, TextureBackupService backupService)
         : base("ShrinkU###ShrinkUConversionUI")
@@ -344,6 +345,21 @@ public sealed class ConversionUI : Window, IDisposable
         _excludedTagsInput = string.Join(", ", savedTags);
         _excludedTagsNormalized = new HashSet<string>(savedTags.Select(NormalizeTag).Where(s => s.Length > 0), StringComparer.OrdinalIgnoreCase);
 
+        // Subscribe to excluded tags updates to refresh UI immediately
+        _onExcludedTagsUpdated = () =>
+        {
+            try
+            {
+                var tags = _configService.Current.ExcludedModTags ?? new List<string>();
+                _excludedTagsInput = string.Join(", ", tags);
+                _excludedTagsNormalized = new HashSet<string>(tags.Select(NormalizeTag).Where(s => s.Length > 0), StringComparer.OrdinalIgnoreCase);
+                _needsUIRefresh = true;
+                RefreshScanResults(false, "excluded-tags-updated");
+            }
+            catch { }
+        };
+        _configService.OnExcludedTagsUpdated += _onExcludedTagsUpdated;
+
         // Initialize persisted UI settings from config
         _useFolderStructure = _configService.Current.UseFolderStructure;
         _filterPenumbraUsedOnly = _configService.Current.FilterPenumbraUsedOnly;
@@ -447,6 +463,7 @@ public sealed class ConversionUI : Window, IDisposable
         try { _conversionService.OnPenumbraModAdded -= _onPenumbraModAdded; } catch { }
         try { _conversionService.OnPenumbraModDeleted -= _onPenumbraModDeleted; } catch { }
         try { _conversionService.OnPenumbraModSettingChanged -= _onPenumbraModSettingChanged; } catch { }
+        try { _configService.OnExcludedTagsUpdated -= _onExcludedTagsUpdated; } catch { }
 
         // Cancel and dispose any outstanding debounce or restore operations
         try { _modsChangedDebounceCts?.Cancel(); } catch { }
@@ -1044,7 +1061,33 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                     if (names != null)
                         _modDisplayNames = names;
                     if (tags != null)
+                    {
                         _modTags = tags.ToDictionary(kv => kv.Key, kv => (IReadOnlyList<string>)kv.Value, StringComparer.OrdinalIgnoreCase);
+                        try
+                        {
+                            // Persistently expand known tags list with newly discovered tags
+                            var existingKnown = _configService.Current.KnownModTags ?? new List<string>();
+                            var normalizedExisting = new HashSet<string>(existingKnown.Select(NormalizeTag).Where(s => s.Length > 0), StringComparer.OrdinalIgnoreCase);
+                            foreach (var kv in _modTags)
+                            {
+                                var tagList = kv.Value;
+                                if (tagList == null) continue;
+                                foreach (var t in tagList)
+                                {
+                                    var nt = NormalizeTag(t);
+                                    if (nt.Length == 0) continue;
+                                    if (!normalizedExisting.Contains(nt))
+                                    {
+                                        existingKnown.Add(nt);
+                                        normalizedExisting.Add(nt);
+                                    }
+                                }
+                            }
+                            _configService.Current.KnownModTags = existingKnown;
+                            _configService.Save();
+                        }
+                        catch { }
+                    }
                     if (folders != null)
                     {
                         foreach (var folder in folders)
@@ -1112,12 +1155,12 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
 
                 _uiThreadActions.Enqueue(() =>
                 {
-                    _scannedByMod.Clear();
-                    _selectedTextures.Clear();
-                    _texturesToConvert.Clear();
-                    _fileSizeCache.Clear();
                     if (grouped != null)
                     {
+                        _scannedByMod.Clear();
+                        _selectedTextures.Clear();
+                        _texturesToConvert.Clear();
+                        _fileSizeCache.Clear();
                         foreach (var mod in grouped)
                         {
                             _scannedByMod[mod.Key] = mod.Value;
@@ -1127,7 +1170,7 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                     }
                     else
                     {
-                        // Ensure known folders exist even when skipping heavy scan
+                        // Preserve existing scan results when skipping heavy scan; only ensure folder keys exist
                         if (folders != null)
                         {
                             foreach (var folder in folders)
@@ -1136,7 +1179,7 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                                     _scannedByMod[folder] = new List<string>();
                             }
                         }
-                        _logger.LogDebug("UI state updated (DIAG-v3): origin={origin} heavy scan skipped", origin);
+                        _logger.LogDebug("UI state updated (DIAG-v3): origin={origin} heavy scan skipped; preserving previous results", origin);
                     }
 
                     if (grouped != null)
@@ -1145,7 +1188,33 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                     if (names != null)
                         _modDisplayNames = names;
                     if (tags != null)
+                    {
                         _modTags = tags.ToDictionary(kv => kv.Key, kv => (IReadOnlyList<string>)kv.Value, StringComparer.OrdinalIgnoreCase);
+                        try
+                        {
+                            // Persistently expand known tags list with newly discovered tags
+                            var existingKnown = _configService.Current.KnownModTags ?? new List<string>();
+                            var normalizedExisting = new HashSet<string>(existingKnown.Select(NormalizeTag).Where(s => s.Length > 0), StringComparer.OrdinalIgnoreCase);
+                            foreach (var kv in _modTags)
+                            {
+                                var tagList = kv.Value;
+                                if (tagList == null) continue;
+                                foreach (var t in tagList)
+                                {
+                                    var nt = NormalizeTag(t);
+                                    if (nt.Length == 0) continue;
+                                    if (!normalizedExisting.Contains(nt))
+                                    {
+                                        existingKnown.Add(nt);
+                                        normalizedExisting.Add(nt);
+                                    }
+                                }
+                            }
+                            _configService.Current.KnownModTags = existingKnown;
+                            _configService.Save();
+                        }
+                        catch { }
+                    }
                     if (paths != null)
                         _modPaths = paths;
                     if (folders != null)
