@@ -82,6 +82,14 @@ public sealed class TextureBackupService
         public int MissingCurrentFiles { get; set; }
     }
 
+    // Per-mod savings statistics DTO
+    public sealed class ModSavingsStats
+    {
+        public long OriginalBytes { get; set; }
+        public long CurrentBytes { get; set; }
+        public int ComparedFiles { get; set; }
+    }
+
     // Resolve absolute path to a mod directory from its folder name
     public string? GetModAbsolutePath(string modFolder)
     {
@@ -468,6 +476,109 @@ public sealed class TextureBackupService
         return stats;
     }
 
+    // Compute per-mod savings stats (uncompressed vs current sizes per mod)
+    public async Task<Dictionary<string, ModSavingsStats>> ComputePerModSavingsAsync()
+    {
+        var result = new Dictionary<string, ModSavingsStats>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            var overview = await GetBackupOverviewAsync().ConfigureAwait(false);
+            if (overview.Count == 0)
+                return result;
+
+            // Track processed keys to avoid double counting across sessions
+            var processed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var session in overview.OrderByDescending(s => s.CreatedUtc))
+            {
+                foreach (var entry in session.Entries)
+                {
+                    // Key by prefixed path when available to remain stable across relocations
+                    var key = string.IsNullOrEmpty(entry.PrefixedOriginalPath) ? entry.OriginalPath : entry.PrefixedOriginalPath;
+                    if (string.IsNullOrWhiteSpace(key))
+                        continue;
+                    if (!processed.Add(key))
+                        continue;
+
+                    // Resolve which mod this entry belongs to
+                    var modFolder = entry.ModFolderName;
+                    if (string.IsNullOrWhiteSpace(modFolder) && !string.IsNullOrWhiteSpace(entry.PrefixedOriginalPath))
+                        modFolder = ExtractModFolderName(entry.PrefixedOriginalPath);
+                    if (string.IsNullOrWhiteSpace(modFolder))
+                        continue; // skip entries we cannot attribute to a mod
+
+                    long backupBytes = 0L;
+                    try
+                    {
+                        if (session.IsZip)
+                        {
+                            using var za = ZipFile.OpenRead(session.SourcePath);
+                            var zipEntry = za.Entries.FirstOrDefault(e => string.Equals(e.Name, entry.BackupFileName, StringComparison.OrdinalIgnoreCase));
+                            if (zipEntry == null)
+                            {
+                                zipEntry = za.Entries.FirstOrDefault(e => string.Equals(e.FullName, entry.BackupFileName, StringComparison.OrdinalIgnoreCase)
+                                                                        || e.FullName.EndsWith($"/{entry.BackupFileName}", StringComparison.OrdinalIgnoreCase)
+                                                                        || e.FullName.EndsWith($"\\{entry.BackupFileName}", StringComparison.OrdinalIgnoreCase));
+                            }
+                            if (zipEntry != null)
+                                backupBytes = zipEntry.Length;
+                        }
+                        else
+                        {
+                            var direct = Path.Combine(session.SourcePath, entry.BackupFileName);
+                            var sub = !string.IsNullOrEmpty(entry.ModFolderName)
+                                ? Path.Combine(session.SourcePath, entry.ModFolderName, entry.BackupFileName)
+                                : direct;
+                            var candidate = File.Exists(direct) ? direct : sub;
+                            if (File.Exists(candidate))
+                            {
+                                var fi = new FileInfo(candidate);
+                                backupBytes = fi.Length;
+                            }
+                        }
+                    }
+                    catch
+                    {
+                        // Skip backup size errors
+                    }
+
+                    long currentBytes = 0L;
+                    try
+                    {
+                        var currentPath = !string.IsNullOrEmpty(entry.PrefixedOriginalPath)
+                            ? ResolvePrefixedPath(entry.PrefixedOriginalPath)
+                            : entry.OriginalPath;
+                        if (!string.IsNullOrWhiteSpace(currentPath) && File.Exists(currentPath))
+                        {
+                            var fi = new FileInfo(currentPath);
+                            currentBytes = fi.Length;
+                        }
+                    }
+                    catch
+                    {
+                        // Ignore current size errors per entry
+                    }
+
+                    if (backupBytes > 0)
+                    {
+                        if (!result.TryGetValue(modFolder, out var modStats))
+                        {
+                            modStats = new ModSavingsStats();
+                            result[modFolder] = modStats;
+                        }
+                        modStats.OriginalBytes += backupBytes;
+                        modStats.CurrentBytes += currentBytes;
+                        modStats.ComparedFiles += 1;
+                    }
+                }
+            }
+        }
+        catch
+        {
+            // Swallow to keep UI resilient
+        }
+        return result;
+    }
+
     public Task<bool> HasBackupForModAsync(string modFolderName)
     {
         try
@@ -500,20 +611,20 @@ public sealed class TextureBackupService
         }
     }
 
-    public async Task RestoreLatestForModAsync(string modFolderName, IProgress<(string, int, int)>? progress, CancellationToken token)
+    public async Task<bool> RestoreLatestForModAsync(string modFolderName, IProgress<(string, int, int)>? progress, CancellationToken token)
     {
         try
         {
             var backupDirectory = _configService.Current.BackupFolderPath;
-            if (!Directory.Exists(backupDirectory)) return;
+            if (!Directory.Exists(backupDirectory)) return false;
             var modDir = Path.Combine(backupDirectory, modFolderName);
             if (Directory.Exists(modDir))
             {
                 var latestZip = Directory.EnumerateFiles(modDir, "backup_*.zip").OrderByDescending(f => f).FirstOrDefault();
                 if (!string.IsNullOrEmpty(latestZip))
                 {
-                    await RestoreFromZipAsync(latestZip, progress, token).ConfigureAwait(false);
-                    return;
+                    var zipSuccess = await RestoreFromZipAsync(latestZip, progress, token).ConfigureAwait(false);
+                    return zipSuccess;
                 }
             }
 
@@ -525,12 +636,13 @@ public sealed class TextureBackupService
                 var manifestPath = Path.Combine(modSub, "manifest.json");
                 if (Directory.Exists(modSub) && File.Exists(manifestPath))
                 {
-                    await RestoreFromSessionAsync(modSub, progress, token).ConfigureAwait(false);
-                    return;
+                    var sessionSuccess = await RestoreFromSessionAsync(modSub, progress, token).ConfigureAwait(false);
+                    return sessionSuccess;
                 }
             }
         }
-        catch { }
+        catch { return false; }
+        return false;
     }
 
     public async Task RestoreEntryAsync(BackupSessionInfo session, BackupEntryInfo entry, IProgress<(string, int, int)>? progress, CancellationToken token)
@@ -667,7 +779,7 @@ public sealed class TextureBackupService
         }
     }
 
-    public async Task RestoreFromZipAsync(string zipPath, IProgress<(string, int, int)>? progress, CancellationToken token)
+    public async Task<bool> RestoreFromZipAsync(string zipPath, IProgress<(string, int, int)>? progress, CancellationToken token)
     {
         var tempDir = Path.Combine(Path.GetTempPath(), "ShrinkU", "restore", Path.GetFileNameWithoutExtension(zipPath));
         try
@@ -695,6 +807,7 @@ public sealed class TextureBackupService
         {
             try { File.Delete(zipPath); } catch { }
         }
+        return success;
     }
 
     // Allow callers (UI) to trigger a redraw after all restores have finished
@@ -898,7 +1011,7 @@ public sealed class TextureBackupService
             if (token.IsCancellationRequested) break;
             try
             {
-                await RestoreFromZipAsync(zip, progress, token).ConfigureAwait(false);
+                _ = await RestoreFromZipAsync(zip, progress, token).ConfigureAwait(false);
             }
             catch { }
         }

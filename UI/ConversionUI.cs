@@ -1,4 +1,4 @@
-using Dalamud.Bindings.ImGui;
+﻿using Dalamud.Bindings.ImGui;
 using Dalamud.Interface;
 using Dalamud.Interface.Windowing;
 using Microsoft.Extensions.Logging;
@@ -32,7 +32,9 @@ public sealed class ConversionUI : Window, IDisposable
     private bool _leftWidthDirty = false;
     private float _scannedFirstColWidth = 28f;
     private float _scannedSizeColWidth = 85f;
+    private float _scannedCompressedColWidth = 85f;
     private float _scannedActionColWidth = 60f;
+    private readonly Vector4 _compressedTextColor = new Vector4(0.60f, 0.95f, 0.65f, 1f);
     private ScanSortKind _scanSortKind = ScanSortKind.ModName;
     private bool _scanSortAsc = true;
     private bool _initialScanQueued = false;
@@ -82,6 +84,8 @@ public sealed class ConversionUI : Window, IDisposable
     private Task<TextureBackupService.BackupSavingsStats>? _savingsInfoTask = null;
     private DateTime _lastSavingsInfoUpdate = DateTime.MinValue;
     private TextureBackupService.BackupSavingsStats _cachedSavingsInfo = new();
+    private Task<Dictionary<string, TextureBackupService.ModSavingsStats>>? _perModSavingsTask = null;
+    private Dictionary<string, TextureBackupService.ModSavingsStats> _cachedPerModSavings = new(StringComparer.OrdinalIgnoreCase);
 
     private readonly Dictionary<string, string[]> _texturesToConvert = new(StringComparer.Ordinal);
     private readonly Dictionary<string, List<string>> _scannedByMod = new(StringComparer.OrdinalIgnoreCase);
@@ -100,6 +104,8 @@ public sealed class ConversionUI : Window, IDisposable
     private string _currentRestoreMod = string.Empty;
     private int _currentRestoreModIndex = 0;
     private int _currentRestoreModTotal = 0;
+    private bool _restoreAfterCancel = false;
+    private string _cancelTargetMod = string.Empty;
     
     // UI refresh flag to force ImGui redraw after async data updates
     private volatile bool _needsUIRefresh = false;
@@ -146,8 +152,69 @@ public sealed class ConversionUI : Window, IDisposable
 
         _onConversionCompleted = () =>
         {
-            // Ensure action buttons reflect backup availability immediately after conversion
+            // If user cancelled conversion, immediately restore the current mod with validation
+            if (_restoreAfterCancel && !string.IsNullOrEmpty(_cancelTargetMod))
+            {
+                var target = _cancelTargetMod;
+                _logger.LogDebug("Cancel detected; attempting restore of current mod: {mod}", target);
+                var progress = new Progress<(string, int, int)>(e =>
+                {
+                    _currentTexture = e.Item1;
+                    _backupIndex = e.Item2;
+                    _backupTotal = e.Item3;
+                    _currentRestoreModIndex = e.Item2;
+                    _currentRestoreModTotal = e.Item3;
+                });
+                try { _restoreCancellationTokenSource?.Dispose(); } catch { }
+                _restoreCancellationTokenSource = new CancellationTokenSource();
+                var restoreToken = _restoreCancellationTokenSource.Token;
+
+                _running = true;
+                _currentRestoreMod = target;
+                _currentRestoreModIndex = 0;
+                _currentRestoreModTotal = 0;
+
+                _ = _backupService.RestoreLatestForModAsync(target, progress, restoreToken)
+                    .ContinueWith(t =>
+                    {
+                        var success = t.Status == TaskStatus.RanToCompletion && t.Result;
+                        _logger.LogDebug(success
+                            ? "Restore after cancel succeeded for {mod}"
+                            : "Restore after cancel failed for {mod}", target);
+                        if (success)
+                        {
+                            try { _backupService.RedrawPlayer(); } catch { }
+                        }
+                        RefreshScanResults(true, success ? "restore-after-cancel-success" : "restore-after-cancel-fail");
+                        TriggerMetricsRefresh();
+                        _ = _backupService.HasBackupForModAsync(target).ContinueWith(bt =>
+                        {
+                            if (bt.Status == TaskStatus.RanToCompletion)
+                                _modsWithBackupCache[target] = bt.Result;
+                        });
+                        _running = false;
+                        try { _restoreCancellationTokenSource?.Dispose(); } catch { }
+                        _restoreCancellationTokenSource = null;
+                        _currentRestoreMod = string.Empty;
+                        _currentRestoreModIndex = 0;
+                        _currentRestoreModTotal = 0;
+                        _cancelTargetMod = string.Empty;
+                        _restoreAfterCancel = false;
+                    }, TaskScheduler.Default);
+                return;
+            }
+
+            // Normal completion path: recompute savings and refresh UI
             _modsWithBackupCache.Clear();
+            _perModSavingsTask = _backupService.ComputePerModSavingsAsync();
+            _perModSavingsTask.ContinueWith(t =>
+            {
+                if (t.Status == TaskStatus.RanToCompletion && t.Result != null)
+                {
+                    _cachedPerModSavings = t.Result;
+                    _needsUIRefresh = true;
+                }
+            }, TaskScheduler.Default);
             _logger.LogDebug("Heavy scan triggered: conversion completed");
             RefreshScanResults(true, "conversion-completed");
             _running = false;
@@ -621,6 +688,21 @@ public sealed class ConversionUI : Window, IDisposable
         return count;
     }
 
+    // Count converted mods (with backup) recursively within a folder node
+    private int CountConvertedModsRecursive(TableCatNode node)
+    {
+        var count = 0;
+        foreach (var mod in node.Mods)
+        {
+            var hasBackup = GetOrQueryModBackup(mod);
+            if (hasBackup)
+                count++;
+        }
+        foreach (var child in node.Children.Values)
+            count += CountConvertedModsRecursive(child);
+        return count;
+    }
+
     // Collect all visible files under a folder node (recursive over children) for selection/size aggregation
     private List<string> CollectFilesRecursive(TableCatNode node, Dictionary<string, List<string>> visibleByMod)
     {
@@ -675,17 +757,50 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
             ImGui.TextColored(folderColor, (catOpen ? FontAwesomeIcon.FolderOpen : FontAwesomeIcon.Folder).ToIconString());
             ImGui.PopFont();
             ImGui.SameLine();
-            ImGui.TextColored(folderColor, $"{name} ({CountModsRecursive(child)})");
+            var totalModsInFolder = CountModsRecursive(child);
+            var convertedModsInFolder = CountConvertedModsRecursive(child);
+            ImGui.TextColored(folderColor, $"{name} ({convertedModsInFolder}/{totalModsInFolder})");
 
-            // Aggregated size for folder contents in Size column
-            ImGui.TableSetColumnIndex(2);
-            long folderSizeBytes = 0;
-            if (folderFiles.Count > 0)
+            // Uncompressed size for folder contents (include converted and unconverted mods)
+            ImGui.TableSetColumnIndex(3);
+            long folderOriginalBytes = 0;
+            foreach (var m in child.Mods)
             {
-                foreach (var f in folderFiles)
-                    folderSizeBytes += GetCachedOrComputeSize(f);
+                long modOrig = 0;
+                if (_cachedPerModSavings.TryGetValue(m, out var stats) && stats != null && stats.OriginalBytes > 0)
+                {
+                    modOrig = stats.OriginalBytes;
+                }
+                else if (_scannedByMod.TryGetValue(m, out var allFiles) && allFiles != null)
+                {
+                    foreach (var f in allFiles)
+                    {
+                        var sz = GetCachedOrComputeSize(f);
+                        if (sz > 0) modOrig += sz;
+                    }
+                }
+                if (modOrig > 0)
+                    folderOriginalBytes += modOrig;
             }
-            DrawRightAlignedSize(folderSizeBytes);
+            if (folderOriginalBytes > 0)
+                DrawRightAlignedSize(folderOriginalBytes);
+            else
+                ImGui.TextUnformatted("");
+
+            // Compressed size aggregated preferring per-mod stats; fallback to visible files in folder
+            ImGui.TableSetColumnIndex(2);
+            long folderCompressedBytes = 0;
+            foreach (var m in child.Mods)
+            {
+                var hasBackupM = GetOrQueryModBackup(m);
+                if (!hasBackupM) continue;
+                if (_cachedPerModSavings.TryGetValue(m, out var stats) && stats != null && stats.CurrentBytes > 0)
+                    folderCompressedBytes += stats.CurrentBytes;
+            }
+            if (folderCompressedBytes > 0)
+                DrawRightAlignedSizeColored(folderCompressedBytes, _compressedTextColor);
+            else
+                DrawRightAlignedTextColored("-", _compressedTextColor);
 
             if (catOpen)
             {
@@ -755,13 +870,33 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                     ImGui.PopFont();
                     ImGui.SameLine();
                     ImGui.TextUnformatted(header);
-
-                    // Removed status label text; icon color indicates enabled state
+                    // Uncompressed and Compressed columns for mod row in folder view
+                    ImGui.TableSetColumnIndex(3);
+                    _cachedPerModSavings.TryGetValue(mod, out var modStats);
+                    long modOriginalBytes = 0;
+                if (modStats != null && modStats.OriginalBytes > 0)
+                {
+                    modOriginalBytes = modStats.OriginalBytes;
+                }
+                else if (_scannedByMod.TryGetValue(mod, out var allModFiles) && allModFiles != null)
+                {
+                    foreach (var f in allModFiles)
+                    {
+                        var sz = GetCachedOrComputeSize(f);
+                        if (sz > 0) modOriginalBytes += sz;
+                    }
+                }
+                    DrawRightAlignedSize(modOriginalBytes);
 
                     ImGui.TableSetColumnIndex(2);
-                    DrawRightAlignedSize(modVisibleSize);
+                    var modCurrentBytes = hasBackup ? (modStats?.CurrentBytes ?? 0) : 0;
+                    if (modCurrentBytes > 0)
+    DrawRightAlignedSizeColored(modCurrentBytes, _compressedTextColor);
+else
+    DrawRightAlignedTextColored("-", _compressedTextColor);
 
-                    ImGui.TableSetColumnIndex(3);
+                    // Action column
+                    ImGui.TableSetColumnIndex(4);
                     ImGui.BeginDisabled(_running);
                     if (hasBackup || files.Count > 0)
                     {
@@ -858,9 +993,15 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
 
                                 ImGui.TableSetColumnIndex(2);
                                 var fileSize = GetCachedOrComputeSize(file);
-                                DrawRightAlignedSize(fileSize);
+                                if (fileSize > 0)
+                                    DrawRightAlignedSizeColored(fileSize, _compressedTextColor);
+                                else
+                                    ImGui.TextUnformatted("");
 
                                 ImGui.TableSetColumnIndex(3);
+                                ImGui.TextUnformatted("");
+
+                                ImGui.TableSetColumnIndex(4);
                                 idx++;
                             }
                         }
@@ -956,6 +1097,16 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                 {
                     _cachedBackupStorageInfo = _backupStorageInfoTask.Result;
                 }
+
+                // Update per-mod savings asynchronously
+                if (_perModSavingsTask == null)
+                {
+                    _perModSavingsTask = _backupService.ComputePerModSavingsAsync();
+                }
+                if (_perModSavingsTask != null && _perModSavingsTask.IsCompleted)
+                {
+                    _cachedPerModSavings = _perModSavingsTask.Result ?? new Dictionary<string, TextureBackupService.ModSavingsStats>(StringComparer.OrdinalIgnoreCase);
+                }
             }
 
             // Display stats
@@ -1002,6 +1153,7 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
             {
                 ImGui.Text("Savings: no comparable backups found");
             }
+
         }
         else
         {
@@ -1022,8 +1174,13 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
 
             if (ImGui.Button("Cancel"))
             {
+                // Mark that we want to restore the currently converting mod after cancellation completes
+                _restoreAfterCancel = true;
+                _cancelTargetMod = _currentModName;
                 _conversionService.Cancel();
+                // If a restore is already in flight, cancel it too
                 _restoreCancellationTokenSource?.Cancel();
+                _logger.LogDebug("Cancel pressed; will restore current mod {mod} after conversion stops", _cancelTargetMod);
             }
             ShowTooltip("Cancel the current conversion or restore operation.");
         }
@@ -1499,16 +1656,17 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
         // Reserve space for action buttons at the bottom by constraining the table height
         float availY = ImGui.GetContentRegionAvail().Y;
         float frameH = ImGui.GetFrameHeight();
-        float reserveH = frameH + ImGui.GetStyle().ItemSpacing.Y * 4; // buttons + spacing
+        float reserveH = (frameH * 2) + ImGui.GetStyle().ItemSpacing.Y * 6;
         float childH = MathF.Max(150f, availY - reserveH);
         ImGui.BeginChild("ScannedFilesTableRegion", new Vector2(0, childH), false, ImGuiWindowFlags.None);
 
         var flags = ImGuiTableFlags.BordersOuter | ImGuiTableFlags.BordersV | ImGuiTableFlags.Resizable | ImGuiTableFlags.ScrollY | ImGuiTableFlags.RowBg;
-        if (ImGui.BeginTable("ScannedFilesTable", 4, flags))
+        if (ImGui.BeginTable("ScannedFilesTable", 5, flags))
         {
             ImGui.TableSetupColumn("", ImGuiTableColumnFlags.WidthFixed, _scannedFirstColWidth);
             ImGui.TableSetupColumn("File", ImGuiTableColumnFlags.WidthStretch);
-            ImGui.TableSetupColumn("Size", ImGuiTableColumnFlags.WidthFixed, _scannedSizeColWidth);
+            ImGui.TableSetupColumn("Compressed", ImGuiTableColumnFlags.WidthFixed, _scannedCompressedColWidth);
+            ImGui.TableSetupColumn("Uncompressed", ImGuiTableColumnFlags.WidthFixed, _scannedSizeColWidth);
             ImGui.TableSetupColumn("Action", ImGuiTableColumnFlags.WidthFixed, _scannedActionColWidth);
             ImGui.TableHeadersRow();
             // Reset zebra row index at the start of table drawing
@@ -1586,12 +1744,37 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                 ImGui.SameLine();
                 ImGui.TextUnformatted(header);
 
-                // Action column button (either Convert or Restore)
-                // Size column for mod row
-                ImGui.TableSetColumnIndex(2);
-                DrawRightAlignedSize(modVisibleSize);
-                // Action column
+
+                // Uncompressed and Compressed columns for mod row
                 ImGui.TableSetColumnIndex(3);
+                _cachedPerModSavings.TryGetValue(mod, out var modStats);
+                long modOriginalBytes = 0;
+                if (modStats != null && modStats.OriginalBytes > 0)
+                {
+                    modOriginalBytes = modStats.OriginalBytes;
+                }
+                else if (_scannedByMod.TryGetValue(mod, out var allModFiles) && allModFiles != null)
+                {
+                    foreach (var f in allModFiles)
+                    {
+                        var sz = GetCachedOrComputeSize(f);
+                        if (sz > 0) modOriginalBytes += sz;
+                    }
+                }
+                if (modOriginalBytes > 0)
+                    DrawRightAlignedSize(modOriginalBytes);
+                else
+                    DrawRightAlignedSize(modVisibleSize);
+
+                ImGui.TableSetColumnIndex(2);
+                var modCurrentBytes = hasBackup ? (modStats?.CurrentBytes ?? 0) : 0; // force 0 when no backup
+                if (modCurrentBytes > 0)
+                    DrawRightAlignedSizeColored(modCurrentBytes, _compressedTextColor);
+                else
+                    DrawRightAlignedTextColored("-", _compressedTextColor);
+
+                // Action column
+                ImGui.TableSetColumnIndex(4);
                 ImGui.BeginDisabled(_running);
                 // hasBackup already computed above
                 if (hasBackup || files.Count > 0)
@@ -1690,13 +1873,13 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                             if (ImGui.IsItemHovered())
                                 ImGui.SetTooltip(file);
 
-                            // Per-file size
+                            // Per-file size (now in Uncompressed column 3)
                             ImGui.TableSetColumnIndex(2);
+                            ImGui.TextUnformatted("");
+
+                            ImGui.TableSetColumnIndex(3);
                             var fileSize = GetCachedOrComputeSize(file);
                             DrawRightAlignedSize(fileSize);
-
-                            // Leave action column empty for file rows
-                            ImGui.TableSetColumnIndex(3);
                             
                             idx++;
                         }
@@ -1717,21 +1900,32 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                 _logger.LogDebug($"Saved first column width: {currentFirstWidth}px");
             }
 
+            // Track Compressed column width every frame (session only)
             ImGui.TableSetColumnIndex(2);
-            var currentSizeWidth = ImGui.GetColumnWidth();
-            if (MathF.Abs(currentSizeWidth - _scannedSizeColWidth) > 0.5f && ImGui.IsMouseReleased(ImGuiMouseButton.Left))
+            var prevCompressedWidth = _scannedCompressedColWidth;
+            var currentCompressedWidth = ImGui.GetColumnWidth();
+            _scannedCompressedColWidth = currentCompressedWidth;
+            // Session-only tracking for compressed column; do not persist
+
+            // Track Uncompressed column width every frame; persist on release
+            ImGui.TableSetColumnIndex(3);
+            var prevUncompressedWidth = _scannedSizeColWidth;
+            var currentUncompressedWidth = ImGui.GetColumnWidth();
+            _scannedSizeColWidth = currentUncompressedWidth;
+            if (MathF.Abs(currentUncompressedWidth - prevUncompressedWidth) > 0.5f && ImGui.IsMouseReleased(ImGuiMouseButton.Left))
             {
-                _scannedSizeColWidth = currentSizeWidth;
-                _configService.Current.ScannedFilesSizeColWidth = currentSizeWidth;
+                _configService.Current.ScannedFilesSizeColWidth = currentUncompressedWidth;
                 _configService.Save();
-                _logger.LogDebug($"Saved size column width: {currentSizeWidth}px");
+                _logger.LogDebug($"Saved size column width: {currentUncompressedWidth}px");
             }
 
-            ImGui.TableSetColumnIndex(3);
+            // Track Action column width every frame; persist on release
+            ImGui.TableSetColumnIndex(4);
+            var prevActionWidth = _scannedActionColWidth;
             var currentActionWidth = ImGui.GetColumnWidth();
-            if (MathF.Abs(currentActionWidth - _scannedActionColWidth) > 0.5f && ImGui.IsMouseReleased(ImGuiMouseButton.Left))
+            _scannedActionColWidth = currentActionWidth;
+            if (MathF.Abs(currentActionWidth - prevActionWidth) > 0.5f && ImGui.IsMouseReleased(ImGuiMouseButton.Left))
             {
-                _scannedActionColWidth = currentActionWidth;
                 _configService.Current.ScannedFilesActionColWidth = currentActionWidth;
                 _configService.Save();
                 _logger.LogDebug($"Saved action column width: {currentActionWidth}px");
@@ -1740,6 +1934,72 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
             ImGui.EndTable();
         }
         ImGui.EndChild();
+
+        ImGui.Separator();
+
+        // Totals footer
+        {
+            long totalUncompressed = 0;
+            long totalCompressed = 0;
+            foreach (var m in mods)
+            {
+                var hasBackupM = GetOrQueryModBackup(m);
+                if (!hasBackupM) continue; // Only include converted mods in both sums
+                
+                // Get original size for converted mod
+                long modOrig = 0;
+                if (_cachedPerModSavings.TryGetValue(m, out var stats) && stats != null && stats.OriginalBytes > 0)
+                {
+                    modOrig = stats.OriginalBytes;
+                }
+                else if (_scannedByMod.TryGetValue(m, out var allFiles) && allFiles != null)
+                {
+                    foreach (var f in allFiles)
+                    {
+                        var sz = GetCachedOrComputeSize(f);
+                        if (sz > 0) modOrig += sz;
+                    }
+                }
+                if (modOrig > 0)
+                    totalUncompressed += modOrig;
+                
+                // Get compressed size for converted mod
+                if (stats != null && stats.CurrentBytes > 0)
+                    totalCompressed += stats.CurrentBytes;
+            }
+
+            var footerFlags = ImGuiTableFlags.BordersOuter | ImGuiTableFlags.BordersV | ImGuiTableFlags.RowBg | ImGuiTableFlags.SizingFixedFit;
+            if (ImGui.BeginTable("ScannedFilesTotals", 5, footerFlags))
+            {
+                ImGui.TableSetupColumn("", ImGuiTableColumnFlags.WidthFixed, _scannedFirstColWidth);
+                ImGui.TableSetupColumn("File", ImGuiTableColumnFlags.WidthStretch);
+                ImGui.TableSetupColumn("Compressed", ImGuiTableColumnFlags.WidthFixed, _scannedCompressedColWidth);
+                ImGui.TableSetupColumn("Uncompressed", ImGuiTableColumnFlags.WidthFixed, _scannedSizeColWidth);
+                ImGui.TableSetupColumn("Action", ImGuiTableColumnFlags.WidthFixed, _scannedActionColWidth);
+
+                ImGui.TableNextRow();
+                ImGui.TableSetBgColor(ImGuiTableBgTarget.RowBg0, ImGui.GetColorU32((_zebraRowIndex++ % 2 == 0) ? _zebraEvenColor : _zebraOddColor));
+                ImGui.TableSetColumnIndex(1);
+                var reduction = totalUncompressed > 0
+                    ? MathF.Max(0f, (float)(totalUncompressed - totalCompressed) / totalUncompressed * 100f)
+                    : 0f;
+                ImGui.TextUnformatted($"Total saved ({reduction.ToString("0.00")}%)");
+                ImGui.TableSetColumnIndex(2);
+                if (totalCompressed > 0)
+                    DrawRightAlignedSizeColored(totalCompressed, _compressedTextColor);
+                else
+                    DrawRightAlignedTextColored("-", _compressedTextColor);
+                ImGui.TableSetColumnIndex(3);
+                if (totalUncompressed > 0)
+                    DrawRightAlignedSize(totalUncompressed);
+                else
+                    ImGui.TextUnformatted("");
+                ImGui.TableSetColumnIndex(4);
+                ImGui.TextUnformatted("");
+
+                ImGui.EndTable();
+            }
+        }
 
         // Global action buttons below the table
         ImGui.Spacing();
@@ -1901,6 +2161,50 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
         var targetX = ImGui.GetCursorPosX() + Math.Max(0f, avail - textSize);
         ImGui.SetCursorPosX(targetX);
         ImGui.TextUnformatted(text);
+    }
+
+    // Draw size right-aligned.
+    private void DrawRightAlignedSizeColored(long bytes, Vector4 color)
+    {
+        var text = FormatSize(bytes);
+        var textSize = ImGui.CalcTextSize(text).X;
+        var avail = ImGui.GetContentRegionAvail().X;
+        var targetX = ImGui.GetCursorPosX() + Math.Max(0f, avail - textSize);
+        ImGui.SetCursorPosX(targetX);
+        ImGui.PushStyleColor(ImGuiCol.Text, color);
+        ImGui.TextUnformatted(text);
+        ImGui.PopStyleColor();
+    }
+
+    // Draw arbitrary text right-aligned.
+    private void DrawRightAlignedTextColored(string text, Vector4 color)
+    {
+        var textSize = ImGui.CalcTextSize(text).X;
+        var avail = ImGui.GetContentRegionAvail().X;
+        var targetX = ImGui.GetCursorPosX() + Math.Max(0f, avail - textSize);
+        ImGui.SetCursorPosX(targetX);
+        ImGui.PushStyleColor(ImGuiCol.Text, color);
+        ImGui.TextUnformatted(text);
+        ImGui.PopStyleColor();
+    }
+
+    // Draw compressed total with reduction percentage compared to uncompressed.
+    private void DrawRightAlignedCompressedTotalWithPercent(long compressedBytes, long uncompressedBytes, Vector4 color)
+    {
+        var sizeText = FormatSize(compressedBytes);
+        string text = sizeText;
+        if (uncompressedBytes > 0)
+        {
+            var reduction = MathF.Max(0f, (float)(uncompressedBytes - compressedBytes) / uncompressedBytes * 100f);
+            text = string.Concat(sizeText, " (", reduction.ToString("0.00"), "%)");
+        }
+        var textSize = ImGui.CalcTextSize(text).X;
+        var avail = ImGui.GetContentRegionAvail().X;
+        var targetX = ImGui.GetCursorPosX() + Math.Max(0f, avail - textSize);
+        ImGui.SetCursorPosX(targetX);
+        ImGui.PushStyleColor(ImGuiCol.Text, color);
+        ImGui.TextUnformatted(text);
+        ImGui.PopStyleColor();
     }
 
     // Removed mod-level size aggregation to focus only on file sizes per request
