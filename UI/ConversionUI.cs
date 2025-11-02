@@ -546,6 +546,10 @@ public sealed class ConversionUI : Window, IDisposable
         public TableCatNode(string name) => Name = name;
     }
 
+    private int _zebraRowIndex = 0;
+    private readonly Vector4 _zebraEvenColor = new(0.16f, 0.16f, 0.16f, 0.10f);
+    private readonly Vector4 _zebraOddColor  = new(0.16f, 0.16f, 0.16f, 0.30f);
+
     private TableCatNode BuildTableCategoryTree(IEnumerable<string> mods)
     {
         var root = new TableCatNode("/");
@@ -600,23 +604,71 @@ public sealed class ConversionUI : Window, IDisposable
         return count;
     }
 
+    // Collect all visible files under a folder node (recursive over children) for selection/size aggregation
+    private List<string> CollectFilesRecursive(TableCatNode node, Dictionary<string, List<string>> visibleByMod)
+    {
+        var files = new List<string>();
+        foreach (var mod in node.Mods)
+        {
+            if (visibleByMod.TryGetValue(mod, out var modFiles) && modFiles != null && modFiles.Count > 0)
+                files.AddRange(modFiles);
+        }
+        foreach (var child in node.Children.Values)
+        {
+            files.AddRange(CollectFilesRecursive(child, visibleByMod));
+        }
+        return files;
+    }
+
 private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<string>> visibleByMod, ref int idx, string pathPrefix, int depth = 0)
     {
         const float indentStep = 16f;
         foreach (var (name, child) in OrderedChildrenPairs(node))
         {
             ImGui.TableNextRow();
-            ImGui.TableSetColumnIndex(1);
+            ImGui.TableSetBgColor(ImGuiTableBgTarget.RowBg0, ImGui.GetColorU32((_zebraRowIndex++ % 2 == 0) ? _zebraEvenColor : _zebraOddColor));
+            // Folder row: selection checkbox in first column
+            ImGui.TableSetColumnIndex(0);
             var fullPath = string.IsNullOrEmpty(pathPrefix) ? name : $"{pathPrefix}/{name}";
+            var folderFiles = CollectFilesRecursive(child, visibleByMod);
+            bool folderSelected = folderFiles.Count > 0 && folderFiles.All(f => _selectedTextures.Contains(f));
+            ImGui.BeginDisabled(folderFiles.Count == 0);
+            if (ImGui.Checkbox($"##cat-sel-{fullPath}", ref folderSelected))
+            {
+                if (folderSelected)
+                    foreach (var f in folderFiles) _selectedTextures.Add(f);
+                else
+                    foreach (var f in folderFiles) _selectedTextures.Remove(f);
+            }
+            ImGui.EndDisabled();
+            if (folderFiles.Count == 0 && ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
+                ImGui.SetTooltip("No selectable files in this folder (filtered or excluded).");
+            else
+                ShowTooltip("Select or deselect all files in this folder.");
+
+            // Folder label and tree toggle in File column
+            ImGui.TableSetColumnIndex(1);
             // Indent folder rows in the File column based on depth, without affecting other columns.
             ImGui.SetCursorPosX(ImGui.GetCursorPosX() + depth * indentStep);
             var catOpen = ImGui.TreeNodeEx($"##cat-{fullPath}", ImGuiTreeNodeFlags.SpanFullWidth | ImGuiTreeNodeFlags.FramePadding | ImGuiTreeNodeFlags.NoTreePushOnOpen);
             ImGui.SameLine();
+            // Use a distinct color for folder icon and label for better visual separation
+            var folderColor = new Vector4(0.70f, 0.80f, 1.00f, 1f);
             ImGui.PushFont(UiBuilder.IconFont);
-            ImGui.TextUnformatted((catOpen ? FontAwesomeIcon.FolderOpen : FontAwesomeIcon.Folder).ToIconString());
+            ImGui.TextColored(folderColor, (catOpen ? FontAwesomeIcon.FolderOpen : FontAwesomeIcon.Folder).ToIconString());
             ImGui.PopFont();
             ImGui.SameLine();
-            ImGui.TextUnformatted($"{name} ({CountModsRecursive(child)})");
+            ImGui.TextColored(folderColor, $"{name} ({CountModsRecursive(child)})");
+
+            // Aggregated size for folder contents in Size column
+            ImGui.TableSetColumnIndex(2);
+            long folderSizeBytes = 0;
+            if (folderFiles.Count > 0)
+            {
+                foreach (var f in folderFiles)
+                    folderSizeBytes += GetCachedOrComputeSize(f);
+            }
+            DrawRightAlignedSize(folderSizeBytes);
 
             if (catOpen)
             {
@@ -628,6 +680,7 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                         continue;
 
                     ImGui.TableNextRow();
+                    ImGui.TableSetBgColor(ImGuiTableBgTarget.RowBg0, ImGui.GetColorU32((_zebraRowIndex++ % 2 == 0) ? _zebraEvenColor : _zebraOddColor));
                     ImGui.TableSetColumnIndex(0);
                     var hasBackup = GetOrQueryModBackup(mod);
                     var excluded = !hasBackup && IsModExcludedByTags(mod);
@@ -651,6 +704,8 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                     ImGui.TableSetColumnIndex(1);
                     ImGui.SetCursorPosX(ImGui.GetCursorPosX() + (depth + 1) * indentStep);
                     var nodeFlags = ImGuiTreeNodeFlags.SpanFullWidth | ImGuiTreeNodeFlags.NoTreePushOnOpen;
+                    if (!_configService.Current.ShowModFilesInOverview)
+                        nodeFlags |= ImGuiTreeNodeFlags.Bullet | ImGuiTreeNodeFlags.Leaf;
                     long modVisibleSize = 0;
                     foreach (var f in files)
                     {
@@ -757,37 +812,40 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
 
                     if (open)
                     {
-                        foreach (var file in files)
+                        if (_configService.Current.ShowModFilesInOverview)
                         {
-                            ImGui.TableNextRow();
-                            ImGui.TableSetColumnIndex(0);
-                            bool selected = _selectedTextures.Contains(file);
-                            ImGui.BeginDisabled(excluded);
-                            if (ImGui.Checkbox($"##selsub-{idx}", ref selected))
+                            foreach (var file in files)
                             {
-                                if (selected) { _selectedTextures.Add(file); }
-                                else _selectedTextures.Remove(file);
+                                ImGui.TableNextRow();
+                                ImGui.TableSetColumnIndex(0);
+                                bool selected = _selectedTextures.Contains(file);
+                                ImGui.BeginDisabled(excluded);
+                                if (ImGui.Checkbox($"##selsub-{idx}", ref selected))
+                                {
+                                    if (selected) { _selectedTextures.Add(file); }
+                                    else _selectedTextures.Remove(file);
+                                }
+                                ImGui.EndDisabled();
+                                if (excluded && ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
+                                    ImGui.SetTooltip("Mod excluded by tags");
+                                else
+                                    ShowTooltip("Select or deselect this file.");
+
+                                ImGui.TableSetColumnIndex(1);
+                                ImGui.SetCursorPosX(ImGui.GetCursorPosX() + (depth + 2) * indentStep);
+                                var baseName = Path.GetFileName(file);
+                                ImGui.TextUnformatted(baseName);
+                                if (ImGui.IsItemHovered())
+                                    ImGui.SetTooltip(file);
+                                
+
+                                ImGui.TableSetColumnIndex(2);
+                                var fileSize = GetCachedOrComputeSize(file);
+                                DrawRightAlignedSize(fileSize);
+
+                                ImGui.TableSetColumnIndex(3);
+                                idx++;
                             }
-                            ImGui.EndDisabled();
-                            if (excluded && ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
-                                ImGui.SetTooltip("Mod excluded by tags");
-                            else
-                                ShowTooltip("Select or deselect this file.");
-
-                            ImGui.TableSetColumnIndex(1);
-                            ImGui.SetCursorPosX(ImGui.GetCursorPosX() + (depth + 2) * indentStep);
-                            var baseName = Path.GetFileName(file);
-                            ImGui.TextUnformatted(baseName);
-                            if (ImGui.IsItemHovered())
-                                ImGui.SetTooltip(file);
-                            
-
-                            ImGui.TableSetColumnIndex(2);
-                            var fileSize = GetCachedOrComputeSize(file);
-                            DrawRightAlignedSize(fileSize);
-
-                            ImGui.TableSetColumnIndex(3);
-                            idx++;
                         }
                     }
                 }
@@ -1376,7 +1434,7 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
         float childH = MathF.Max(150f, availY - reserveH);
         ImGui.BeginChild("ScannedFilesTableRegion", new Vector2(0, childH), false, ImGuiWindowFlags.None);
 
-        var flags = ImGuiTableFlags.BordersOuter | ImGuiTableFlags.BordersV | ImGuiTableFlags.Resizable | ImGuiTableFlags.ScrollY;
+        var flags = ImGuiTableFlags.BordersOuter | ImGuiTableFlags.BordersV | ImGuiTableFlags.Resizable | ImGuiTableFlags.ScrollY | ImGuiTableFlags.RowBg;
         if (ImGui.BeginTable("ScannedFilesTable", 4, flags))
         {
             ImGui.TableSetupColumn("", ImGuiTableColumnFlags.WidthFixed, _scannedFirstColWidth);
@@ -1384,6 +1442,8 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
             ImGui.TableSetupColumn("Size", ImGuiTableColumnFlags.WidthFixed, _scannedSizeColWidth);
             ImGui.TableSetupColumn("Action", ImGuiTableColumnFlags.WidthFixed, _scannedActionColWidth);
             ImGui.TableHeadersRow();
+            // Reset zebra row index at the start of table drawing
+            _zebraRowIndex = 0;
 
             int idx = 0;
             if (root != null)
@@ -1398,6 +1458,7 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
 
                 // Mod row
                 ImGui.TableNextRow();
+                ImGui.TableSetBgColor(ImGuiTableBgTarget.RowBg0, ImGui.GetColorU32((_zebraRowIndex++ % 2 == 0) ? _zebraEvenColor : _zebraOddColor));
                 ImGui.TableSetColumnIndex(0);
                 var hasBackup = GetOrQueryModBackup(mod);
                 var excluded = !hasBackup && IsModExcludedByTags(mod);
@@ -1419,6 +1480,8 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
 
                 ImGui.TableSetColumnIndex(1);
                 var nodeFlags = ImGuiTreeNodeFlags.SpanFullWidth | ImGuiTreeNodeFlags.FramePadding;
+                if (!_configService.Current.ShowModFilesInOverview)
+                    nodeFlags |= ImGuiTreeNodeFlags.Bullet | ImGuiTreeNodeFlags.Leaf;
                 // Compute total size of visible files using cached sizes only
                 long modVisibleSize = 0;
                 foreach (var f in files)
@@ -1530,39 +1593,44 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
 
                 if (open)
                 {
-                    // Child file rows
-                    foreach (var file in files)
+                    if (_configService.Current.ShowModFilesInOverview)
                     {
-                        ImGui.TableNextRow();
-                        ImGui.TableSetColumnIndex(0);
-                        bool selected = _selectedTextures.Contains(file);
-                        ImGui.BeginDisabled(excluded);
-                        if (ImGui.Checkbox($"##selsub-{idx}", ref selected))
+                        // Child file rows
+                        foreach (var file in files)
                         {
-                            if (selected) { _selectedTextures.Add(file); }
-                            else _selectedTextures.Remove(file);
+                            ImGui.TableNextRow();
+                            ImGui.TableSetBgColor(ImGuiTableBgTarget.RowBg0, ImGui.GetColorU32((_zebraRowIndex++ % 2 == 0) ? _zebraEvenColor : _zebraOddColor));
+                            ImGui.TableSetBgColor(ImGuiTableBgTarget.RowBg0, ImGui.GetColorU32((_zebraRowIndex++ % 2 == 0) ? _zebraEvenColor : _zebraOddColor));
+                            ImGui.TableSetColumnIndex(0);
+                            bool selected = _selectedTextures.Contains(file);
+                            ImGui.BeginDisabled(excluded);
+                            if (ImGui.Checkbox($"##selsub-{idx}", ref selected))
+                            {
+                                if (selected) { _selectedTextures.Add(file); }
+                                else _selectedTextures.Remove(file);
+                            }
+                            ImGui.EndDisabled();
+                            if (excluded && ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
+                                ImGui.SetTooltip("Mod excluded by tags");
+                            else
+                                ShowTooltip("Select or deselect this file.");
+
+                            ImGui.TableSetColumnIndex(1);
+                            var baseName = Path.GetFileName(file);
+                            ImGui.TextUnformatted(baseName);
+                            if (ImGui.IsItemHovered())
+                                ImGui.SetTooltip(file);
+
+                            // Per-file size
+                            ImGui.TableSetColumnIndex(2);
+                            var fileSize = GetCachedOrComputeSize(file);
+                            DrawRightAlignedSize(fileSize);
+
+                            // Leave action column empty for file rows
+                            ImGui.TableSetColumnIndex(3);
+                            
+                            idx++;
                         }
-                        ImGui.EndDisabled();
-                        if (excluded && ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
-                            ImGui.SetTooltip("Mod excluded by tags");
-                        else
-                            ShowTooltip("Select or deselect this file.");
-
-                        ImGui.TableSetColumnIndex(1);
-                        var baseName = Path.GetFileName(file);
-                        ImGui.TextUnformatted(baseName);
-                        if (ImGui.IsItemHovered())
-                            ImGui.SetTooltip(file);
-
-                        // Per-file size
-                        ImGui.TableSetColumnIndex(2);
-                        var fileSize = GetCachedOrComputeSize(file);
-                        DrawRightAlignedSize(fileSize);
-
-                        // Leave action column empty for file rows
-                        ImGui.TableSetColumnIndex(3);
-                        
-                        idx++;
                     }
                     ImGui.TreePop();
                 }

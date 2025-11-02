@@ -93,6 +93,15 @@ public sealed class SettingsUI : Window
                 }
                 ShowTooltip("Delete uncompressed backup folders after ZIP is created.");
 
+                // Overview table: show file rows toggle
+                bool showFiles = _configService.Current.ShowModFilesInOverview;
+                if (ImGui.Checkbox("Show file rows in overview", ref showFiles))
+                {
+                    _configService.Current.ShowModFilesInOverview = showFiles;
+                    _configService.Save();
+                }
+                ShowTooltip("Display individual files under each mod in the overview table.");
+
                 // Backup folder selection
                 ImGui.Text("Backup Folder:");
                 ImGui.SameLine();

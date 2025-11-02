@@ -38,6 +38,8 @@ public sealed class ShrinkUConfig : IPluginConfiguration
     public bool FilterNonConvertibleMods { get; set; } = true;
     public string ScanSortKey { get; set; } = "ModName"; // "FileName" or "ModName"
     public bool ScanSortAsc { get; set; } = true;
+    // Control visibility of individual file rows in the overview table
+    public bool ShowModFilesInOverview { get; set; } = false;
 
     // First-run setup gating
     public bool FirstRunCompleted { get; set; } = false;
