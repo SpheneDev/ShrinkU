@@ -1253,22 +1253,14 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
         }
         ShowTooltip("Hide mods without convertible textures.");
 
-        // Collections dropdown
-        if (!_loadingCollections && _collections.Count == 0)
+
+        if (!_selectedCollectionId.HasValue)
         {
-            _loadingCollections = true;
-            _ = _conversionService.GetCollectionsAsync().ContinueWith(ct =>
-            {
-                if (ct.Status == TaskStatus.RanToCompletion && ct.Result != null)
-                    _collections = ct.Result;
-                _loadingCollections = false;
-            });
             _ = _conversionService.GetCurrentCollectionAsync().ContinueWith(cc =>
             {
                 if (cc.Status == TaskStatus.RanToCompletion && cc.Result != null)
                 {
                     _selectedCollectionId = cc.Result?.Id;
-                    // Auto-load enabled states for the current collection so icons/status work without manual switch
                     if (_selectedCollectionId.HasValue)
                     {
                         _loadingEnabledStates = true;
@@ -1281,52 +1273,6 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                     }
                 }
             });
-        }
-        ImGui.Spacing();
-        ImGui.Text("Collection:");
-        ImGui.SameLine();
-        var entries = _collections.Select(kv => (kv.Key, kv.Value)).OrderBy(e => e.Value).ToList();
-        int selIndex = -1;
-        for (int i = 0; i < entries.Count; i++)
-        {
-            if (_selectedCollectionId.HasValue && entries[i].Key == _selectedCollectionId.Value)
-            {
-                selIndex = i;
-                break;
-            }
-        }
-        var currentLabel = selIndex >= 0 ? entries[selIndex].Value : "(none)";
-        ImGui.SetNextItemWidth(200f);
-        if (ImGui.BeginCombo("##collectionSelect", currentLabel))
-        {
-            for (int i = 0; i < entries.Count; i++)
-            {
-                bool selected = i == selIndex;
-                if (ImGui.Selectable(entries[i].Value, selected))
-                {
-                    _selectedCollectionId = entries[i].Key;
-                    // Load enabled states for selected collection
-                    if (_selectedCollectionId.HasValue)
-                    {
-                        _loadingEnabledStates = true;
-                        _ = _conversionService.GetAllModEnabledStatesAsync(_selectedCollectionId.Value).ContinueWith(es =>
-                        {
-                            if (es.Status == TaskStatus.RanToCompletion && es.Result != null)
-                                _modEnabledStates = es.Result;
-                            _loadingEnabledStates = false;
-                        });
-                    }
-                }
-                if (selected)
-                    ImGui.SetItemDefaultFocus();
-            }
-            ImGui.EndCombo();
-        }
-        ShowTooltip("Select the Penumbra collection to evaluate enabled states.");
-        if (_loadingCollections || _loadingEnabledStates)
-        {
-            ImGui.SameLine();
-            ImGui.Text("(Loading collections...)");
         }
         ImGui.Spacing();
         if (_scannedByMod.Count == 0)
