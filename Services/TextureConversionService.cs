@@ -30,6 +30,8 @@ public sealed class TextureConversionService : IDisposable
     public event Action<string>? OnPenumbraModAdded;
     public event Action<string>? OnPenumbraModDeleted;
     public event Action<bool>? OnPenumbraEnabledChanged;
+    public event Action<string>? OnExternalTexturesChanged;
+    public event Action? OnPlayerResourcesChanged;
     private DateTime _lastModSettingChangedAt = DateTime.MinValue;
 
     public TextureConversionService(ILogger logger, PenumbraIpc penumbraIpc, TextureBackupService backupService, ShrinkUConfigService configService)
@@ -53,11 +55,14 @@ public sealed class TextureConversionService : IDisposable
         };
         _onModsChanged = () => OnPenumbraModsChanged?.Invoke();
 
+        _onPlayerResourcesChanged = () => OnPlayerResourcesChanged?.Invoke();
+
         _penumbraIpc.ModAdded += _onModAdded;
         _penumbraIpc.ModDeleted += _onModDeleted;
         _penumbraIpc.PenumbraEnabledChanged += _onEnabledChanged;
         _penumbraIpc.ModSettingChanged += _onModSettingChanged;
         _penumbraIpc.ModsChanged += _onModsChanged;
+        _penumbraIpc.PlayerResourcesChanged += _onPlayerResourcesChanged;
     }
 
     public void Cancel()
@@ -185,6 +190,13 @@ public sealed class TextureConversionService : IDisposable
         return await _penumbraIpc.ScanModTexturesAsync().ConfigureAwait(false);
     }
 
+    // Notify UI consumers that external texture changes occurred (e.g., conversions/restores done outside ShrinkU).
+    public void NotifyExternalTextureChange(string reason)
+    {
+        try { _logger.LogDebug("External texture change notification received: {reason}", reason); } catch { }
+        try { OnExternalTexturesChanged?.Invoke(reason); } catch { }
+    }
+
     public async Task<Dictionary<string, List<string>>> GetGroupedCandidateTexturesAsync()
     {
         if (!_penumbraIpc.APIAvailable)
@@ -300,6 +312,7 @@ public sealed class TextureConversionService : IDisposable
     private readonly Action<bool>? _onEnabledChanged;
     private readonly Action<ModSettingChange, Guid, string, bool>? _onModSettingChanged;
     private readonly Action? _onModsChanged;
+    private readonly Action? _onPlayerResourcesChanged;
 
     public void Dispose()
     {
@@ -308,6 +321,7 @@ public sealed class TextureConversionService : IDisposable
         try { _penumbraIpc.PenumbraEnabledChanged -= _onEnabledChanged; } catch { }
         try { _penumbraIpc.ModSettingChanged -= _onModSettingChanged; } catch { }
         try { _penumbraIpc.ModsChanged -= _onModsChanged; } catch { }
+        try { _penumbraIpc.PlayerResourcesChanged -= _onPlayerResourcesChanged; } catch { }
         try { _cts.Cancel(); } catch { }
         try { _cts.Dispose(); } catch { }
     }

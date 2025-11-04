@@ -39,6 +39,7 @@ public sealed class PenumbraIpc : IDisposable
     private readonly IDisposable? _subEnabledChange;
     private readonly IDisposable? _subInitialized;
     private readonly IDisposable? _subDisposed;
+    private readonly IDisposable? _subGameObjectRedrawn;
     private CancellationTokenSource? _pathWatchCts;
     private Task? _pathWatchTask;
     private Dictionary<string, string> _lastPaths = new(StringComparer.OrdinalIgnoreCase);
@@ -165,6 +166,18 @@ public sealed class PenumbraIpc : IDisposable
                 // Stop path watcher when API is disposed
                 StopPathWatcher();
             });
+
+            // Subscribe to redraws to detect changes of currently used player resources (gear swaps, materials, etc.)
+            _subGameObjectRedrawn = Penumbra.Api.IpcSubscribers.GameObjectRedrawn.Subscriber(pi, (ptr, index) =>
+            {
+                try
+                {
+                    _logger.LogDebug("Penumbra object redrawn: index={index}", index);
+                    try { RawGameObjectRedrawn?.Invoke(ptr, index); } catch { }
+                    try { PlayerResourcesChanged?.Invoke(); } catch { }
+                }
+                catch { }
+            });
         }
         catch (Exception ex)
         {
@@ -187,6 +200,7 @@ public sealed class PenumbraIpc : IDisposable
         try { _subEnabledChange?.Dispose(); } catch { }
         try { _subInitialized?.Dispose(); } catch { }
         try { _subDisposed?.Dispose(); } catch { }
+        try { _subGameObjectRedrawn?.Dispose(); } catch { }
         StopPathWatcher();
         _logger.LogDebug("Penumbra IPC subscribers disposed");
     }
@@ -201,6 +215,8 @@ public sealed class PenumbraIpc : IDisposable
     public event Action<string, string>? ModMoved;
     public event Action<bool>? PenumbraEnabledChanged;
     public event Action<ModSettingChange, Guid, string, bool>? ModSettingChanged;
+    public event Action<IntPtr, int>? RawGameObjectRedrawn; // low-level event for consumers needing object info
+    public event Action? PlayerResourcesChanged; // high-level signal for UI to refresh used-only set
 
     private bool CheckApi()
     {

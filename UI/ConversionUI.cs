@@ -1,4 +1,4 @@
-﻿using Dalamud.Bindings.ImGui;
+using Dalamud.Bindings.ImGui;
 using Dalamud.Interface;
 using Dalamud.Interface.Windowing;
 using Microsoft.Extensions.Logging;
@@ -117,6 +117,10 @@ public sealed class ConversionUI : Window, IDisposable
     private int _modsChangedDebounceSeq = 0;
     // Timestamp of last heavy scan to rate-limit repeated rescans
     private DateTime _lastHeavyScanAt = DateTime.MinValue;
+    // Poller to keep Used-Only list in sync even when no redraw occurs
+    private CancellationTokenSource? _usedResourcesPollCts;
+    private Task? _usedResourcesPollTask;
+    private volatile bool _usedWatcherActive = false;
 
     // Stored delegate references for clean unsubscription on dispose
     private readonly Action<(string, int)> _onConversionProgress;
@@ -126,8 +130,11 @@ public sealed class ConversionUI : Window, IDisposable
     private readonly Action _onPenumbraModsChanged;
     private readonly Action<string> _onPenumbraModAdded;
     private readonly Action<string> _onPenumbraModDeleted;
-    private readonly Action<Penumbra.Api.Enums.ModSettingChange, Guid, string, bool> _onPenumbraModSettingChanged;
+        private readonly Action<Penumbra.Api.Enums.ModSettingChange, Guid, string, bool> _onPenumbraModSettingChanged;
+        private readonly Action<bool> _onPenumbraEnabledChanged;
+    private readonly Action<string> _onExternalTexturesChanged;
     private readonly Action _onExcludedTagsUpdated;
+    private readonly Action _onPlayerResourcesChanged;
 
 public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureConversionService conversionService, TextureBackupService backupService, Action? openSettings = null)
         : base("ShrinkU###ShrinkUConversionUI")
@@ -248,8 +255,135 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
                     _needsUIRefresh = true;
                 });
             }
+
+            // If Used-Only filter is active, reload the currently used textures
+            if (_filterPenumbraUsedOnly && !_loadingPenumbraUsed)
+            {
+                _loadingPenumbraUsed = true;
+                _ = _conversionService.GetUsedModTexturePathsAsync().ContinueWith(t =>
+                {
+                    try
+                    {
+                        if (t.Status == TaskStatus.RanToCompletion && t.Result != null)
+                        {
+                            _penumbraUsedFiles = t.Result;
+                            _logger.LogDebug("Penumbra used set reloaded after ModsChanged: {count} files", _penumbraUsedFiles.Count);
+                            _uiThreadActions.Enqueue(() =>
+                            {
+                                try { RefreshScanResults(false, "penumbra-used-mods-changed"); } catch { }
+                                _needsUIRefresh = true;
+                            });
+                        }
+                    }
+                    finally
+                    {
+                        _loadingPenumbraUsed = false;
+                    }
+                }, TaskScheduler.Default);
+            }
+
+            // Force a heavy scan to fully refresh candidate textures after mods changed
+            if (_scanInProgress)
+            {
+                _needsUIRefresh = true;
+                return;
+            }
+            _scanInProgress = true;
+            RefreshScanResults(true, "penumbra-mods-changed");
+            _needsUIRefresh = true;
         };
         _conversionService.OnPenumbraModsChanged += _onPenumbraModsChanged;
+
+        // React to external texture changes (e.g., conversions/restores initiated by Sphene)
+        _onExternalTexturesChanged = reason =>
+        {
+            _logger.LogDebug("External texture change: {reason}; refreshing UI and scan state", reason);
+            // Ensure backup states and metrics reflect latest changes from Sphene
+            try { _modsWithBackupCache.Clear(); } catch { }
+            try { _modsBackupCheckInFlight.Clear(); } catch { }
+            try { TriggerMetricsRefresh(); } catch { }
+
+            // If Penumbra Used Only is enabled, reload the used textures set so filter applies immediately
+            if (_filterPenumbraUsedOnly)
+            {
+                try { _penumbraUsedFiles.Clear(); } catch { }
+                if (!_loadingPenumbraUsed)
+                {
+                    _loadingPenumbraUsed = true;
+                    _ = _conversionService.GetUsedModTexturePathsAsync().ContinueWith(t =>
+                    {
+                        try
+                        {
+                            if (t.Status == TaskStatus.RanToCompletion && t.Result != null)
+                            {
+                                _penumbraUsedFiles = t.Result;
+                                _logger.LogDebug("Reloaded {count} used textures from Penumbra after external change", _penumbraUsedFiles.Count);
+                                _uiThreadActions.Enqueue(() =>
+                                {
+                                    try { RefreshScanResults(false, $"external-{reason}-penumbra-used-reloaded"); } catch { }
+                                    _needsUIRefresh = true;
+                                });
+                            }
+                        }
+                        finally
+                        {
+                            _loadingPenumbraUsed = false;
+                        }
+                    }, TaskScheduler.Default);
+                }
+            }
+
+            if (_scanInProgress)
+            {
+                _needsUIRefresh = true;
+                return;
+            }
+            _scanInProgress = true;
+            RefreshScanResults(true, $"external-{reason}");
+            _needsUIRefresh = true;
+        };
+        _conversionService.OnExternalTexturesChanged += _onExternalTexturesChanged;
+
+        // React to player redraws/resources changes to keep Used-Only filter in sync
+        _onPlayerResourcesChanged = () =>
+        {
+            try
+            {
+                if (!_filterPenumbraUsedOnly)
+                {
+                    _needsUIRefresh = true;
+                    return;
+                }
+                if (_loadingPenumbraUsed)
+                {
+                    _needsUIRefresh = true;
+                    return;
+                }
+                _loadingPenumbraUsed = true;
+                _ = _conversionService.GetUsedModTexturePathsAsync().ContinueWith(t =>
+                {
+                    try
+                    {
+                        if (t.Status == TaskStatus.RanToCompletion && t.Result != null)
+                        {
+                            _penumbraUsedFiles = t.Result;
+                            _logger.LogDebug("Reloaded {count} used textures after player redraw/resources changed", _penumbraUsedFiles.Count);
+                            _uiThreadActions.Enqueue(() =>
+                            {
+                                try { RefreshScanResults(false, "player-resources-changed"); } catch { }
+                                _needsUIRefresh = true;
+                            });
+                        }
+                    }
+                    finally
+                    {
+                        _loadingPenumbraUsed = false;
+                    }
+                }, TaskScheduler.Default);
+            }
+            catch { }
+        };
+        _conversionService.OnPlayerResourcesChanged += _onPlayerResourcesChanged;
 
         // Heavy refresh only on actual mod add/delete, coalesced with trailing edge
         _onPenumbraModAdded = _ =>
@@ -403,8 +537,85 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
                     catch { }
                 });
             }
+
+            // If Used-Only filter is active, reload currently used textures to reflect setting changes immediately.
+            if (_filterPenumbraUsedOnly && !_loadingPenumbraUsed)
+            {
+                _loadingPenumbraUsed = true;
+                _ = _conversionService.GetUsedModTexturePathsAsync().ContinueWith(t =>
+                {
+                    try
+                    {
+                        if (t.Status == TaskStatus.RanToCompletion && t.Result != null)
+                        {
+                            _penumbraUsedFiles = t.Result;
+                            _logger.LogDebug("Penumbra used set reloaded after ModSettingChanged: {count} files", _penumbraUsedFiles.Count);
+                            _uiThreadActions.Enqueue(() =>
+                            {
+                                try { RefreshScanResults(false, "penumbra-used-setting-changed"); } catch { }
+                                _needsUIRefresh = true;
+                            });
+                        }
+                    }
+                    finally
+                    {
+                        _loadingPenumbraUsed = false;
+                    }
+                }, TaskScheduler.Default);
+            }
         };
         _conversionService.OnPenumbraModSettingChanged += _onPenumbraModSettingChanged;
+
+        // React when Penumbra is enabled/disabled to keep filter and UI consistent
+        _onPenumbraEnabledChanged = enabled =>
+        {
+            try
+            {
+                if (!enabled)
+                {
+                    // Penumbra disabled: clear used-only set and refresh UI
+                    try { _penumbraUsedFiles.Clear(); } catch { }
+                    _uiThreadActions.Enqueue(() =>
+                    {
+                        try { RefreshScanResults(false, "penumbra-disabled"); } catch { }
+                        _needsUIRefresh = true;
+                    });
+                    return;
+                }
+
+                // Penumbra enabled: if filter active, reload used-only set
+                if (_filterPenumbraUsedOnly && !_loadingPenumbraUsed)
+                {
+                    _loadingPenumbraUsed = true;
+                    _ = _conversionService.GetUsedModTexturePathsAsync().ContinueWith(t =>
+                    {
+                        try
+                        {
+                            if (t.Status == TaskStatus.RanToCompletion && t.Result != null)
+                            {
+                                _penumbraUsedFiles = t.Result;
+                                _logger.LogDebug("Reloaded {count} used textures after Penumbra enabled", _penumbraUsedFiles.Count);
+                                _uiThreadActions.Enqueue(() =>
+                                {
+                                    try { RefreshScanResults(false, "penumbra-enabled-used-reloaded"); } catch { }
+                                    _needsUIRefresh = true;
+                                });
+                            }
+                        }
+                        finally
+                        {
+                            _loadingPenumbraUsed = false;
+                        }
+                    }, TaskScheduler.Default);
+                }
+                else
+                {
+                    _uiThreadActions.Enqueue(() => { _needsUIRefresh = true; });
+                }
+            }
+            catch { }
+        };
+        _conversionService.OnPenumbraEnabledChanged += _onPenumbraEnabledChanged;
 
         // Initialize left panel width from config if present
         if (_configService.Current.LeftPanelWidthPx > 0f)
@@ -455,6 +666,24 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
             ? _configService.Current.ScannedFilesActionColWidth
             : 60f;
 
+        // If Penumbra Used Only is enabled from config, preload used files on first open
+        if (_filterPenumbraUsedOnly && _penumbraUsedFiles.Count == 0 && !_loadingPenumbraUsed)
+        {
+            _logger.LogDebug("Preloading Penumbra used textures set on initial open");
+            _loadingPenumbraUsed = true;
+            _ = _conversionService.GetUsedModTexturePathsAsync().ContinueWith(t =>
+            {
+                if (t.Status == TaskStatus.RanToCompletion && t.Result != null)
+                {
+                    _penumbraUsedFiles = t.Result;
+                    _logger.LogDebug("Loaded {count} currently used textures from Penumbra (initial)", _penumbraUsedFiles.Count);
+                    // Trigger a scan refresh to apply filter immediately
+                    try { RefreshScanResults(false, "penumbra-used-prefetch"); } catch { }
+                }
+                _loadingPenumbraUsed = false;
+            });
+        }
+
         // Defer initial scan until first draw to avoid UI hitch on window open
     }
 
@@ -489,6 +718,16 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
         }
         // Trigger initial scan lazily on first draw
         QueueInitialScan();
+
+        // Ensure Used-Only watcher is running/stopped according to current filter state
+        if (_filterPenumbraUsedOnly && !_usedWatcherActive)
+        {
+            StartUsedResourcesWatcher();
+        }
+        else if (!_filterPenumbraUsedOnly && _usedWatcherActive)
+        {
+            StopUsedResourcesWatcher();
+        }
 
         // Preload mod paths lazily if folder structure is enabled
         if (_useFolderStructure && !_loadingModPaths && _modPaths.Count == 0)
@@ -542,7 +781,10 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
         try { _conversionService.OnPenumbraModsChanged -= _onPenumbraModsChanged; } catch { }
         try { _conversionService.OnPenumbraModAdded -= _onPenumbraModAdded; } catch { }
         try { _conversionService.OnPenumbraModDeleted -= _onPenumbraModDeleted; } catch { }
+        try { _conversionService.OnExternalTexturesChanged -= _onExternalTexturesChanged; } catch { }
         try { _conversionService.OnPenumbraModSettingChanged -= _onPenumbraModSettingChanged; } catch { }
+        try { _conversionService.OnPenumbraEnabledChanged -= _onPenumbraEnabledChanged; } catch { }
+        try { _conversionService.OnPlayerResourcesChanged -= _onPlayerResourcesChanged; } catch { }
         try { _configService.OnExcludedTagsUpdated -= _onExcludedTagsUpdated; } catch { }
 
         // Cancel and dispose any outstanding debounce or restore operations
@@ -556,10 +798,86 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
         try { _restoreCancellationTokenSource?.Dispose(); } catch { }
         _restoreCancellationTokenSource = null;
 
+        // Stop Used-Only watcher
+        StopUsedResourcesWatcher();
+
         // Drain any queued UI actions
         try { while (_uiThreadActions.TryDequeue(out _)) { } } catch { }
 
         try { _logger.LogDebug("ConversionUI disposed: DIAG-v3"); } catch { }
+    }
+
+    // Start background watcher to refresh used-only set even without redraw events
+    private void StartUsedResourcesWatcher()
+    {
+        try
+        {
+            StopUsedResourcesWatcher();
+            _usedResourcesPollCts = new CancellationTokenSource();
+            var token = _usedResourcesPollCts.Token;
+            _usedWatcherActive = true;
+            _usedResourcesPollTask = Task.Run(async () =>
+            {
+                while (!token.IsCancellationRequested)
+                {
+                    try
+                    {
+                        await Task.Delay(1500, token).ConfigureAwait(false);
+                        if (token.IsCancellationRequested)
+                            break;
+
+                        if (!_filterPenumbraUsedOnly)
+                            continue;
+                        if (_loadingPenumbraUsed)
+                            continue;
+
+                        _loadingPenumbraUsed = true;
+                        var result = await _conversionService.GetUsedModTexturePathsAsync().ConfigureAwait(false);
+                        try
+                        {
+                            // Compare current vs new set; if changed, update and refresh UI
+                            bool changed = result.Count != _penumbraUsedFiles.Count
+                                || result.Any(p => !_penumbraUsedFiles.Contains(p))
+                                || _penumbraUsedFiles.Any(p => !result.Contains(p));
+                            if (changed)
+                            {
+                                _penumbraUsedFiles = result;
+                                _logger.LogDebug("Used-Only watcher updated: {count} files", _penumbraUsedFiles.Count);
+                                _uiThreadActions.Enqueue(() =>
+                                {
+                                    try { RefreshScanResults(false, "used-only-watcher-update"); } catch { }
+                                    _needsUIRefresh = true;
+                                });
+                            }
+                        }
+                        finally
+                        {
+                            _loadingPenumbraUsed = false;
+                        }
+                    }
+                    catch (TaskCanceledException) { }
+                    catch (Exception ex)
+                    {
+                        try { _logger.LogDebug(ex, "Used-Only watcher iteration failed"); } catch { }
+                    }
+                }
+            }, token);
+            try { _logger.LogDebug("Used-Only watcher started"); } catch { }
+        }
+        catch (Exception ex)
+        {
+            try { _logger.LogDebug(ex, "Failed to start Used-Only watcher"); } catch { }
+        }
+    }
+
+    private void StopUsedResourcesWatcher()
+    {
+        try { _usedResourcesPollCts?.Cancel(); } catch { }
+        try { _usedResourcesPollCts?.Dispose(); } catch { }
+        _usedResourcesPollCts = null;
+        _usedResourcesPollTask = null;
+        _usedWatcherActive = false;
+        try { _logger.LogDebug("Used-Only watcher stopped"); } catch { }
     }
 
     private void DrawSettings()
@@ -1610,11 +1928,7 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
             }
         }
         ShowTooltip("Show only textures currently used by Penumbra.");
-        if (_loadingPenumbraUsed)
-        {
-            ImGui.SameLine();
-            ImGui.Text("(Loading used...)");
-        }
+        // Suppress transient loading text to avoid layout flicker near checkboxes
         ImGui.SameLine();
         if (ImGui.Checkbox("Hide non-convertible mods", ref _filterNonConvertibleMods))
         {
