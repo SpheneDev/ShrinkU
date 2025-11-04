@@ -28,6 +28,7 @@ public sealed class Plugin : IDalamudPlugin
     private readonly ConversionUI _conversionUi;
     private readonly SettingsUI _settingsUi;
     private readonly FirstRunSetupUI _firstRunUi;
+    private readonly ShrinkU.Interop.ShrinkUIpc _shrinkuIpc;
 
     public Plugin(IDalamudPluginInterface pluginInterface, IFramework framework, ICommandManager commandManager, IPluginLog pluginLog)
     {
@@ -39,6 +40,7 @@ public sealed class Plugin : IDalamudPlugin
         _configService = new ShrinkUConfigService(pluginInterface, _logger);
         _penumbraIpc = new PenumbraIpc(pluginInterface, _logger);
         _backupService = new TextureBackupService(_logger, _configService, _penumbraIpc);
+        _shrinkuIpc = new ShrinkU.Interop.ShrinkUIpc(pluginInterface, _logger, _backupService, _penumbraIpc);
         _conversionService = new TextureConversionService(_logger, _penumbraIpc, _backupService, _configService);
 
         // Create UI windows and register
@@ -117,6 +119,7 @@ public sealed class Plugin : IDalamudPlugin
         _pluginInterface.UiBuilder.OpenMainUi -= OpenMainUi;
         try { _conversionUi.Dispose(); } catch { }
         try { _conversionService.Dispose(); } catch { }
+        try { _shrinkuIpc.Dispose(); } catch { }
         try { _logger.LogDebug("ShrinkU plugin disposing: releasing Penumbra subscriptions (DIAG-v3)"); _penumbraIpc.Dispose(); } catch { }
         try { _commandManager.RemoveHandler("/shrinku"); } catch { }
     }
