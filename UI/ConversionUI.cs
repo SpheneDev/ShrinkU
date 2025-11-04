@@ -76,6 +76,9 @@ public sealed class ConversionUI : Window, IDisposable
     private Dictionary<string, IReadOnlyList<string>> _modTags = new(StringComparer.OrdinalIgnoreCase);
     private string _excludedTagsInput = string.Empty;
     private HashSet<string> _excludedTagsNormalized = new(StringComparer.OrdinalIgnoreCase);
+    // Expanded state tracking for table view
+    private HashSet<string> _expandedMods = new(StringComparer.OrdinalIgnoreCase);
+    private HashSet<string> _expandedFolders = new(StringComparer.OrdinalIgnoreCase);
 
     // Cached backup storage info for statistics
     private Task<(long totalSize, int fileCount)>? _backupStorageInfoTask = null;
@@ -1171,6 +1174,23 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
         return files;
     }
 
+    // Collect all folder paths in the category tree for Expand All
+    private void CollectFolderPaths(TableCatNode node, string pathPrefix, List<string> result)
+    {
+        foreach (var (name, child) in OrderedChildrenPairs(node))
+        {
+            var fullPath = string.IsNullOrEmpty(pathPrefix) ? name : $"{pathPrefix}/{name}";
+            result.Add(fullPath);
+            CollectFolderPaths(child, fullPath, result);
+            // Include leaf folder that contains mods even without children
+            foreach (var m in child.Mods)
+            {
+                // no-op for mods; path added above is sufficient for folder expansion
+                break;
+            }
+        }
+    }
+
 private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<string>> visibleByMod, ref int idx, string pathPrefix, int depth = 0)
     {
         const float indentStep = 16f;
@@ -1201,7 +1221,17 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
             ImGui.TableSetColumnIndex(1);
             // Indent folder rows in the File column based on depth, without affecting other columns.
             ImGui.SetCursorPosX(ImGui.GetCursorPosX() + depth * indentStep);
+            // Default-open folders when Penumbra used-only filter is active or when persisted expanded state contains the folder
+            var catDefaultOpen = _filterPenumbraUsedOnly || _expandedFolders.Contains(fullPath);
+            ImGui.SetNextItemOpen(catDefaultOpen, ImGuiCond.Always);
             var catOpen = ImGui.TreeNodeEx($"##cat-{fullPath}", ImGuiTreeNodeFlags.SpanFullWidth | ImGuiTreeNodeFlags.FramePadding | ImGuiTreeNodeFlags.NoTreePushOnOpen);
+            // Track toggles to persist expanded state per folder
+            var catToggled = ImGui.IsItemToggledOpen();
+            if (catToggled)
+            {
+                if (catOpen) _expandedFolders.Add(fullPath);
+                else _expandedFolders.Remove(fullPath);
+            }
             ImGui.SameLine();
             // Use a distinct color for folder icon and label for better visual separation
             var folderColor = new Vector4(0.70f, 0.80f, 1.00f, 1f);
@@ -2294,6 +2324,47 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                     _selectedTextures.Remove(f);
         }
 
+        // Expand / Collapse controls above the table
+        ImGui.SameLine();
+        var expandAllClicked = ImGui.Button("Expand All");
+        ShowTooltip("Expand all mods and folders in the current view.");
+        if (expandAllClicked)
+        {
+            foreach (var m in visibleByMod.Keys)
+                _expandedMods.Add(m);
+            if (root != null)
+            {
+                var allFolders = new List<string>();
+                CollectFolderPaths(root, string.Empty, allFolders);
+                foreach (var fp in allFolders)
+                    _expandedFolders.Add(fp);
+            }
+        }
+        ImGui.SameLine();
+        var collapseAllClicked = ImGui.Button("Collapse All");
+        ShowTooltip("Collapse all mods and folders in the current view.");
+        if (collapseAllClicked)
+        {
+            _expandedMods.Clear();
+            _expandedFolders.Clear();
+        }
+
+        // Indicator when Penumbra Used-Only filter is active
+        if (_filterPenumbraUsedOnly)
+        {
+            ImGui.SameLine();
+            ImGui.PushFont(UiBuilder.IconFont);
+            ImGui.TextColored(ShrinkUColors.WarningLight, FontAwesomeIcon.InfoCircle.ToIconString());
+            var iconHovered = ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled);
+            ImGui.PopFont();
+            if (iconHovered)
+                ImGui.SetTooltip("Only mods currently used by Penumbra are shown. Disable Used-Only to see all mods.");
+
+            ImGui.SameLine();
+            ImGui.TextUnformatted("Penumbra Used-Only active");
+            ShowTooltip("Only mods currently used by Penumbra are shown. Disable Used-Only to see all mods.");
+        }
+
         // Reserve space for action buttons at the bottom by constraining the table height
         float availY = ImGui.GetContentRegionAvail().Y;
         float frameH = ImGui.GetFrameHeight();
@@ -2386,7 +2457,17 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                 var header = hasBackup
                     ? $"{ResolveModDisplayName(mod)} ({convertedAll}/{totalAll})"
                     : $"{ResolveModDisplayName(mod)} ({totalAll})";
+                // Default-open mods when Penumbra used-only filter is active or when persisted expanded state contains the mod
+                var modDefaultOpen = _filterPenumbraUsedOnly || _expandedMods.Contains(mod);
+                ImGui.SetNextItemOpen(modDefaultOpen, ImGuiCond.Always);
                 bool open = ImGui.TreeNodeEx($"##mod-{mod}", nodeFlags);
+                // Track toggles to persist expanded state per mod
+                var modToggled = ImGui.IsItemToggledOpen();
+                if (modToggled)
+                {
+                    if (open) _expandedMods.Add(mod);
+                    else _expandedMods.Remove(mod);
+                }
                 if (ImGui.BeginPopupContextItem($"modctx-{mod}"))
                 {
                     if (ImGui.MenuItem("Open in Penumbra"))

@@ -46,6 +46,7 @@ public sealed class TextureBackupService
         public string PrefixedOriginalPath { get; set; } = string.Empty;
         public string ModRelativePath { get; set; } = string.Empty;
         public string? ModFolderName { get; set; }
+        public string? ModVersion { get; set; }
         public DateTime CreatedUtc { get; set; } = DateTime.UtcNow;
     }
 
@@ -67,6 +68,7 @@ public sealed class TextureBackupService
         public string OriginalFileName { get; set; } = string.Empty;
         public string ModRelativePath { get; set; } = string.Empty;
         public string? ModFolderName { get; set; }
+        public string? ModVersion { get; set; }
         public DateTime CreatedUtc { get; set; } = DateTime.UtcNow;
     }
 
@@ -105,6 +107,42 @@ public sealed class TextureBackupService
         catch
         {
             return null;
+        }
+    }
+
+    // Read mod version from meta.json; returns empty string if unavailable
+    private string? GetModVersion(string modFolder)
+    {
+        try
+        {
+            var modAbs = GetModAbsolutePath(modFolder);
+            if (string.IsNullOrWhiteSpace(modAbs))
+                return string.Empty;
+            var metaPath = Path.Combine(modAbs!, "meta.json");
+            if (!File.Exists(metaPath))
+                return string.Empty;
+            using var s = File.OpenRead(metaPath);
+            using var doc = JsonDocument.Parse(s);
+            if (doc.RootElement.TryGetProperty("Version", out var vers) && vers.ValueKind == JsonValueKind.String)
+            {
+                var v = vers.GetString();
+                return string.IsNullOrWhiteSpace(v) ? string.Empty : v;
+            }
+            if (doc.RootElement.TryGetProperty("FileVersion", out var fvers) && fvers.ValueKind == JsonValueKind.String)
+            {
+                var v = fvers.GetString();
+                return string.IsNullOrWhiteSpace(v) ? string.Empty : v;
+            }
+            if (doc.RootElement.TryGetProperty("VersionString", out var vstr) && vstr.ValueKind == JsonValueKind.String)
+            {
+                var v = vstr.GetString();
+                return string.IsNullOrWhiteSpace(v) ? string.Empty : v;
+            }
+            return string.Empty;
+        }
+        catch
+        {
+            return string.Empty;
         }
     }
 
@@ -169,10 +207,93 @@ public sealed class TextureBackupService
         }
     }
 
+    // Delete old backups for a mod when its version changes
+    private void DeleteOldBackupsForMod(string modFolderName, string currentVersion)
+    {
+        try
+        {
+            var backupDirectory = _configService.Current.BackupFolderPath;
+            if (string.IsNullOrWhiteSpace(backupDirectory) || !Directory.Exists(backupDirectory))
+                return;
+
+            // Delete outdated per-mod ZIPs
+            var modZipDir = Path.Combine(backupDirectory, modFolderName);
+            if (Directory.Exists(modZipDir))
+            {
+                foreach (var zip in Directory.EnumerateFiles(modZipDir, "backup_*.zip"))
+                {
+                    try
+                    {
+                        using var za = ZipFile.OpenRead(zip);
+                        var manifestEntry = za.Entries.FirstOrDefault(e => string.Equals(e.FullName, "manifest.json", StringComparison.OrdinalIgnoreCase));
+                        if (manifestEntry == null)
+                            continue;
+                        using var ms = new MemoryStream();
+                        using (var zs = manifestEntry.Open()) zs.CopyTo(ms);
+                        ms.Position = 0;
+                        var manifest = JsonSerializer.Deserialize<BackupManifest>(ms.ToArray());
+                        if (manifest == null || manifest.Entries.Count == 0)
+                            continue;
+                        // If any entry has a different version, delete this ZIP
+                        var anyDifferent = manifest.Entries.Any(e => !string.Equals(e.ModVersion ?? string.Empty, currentVersion ?? string.Empty, StringComparison.OrdinalIgnoreCase));
+                        if (anyDifferent)
+                        {
+                            try { File.Delete(zip); _logger.LogDebug("Deleted outdated mod backup ZIP {zip}", zip); } catch { }
+                        }
+                    }
+                    catch { }
+                }
+                // If mod folder becomes empty, remove it
+                try
+                {
+                    if (!Directory.EnumerateFileSystemEntries(modZipDir).Any())
+                    {
+                        Directory.Delete(modZipDir, true);
+                        _logger.LogDebug("Deleted empty mod backup folder {dir}", modZipDir);
+                    }
+                }
+                catch { }
+            }
+
+            // Delete outdated session subfolders for this mod
+            foreach (var sessionDir in Directory.EnumerateDirectories(backupDirectory, "session_*"))
+            {
+                try
+                {
+                    var modSub = Path.Combine(sessionDir, modFolderName);
+                    var manifestPath = Path.Combine(modSub, "manifest.json");
+                    if (!Directory.Exists(modSub) || !File.Exists(manifestPath))
+                        continue;
+                    var manifest = JsonSerializer.Deserialize<BackupManifest>(File.ReadAllText(manifestPath));
+                    if (manifest == null || manifest.Entries.Count == 0)
+                        continue;
+                    var anyDifferent = manifest.Entries.Any(e => !string.Equals(e.ModVersion ?? string.Empty, currentVersion ?? string.Empty, StringComparison.OrdinalIgnoreCase));
+                    if (anyDifferent)
+                    {
+                        try
+                        {
+                            Directory.Delete(modSub, true);
+                            _logger.LogDebug("Deleted outdated mod session folder {dir}", modSub);
+                            // If the session becomes empty, remove it too
+                            if (!Directory.EnumerateFileSystemEntries(sessionDir).Any())
+                            {
+                                Directory.Delete(sessionDir, true);
+                                _logger.LogDebug("Deleted empty session folder {dir}", sessionDir);
+                            }
+                        }
+                        catch { }
+                    }
+                }
+                catch { }
+            }
+        }
+        catch { }
+    }
+
     public async Task BackupAsync(Dictionary<string, string[]> textures, IProgress<(string, int, int)>? progress, CancellationToken token)
     {
-        // Build index of already backed up files to avoid overwriting originals with converted versions
-        var existingByMod = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
+        // Build index of already backed up files grouped by mod and version
+        var existingByModVersion = new Dictionary<string, Dictionary<string, HashSet<string>>>(StringComparer.OrdinalIgnoreCase);
         try
         {
             var overview = await GetBackupOverviewAsync().ConfigureAwait(false);
@@ -186,14 +307,21 @@ public sealed class TextureBackupService
                     if (string.IsNullOrWhiteSpace(mod))
                         continue;
 
+                    var version = e.ModVersion ?? string.Empty;
+
                     var key = !string.IsNullOrEmpty(e.PrefixedOriginalPath) ? e.PrefixedOriginalPath : e.OriginalPath;
                     if (string.IsNullOrWhiteSpace(key))
                         continue;
 
-                    if (!existingByMod.TryGetValue(mod, out var set))
+                    if (!existingByModVersion.TryGetValue(mod, out var byVersion))
+                    {
+                        byVersion = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
+                        existingByModVersion[mod] = byVersion;
+                    }
+                    if (!byVersion.TryGetValue(version, out var set))
                     {
                         set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                        existingByMod[mod] = set;
+                        byVersion[version] = set;
                     }
                     set.Add(key);
                 }
@@ -225,11 +353,24 @@ public sealed class TextureBackupService
             var source = kvp.Key;
             var prefixed = BuildPrefixedPath(source);
             var modName = ExtractModFolderName(prefixed) ?? "_unknown";
+            var currentModVersion = GetModVersion(modName) ?? string.Empty;
+            // Optionally delete old backups when a version change is detected
+            try
+            {
+                if (_configService.Current.DeleteOldBackupsOnVersionChange && !string.IsNullOrWhiteSpace(modName))
+                {
+                    DeleteOldBackupsForMod(modName, currentModVersion);
+                }
+            }
+            catch { }
             // Skip backing up files that have already been backed up in any previous session
             try
             {
                 var currentKey = !string.IsNullOrEmpty(prefixed) ? prefixed : source;
-                if (!string.IsNullOrWhiteSpace(modName) && existingByMod.TryGetValue(modName, out var set) && set.Contains(currentKey))
+                if (!string.IsNullOrWhiteSpace(modName)
+                    && existingByModVersion.TryGetValue(modName, out var byVersion)
+                    && byVersion.TryGetValue(currentModVersion, out var set)
+                    && set.Contains(currentKey))
                 {
                     _logger.LogDebug("Skipping backup for already backed up texture {path}", source);
                     continue;
@@ -269,6 +410,7 @@ public sealed class TextureBackupService
                     OriginalFileName = Path.GetFileName(source),
                     ModRelativePath = modRelativePath,
                     ModFolderName = ExtractModFolderName(prefixed),
+                    ModVersion = string.IsNullOrWhiteSpace(modName) ? null : currentModVersion,
                     CreatedUtc = DateTime.UtcNow,
                 };
                 manifest.Entries.Add(entry);
@@ -316,6 +458,7 @@ public sealed class TextureBackupService
                         OriginalFileName = e.OriginalFileName,
                         ModRelativePath = e.ModRelativePath,
                         ModFolderName = e.ModFolderName,
+                        ModVersion = e.ModVersion,
                         CreatedUtc = e.CreatedUtc,
                     }).ToList() };
 
@@ -393,6 +536,7 @@ public sealed class TextureBackupService
                                 PrefixedOriginalPath = e.PrefixedOriginalPath,
                                 ModRelativePath = e.ModRelativePath,
                                 ModFolderName = e.ModFolderName,
+                                ModVersion = e.ModVersion,
                                 CreatedUtc = e.CreatedUtc,
                             });
                         }
@@ -428,6 +572,7 @@ public sealed class TextureBackupService
                             PrefixedOriginalPath = e.PrefixedOriginalPath,
                             ModRelativePath = e.ModRelativePath,
                             ModFolderName = e.ModFolderName,
+                            ModVersion = e.ModVersion,
                             CreatedUtc = e.CreatedUtc,
                         });
                     }

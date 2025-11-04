@@ -125,6 +125,15 @@ public sealed class SettingsUI : Window
                 }
                 ShowTooltip("Delete uncompressed backup folders after ZIP is created.");
 
+                // Delete old backups when mod version changes
+                bool deleteOnVersionChange = _configService.Current.DeleteOldBackupsOnVersionChange;
+                if (ImGui.Checkbox("Delete old backups on version change", ref deleteOnVersionChange))
+                {
+                    _configService.Current.DeleteOldBackupsOnVersionChange = deleteOnVersionChange;
+                    _configService.Save();
+                }
+                ShowTooltip("Automatically delete outdated backups for a mod when its version changes.");
+
                 // Auto-restore for inefficient mods toggle
                 bool autoRestore = _configService.Current.AutoRestoreInefficientMods;
                 if (ImGui.Checkbox("Auto-restore backups for inefficient mods", ref autoRestore))

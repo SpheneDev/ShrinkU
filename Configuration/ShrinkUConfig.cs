@@ -22,6 +22,7 @@ public sealed class ShrinkUConfig : IPluginConfiguration
     public bool EnableZipCompressionForBackups { get; set; } = true;
     public bool DeleteOriginalBackupsAfterCompression { get; set; } = true;
     public bool StrictPerModRestore { get; set; } = true;
+    public bool DeleteOldBackupsOnVersionChange { get; set; } = false;
     // Conversion filters
     public List<string> ExcludedModTags { get; set; } = new List<string> { "UI" };
     public List<string> KnownModTags { get; set; } = new List<string>();
