@@ -15,16 +15,20 @@ public sealed class ShrinkUIpc : IDisposable
     private readonly IDalamudPluginInterface _pi;
     private readonly ILogger _logger;
     private readonly TextureBackupService _backupService;
+    private readonly TextureConversionService _conversionService;
+    private readonly ShrinkU.Configuration.ShrinkUConfigService _configService;
     private readonly PenumbraIpc _penumbraIpc;
 
     private readonly List<IDisposable> _providers = new();
 
-    public ShrinkUIpc(IDalamudPluginInterface pi, ILogger logger, TextureBackupService backupService, PenumbraIpc penumbraIpc)
+    public ShrinkUIpc(IDalamudPluginInterface pi, ILogger logger, TextureBackupService backupService, PenumbraIpc penumbraIpc, ShrinkU.Configuration.ShrinkUConfigService configService, TextureConversionService conversionService)
     {
         _pi = pi;
         _logger = logger;
         _backupService = backupService;
         _penumbraIpc = penumbraIpc;
+        _configService = configService;
+        _conversionService = conversionService;
 
         RegisterProviders();
         try { _logger.LogDebug("ShrinkU IPC providers registered"); } catch { }
@@ -93,7 +97,18 @@ public sealed class ShrinkUIpc : IDisposable
         {
             try
             {
-                return _backupService.RestoreLatestForModAsync(modFolder, progress: null, token: default).GetAwaiter().GetResult();
+                var success = _backupService.RestoreLatestForModAsync(modFolder, progress: null, token: default).GetAwaiter().GetResult();
+                if (success)
+                {
+                    try
+                    {
+                        if (_configService.Current.ExternalConvertedMods.Remove(modFolder))
+                            _configService.Save();
+                    }
+                    catch { }
+                    try { _conversionService.NotifyExternalTextureChange("ipc-restore-latest-for-mod"); } catch { }
+                }
+                return success;
             }
             catch (Exception ex)
             {
@@ -115,6 +130,88 @@ public sealed class ShrinkUIpc : IDisposable
             {
                 _logger.LogDebug(ex, "IPC GetBackupOverviewJson failed");
                 return "[]";
+            }
+        });
+
+        // Allow external controllers to set automatic handling and controller name
+        TryRegisterFuncProvider<(string controllerName, bool handled), bool>("ShrinkU.SetAutomaticController", payload =>
+        {
+            try
+            {
+                var (controllerName, handled) = payload;
+                var name = controllerName ?? string.Empty;
+                _configService.Current.AutomaticControllerName = handled ? name : string.Empty;
+                // Maintain legacy flag for Sphene-specific checks
+                _configService.Current.AutomaticHandledBySphene = handled && name.Equals("Sphene", StringComparison.OrdinalIgnoreCase);
+                _configService.Save();
+                _logger.LogDebug("Automatic controller set via IPC: handled={handled}, name={name}", handled, name);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "IPC SetAutomaticController failed: {name}", payload.controllerName);
+                return false;
+            }
+        });
+
+        // Trigger an automatic conversion run in the background without opening UI
+        TryRegisterFuncProvider<bool>("ShrinkU.StartAutomaticConversion", () =>
+        {
+            try
+            {
+                if (_configService.Current.TextureProcessingMode != ShrinkU.Configuration.TextureProcessingMode.Automatic)
+                {
+                    _logger.LogDebug("Automatic conversion requested but mode is not Automatic");
+                    return false;
+                }
+
+                // Fetch candidates synchronously and schedule conversion in background
+                var candidates = _conversionService.GetAutomaticCandidateTexturesAsync().GetAwaiter().GetResult();
+                if (candidates == null || candidates.Count == 0)
+                {
+                    _logger.LogDebug("Automatic conversion requested but no candidate textures were found");
+                    return false;
+                }
+
+                _ = _conversionService.StartConversionAsync(candidates).ContinueWith(t =>
+                {
+                    if (t.IsFaulted)
+                    {
+                        var ex = t.Exception?.GetBaseException();
+                        _logger.LogDebug(ex, "Background automatic conversion failed");
+                    }
+                    else
+                    {
+                        try
+                        {
+                            // Persist external conversion markers per mod for indicator to survive restarts
+                            var now = DateTime.UtcNow;
+                            foreach (var mod in candidates.Keys)
+                            {
+                                try
+                                {
+                                    _configService.Current.ExternalConvertedMods[mod] = new ShrinkU.Configuration.ExternalChangeMarker
+                                    {
+                                        Reason = "ipc-auto-conversion-complete",
+                                        AtUtc = now,
+                                    };
+                                }
+                                catch { }
+                            }
+                            _configService.Save();
+                        }
+                        catch { }
+                        try { _conversionService.NotifyExternalTextureChange("ipc-auto-conversion-complete"); } catch { }
+                        _logger.LogDebug("Background automatic conversion completed");
+                    }
+                });
+                _logger.LogDebug("Background automatic conversion started");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "IPC StartAutomaticConversion failed");
+                return false;
             }
         });
     }

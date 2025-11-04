@@ -16,6 +16,8 @@ public sealed class ShrinkUConfig : IPluginConfiguration
     public int Version { get; set; } = 1;
     // Texture processing settings
     public TextureProcessingMode TextureProcessingMode { get; set; } = TextureProcessingMode.Manual;
+    public bool AutomaticHandledBySphene { get; set; } = false;
+    public string AutomaticControllerName { get; set; } = string.Empty;
     public bool EnableBackupBeforeConversion { get; set; } = true;
     public bool EnableZipCompressionForBackups { get; set; } = true;
     public bool DeleteOriginalBackupsAfterCompression { get; set; } = true;
@@ -41,12 +43,22 @@ public sealed class ShrinkUConfig : IPluginConfiguration
     public bool ScanSortAsc { get; set; } = true;
     // Control visibility of individual file rows in the overview table
     public bool ShowModFilesInOverview { get; set; } = false;
+    // When converting via ShrinkU UI, include hidden mod textures even if filtered out
+    public bool IncludeHiddenModTexturesOnConvert { get; set; } = true;
 
     // Inefficient mods handling
     public List<string> InefficientMods { get; set; } = new List<string>();
     public bool HideInefficientMods { get; set; } = false;
     public bool AutoRestoreInefficientMods { get; set; } = true;
 
+    public Dictionary<string, ExternalChangeMarker> ExternalConvertedMods { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+
     // First-run setup gating
     public bool FirstRunCompleted { get; set; } = false;
+}
+
+public sealed class ExternalChangeMarker
+{
+    public string Reason { get; set; } = string.Empty;
+    public DateTime AtUtc { get; set; } = DateTime.MinValue;
 }

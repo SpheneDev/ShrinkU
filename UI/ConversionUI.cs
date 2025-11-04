@@ -89,6 +89,9 @@ public sealed class ConversionUI : Window, IDisposable
     private Task<Dictionary<string, TextureBackupService.ModSavingsStats>>? _perModSavingsTask = null;
     private Dictionary<string, TextureBackupService.ModSavingsStats> _cachedPerModSavings = new(StringComparer.OrdinalIgnoreCase);
 
+    private readonly Dictionary<string, Dictionary<string, long>> _cachedPerModOriginalSizes = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, Task<Dictionary<string, long>>> _perModOriginalSizesTasks = new(StringComparer.OrdinalIgnoreCase);
+
     private readonly Dictionary<string, string[]> _texturesToConvert = new(StringComparer.Ordinal);
     private readonly Dictionary<string, List<string>> _scannedByMod = new(StringComparer.OrdinalIgnoreCase);
     private Dictionary<string, string> _modDisplayNames = new(StringComparer.OrdinalIgnoreCase);
@@ -135,6 +138,9 @@ public sealed class ConversionUI : Window, IDisposable
     private readonly Action<string> _onExternalTexturesChanged;
     private readonly Action _onExcludedTagsUpdated;
     private readonly Action _onPlayerResourcesChanged;
+    // Track last external conversion/restore notification to surface UI indicator
+    private DateTime _lastExternalChangeAt = DateTime.MinValue;
+    private string _lastExternalChangeReason = string.Empty;
 
 public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureConversionService conversionService, TextureBackupService backupService, Action? openSettings = null)
         : base("ShrinkU###ShrinkUConversionUI")
@@ -144,9 +150,6 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
         _conversionService = conversionService;
         _backupService = backupService;
         _openSettings = openSettings;
-
-        // Diagnostic marker to confirm updated ConversionUI is loaded and running
-        _logger.LogDebug("ConversionUI initialized: DIAG-v2");
 
         SizeConstraints = new WindowSizeConstraints
         {
@@ -167,6 +170,15 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
             {
                 var target = _cancelTargetMod;
                 _logger.LogDebug("Cancel detected; attempting restore of current mod: {mod}", target);
+                // Gate restore in automatic mode if the target mod contains currently used textures
+                var automaticMode = _configService.Current.TextureProcessingMode == TextureProcessingMode.Automatic;
+                var targetHasUsed = _scannedByMod.TryGetValue(target, out var targetFiles) && targetFiles.Any(f => _penumbraUsedFiles.Contains(f));
+                if (automaticMode && targetHasUsed)
+                {
+                    _logger.LogDebug("Automatic mode active; skipping restore-after-cancel for currently used mod: {mod}", target);
+                    _running = false;
+                    return;
+                }
                 var progress = new Progress<(string, int, int)>(e =>
                 {
                     _currentTexture = e.Item1;
@@ -197,9 +209,25 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
                         if (success)
                         {
                             try { _backupService.RedrawPlayer(); } catch { }
+                            try
+                            {
+                                if (_configService.Current.ExternalConvertedMods.Remove(target))
+                                    _configService.Save();
+                            }
+                            catch { }
                         }
                         RefreshScanResults(true, success ? "restore-after-cancel-success" : "restore-after-cancel-fail");
                         TriggerMetricsRefresh();
+                        // Recompute per-mod savings after restore to refresh Uncompressed/Compressed sizes
+                        _perModSavingsTask = _backupService.ComputePerModSavingsAsync();
+                        _perModSavingsTask.ContinueWith(ps =>
+                        {
+                            if (ps.Status == TaskStatus.RanToCompletion && ps.Result != null)
+                            {
+                                _cachedPerModSavings = ps.Result;
+                                _needsUIRefresh = true;
+                            }
+                        }, TaskScheduler.Default);
                         _ = _backupService.HasBackupForModAsync(target).ContinueWith(bt =>
                         {
                             if (bt.Status == TaskStatus.RanToCompletion)
@@ -298,6 +326,7 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
         _onExternalTexturesChanged = reason =>
         {
             _logger.LogDebug("External texture change: {reason}; refreshing UI and scan state", reason);
+            try { _lastExternalChangeReason = reason ?? string.Empty; _lastExternalChangeAt = DateTime.UtcNow; } catch { }
             // Ensure backup states and metrics reflect latest changes from Sphene
             try { _modsWithBackupCache.Clear(); } catch { }
             try { _modsBackupCheckInFlight.Clear(); } catch { }
@@ -888,11 +917,19 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
         ImGui.Dummy(new Vector2(0, 6f));
         ImGui.SetWindowFontScale(1.0f);
         var mode = _configService.Current.TextureProcessingMode;
-        if (ImGui.BeginCombo("Mode", mode.ToString()))
+        var controller = _configService.Current.AutomaticControllerName ?? string.Empty;
+        var modeDisplay = mode == TextureProcessingMode.Automatic && !string.IsNullOrWhiteSpace(controller)
+            ? $"Automatic (controlled by {controller})"
+            : (mode == TextureProcessingMode.Automatic && _configService.Current.AutomaticHandledBySphene ? "Automatic (controlled by Sphene)" : mode.ToString());
+        var disableModeCombo = mode == TextureProcessingMode.Automatic && (!string.IsNullOrWhiteSpace(controller) || _configService.Current.AutomaticHandledBySphene);
+        if (disableModeCombo) ImGui.BeginDisabled();
+        if (ImGui.BeginCombo("Mode", modeDisplay))
         {
             if (ImGui.Selectable("Manual", mode == TextureProcessingMode.Manual))
             {
                 _configService.Current.TextureProcessingMode = TextureProcessingMode.Manual;
+                _configService.Current.AutomaticHandledBySphene = false;
+                _configService.Current.AutomaticControllerName = string.Empty;
                 _configService.Save();
             }
             if (ImGui.Selectable("Automatic", mode == TextureProcessingMode.Automatic))
@@ -901,6 +938,13 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
                 _configService.Save();
             }
             ImGui.EndCombo();
+        }
+        if (disableModeCombo)
+        {
+            ImGui.EndDisabled();
+            var ctrlLabel = !string.IsNullOrWhiteSpace(controller) ? controller : "Sphene";
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip($"Controlled by {ctrlLabel}");
         }
         ShowTooltip("Choose how textures are processed.");
 
@@ -1057,6 +1101,60 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
         return count;
     }
 
+    // Count total convertable textures recursively within a folder node
+    private int CountTexturesRecursive(TableCatNode node)
+    {
+        var count = 0;
+        foreach (var mod in node.Mods)
+        {
+            if (_scannedByMod.TryGetValue(mod, out var files) && files != null)
+                count += files.Count;
+        }
+        foreach (var child in node.Children.Values)
+            count += CountTexturesRecursive(child);
+        return count;
+    }
+
+    // Count converted textures recursively within a folder node (based on backups/original-size map)
+    private int CountConvertedTexturesRecursive(TableCatNode node)
+    {
+        var count = 0;
+        foreach (var mod in node.Mods)
+        {
+            var hasBackup = GetOrQueryModBackup(mod);
+            if (!hasBackup)
+                continue;
+            if (_scannedByMod.TryGetValue(mod, out var files) && files != null && files.Count > 0)
+            {
+                // Ensure original-size map is hydrated
+                _ = GetOrQueryModOriginalTotal(mod);
+                if (_modPaths.TryGetValue(mod, out var modRoot) && !string.IsNullOrWhiteSpace(modRoot))
+                {
+                    if (_cachedPerModOriginalSizes.TryGetValue(mod, out var map) && map != null && map.Count > 0)
+                    {
+                        foreach (var f in files)
+                        {
+                            try
+                            {
+                                var rel = Path.GetRelativePath(modRoot, f).Replace('\\', '/');
+                                if (map.ContainsKey(rel)) count++;
+                            }
+                            catch { }
+                        }
+                    }
+                    else if (_cachedPerModSavings.TryGetValue(mod, out var s) && s != null && s.ComparedFiles > 0)
+                    {
+                        // Fallback to stats when map not available
+                        count += Math.Min(s.ComparedFiles, files.Count);
+                    }
+                }
+            }
+        }
+        foreach (var child in node.Children.Values)
+            count += CountConvertedTexturesRecursive(child);
+        return count;
+    }
+
     // Collect all visible files under a folder node (recursive over children) for selection/size aggregation
     private List<string> CollectFilesRecursive(TableCatNode node, Dictionary<string, List<string>> visibleByMod)
     {
@@ -1113,26 +1211,16 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
             ImGui.SameLine();
             var totalModsInFolder = CountModsRecursive(child);
             var convertedModsInFolder = CountConvertedModsRecursive(child);
-            ImGui.TextColored(folderColor, $"{name} ({convertedModsInFolder}/{totalModsInFolder})");
+            var totalTexturesInFolder = CountTexturesRecursive(child);
+            var convertedTexturesInFolder = CountConvertedTexturesRecursive(child);
+            ImGui.TextColored(folderColor, $"{name} (mods {convertedModsInFolder}/{totalModsInFolder}, textures {convertedTexturesInFolder}/{totalTexturesInFolder})");
 
             // Uncompressed size for folder contents (include converted and unconverted mods)
             ImGui.TableSetColumnIndex(3);
             long folderOriginalBytes = 0;
             foreach (var m in child.Mods)
             {
-                long modOrig = 0;
-                if (_cachedPerModSavings.TryGetValue(m, out var stats) && stats != null && stats.OriginalBytes > 0)
-                {
-                    modOrig = stats.OriginalBytes;
-                }
-                else if (_scannedByMod.TryGetValue(m, out var allFiles) && allFiles != null)
-                {
-                    foreach (var f in allFiles)
-                    {
-                        var sz = GetCachedOrComputeSize(f);
-                        if (sz > 0) modOrig += sz;
-                    }
-                }
+                var modOrig = GetOrQueryModOriginalTotal(m);
                 if (modOrig > 0)
                     folderOriginalBytes += modOrig;
             }
@@ -1141,7 +1229,7 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
             else
                 ImGui.TextUnformatted("");
 
-            // Compressed size aggregated preferring per-mod stats; fallback to visible files in folder
+            // Compressed size aggregated preferring per-mod stats; show '-' when none
             ImGui.TableSetColumnIndex(2);
             long folderCompressedBytes = 0;
             foreach (var m in child.Mods)
@@ -1157,7 +1245,9 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                 DrawRightAlignedSizeColored(folderCompressedBytes, color);
             }
             else
+            {
                 DrawRightAlignedTextColored("-", _compressedTextColor);
+            }
 
             if (catOpen)
             {
@@ -1201,7 +1291,35 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                         var sz = GetCachedOrComputeSize(f);
                         if (sz > 0) modVisibleSize += sz;
                     }
-                    var header = $"{ResolveModDisplayName(mod)} ({files.Count})";
+                    // Build header using full mod totals (independent of filters)
+                    int totalAll = _scannedByMod.TryGetValue(mod, out var allModFiles2) && allModFiles2 != null ? allModFiles2.Count : files.Count;
+                    int convertedAll = 0;
+                    if (hasBackup && totalAll > 0)
+                    {
+                        // Ensure original-size map is hydrated
+                        _ = GetOrQueryModOriginalTotal(mod);
+                        if (_modPaths.TryGetValue(mod, out var modRoot2) && !string.IsNullOrWhiteSpace(modRoot2))
+                        {
+                            if (_cachedPerModOriginalSizes.TryGetValue(mod, out var map2) && map2 != null && map2.Count > 0 && allModFiles2 != null)
+                            {
+                                foreach (var f in allModFiles2)
+                                {
+                                    try
+                                    {
+                                        var rel = Path.GetRelativePath(modRoot2, f).Replace('\\', '/');
+                                        if (map2.ContainsKey(rel)) convertedAll++;
+                                    }
+                                    catch { }
+                                }
+                            }
+                        }
+                        // Fallback to stats count when map not yet available
+                        if (convertedAll == 0 && _cachedPerModSavings.TryGetValue(mod, out var s2) && s2 != null && s2.ComparedFiles > 0)
+                            convertedAll = Math.Min(s2.ComparedFiles, totalAll);
+                    }
+                    var header = hasBackup
+                        ? $"{ResolveModDisplayName(mod)} ({convertedAll}/{totalAll})"
+                        : $"{ResolveModDisplayName(mod)} ({totalAll})";
                     bool open = ImGui.TreeNodeEx($"##mod-{mod}", nodeFlags);
                     if (ImGui.BeginPopupContextItem($"modctx-{mod}"))
                     {
@@ -1227,6 +1345,33 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                     ImGui.PopFont();
                     ImGui.SameLine();
                     ImGui.TextUnformatted(header);
+                    // If an external change was detected recently or persisted, show a small plug indicator
+                    var hasPersistent = _configService.Current.ExternalConvertedMods.ContainsKey(mod);
+                    var showExternal = hasBackup && (((DateTime.UtcNow - _lastExternalChangeAt).TotalSeconds < 30 && !string.IsNullOrEmpty(_lastExternalChangeReason)) || hasPersistent);
+                    if (showExternal)
+                    {
+                        ImGui.SameLine();
+                        ImGui.PushFont(UiBuilder.IconFont);
+                        ImGui.TextColored(new Vector4(0.70f, 0.85f, 1.00f, 1f), FontAwesomeIcon.Plug.ToIconString());
+                        ImGui.PopFont();
+                        if (ImGui.IsItemHovered())
+                        {
+                            string reason = _lastExternalChangeReason;
+                            if (hasPersistent)
+                            {
+                                try
+                                {
+                                    if (_configService.Current.ExternalConvertedMods.TryGetValue(mod, out var marker) && marker != null)
+                                        reason = marker.Reason ?? reason;
+                                }
+                                catch { }
+                            }
+                            var tip = !string.IsNullOrWhiteSpace(reason) && reason.Equals("ipc-auto-conversion-complete", StringComparison.OrdinalIgnoreCase)
+                                ? "Automatic via Sphene"
+                                : string.IsNullOrWhiteSpace(reason) ? "External conversion detected" : "External conversion detected: " + reason;
+                            ImGui.SetTooltip(tip);
+                        }
+                    }
                     ImGui.SameLine();
                     if (IsModInefficient(mod))
                     {
@@ -1254,7 +1399,7 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                 {
                     modOriginalBytes = modStats.OriginalBytes;
                 }
-                else if (_scannedByMod.TryGetValue(mod, out var allModFiles) && allModFiles != null)
+                else if (!hasBackup && _scannedByMod.TryGetValue(mod, out var allModFiles) && allModFiles != null)
                 {
                     foreach (var f in allModFiles)
                     {
@@ -1265,18 +1410,20 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                     DrawRightAlignedSize(modOriginalBytes);
 
                     ImGui.TableSetColumnIndex(2);
-                var modCurrentBytes = hasBackup ? (modStats?.CurrentBytes ?? 0) : 0;
-                if (modCurrentBytes > 0)
-                {
-                    var color = modCurrentBytes > modOriginalBytes ? ShrinkUColors.WarningLight : _compressedTextColor;
-                    DrawRightAlignedSizeColored(modCurrentBytes, color);
-                }
-                else
-                    DrawRightAlignedTextColored("-", _compressedTextColor);
+                    var modCurrentBytes = hasBackup ? (modStats?.CurrentBytes ?? 0) : 0;
+                    if (modCurrentBytes <= 0)
+                    {
+                        DrawRightAlignedTextColored("-", _compressedTextColor);
+                    }
+                    else
+                    {
+                        var color = modCurrentBytes > modOriginalBytes ? ShrinkUColors.WarningLight : _compressedTextColor;
+                        DrawRightAlignedSizeColored(modCurrentBytes, color);
+                    }
 
                     // Action column
                     ImGui.TableSetColumnIndex(4);
-                    ImGui.BeginDisabled(_running);
+                    ImGui.BeginDisabled(_running || _conversionService.IsConverting);
                     if (hasBackup || files.Count > 0)
                     {
                         var actionLabel = hasBackup ? $"Restore##restore-{mod}" : $"Convert##convert-{mod}";
@@ -1296,7 +1443,11 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                             ImGui.PushStyleColor(ImGuiCol.Text, ShrinkUColors.ButtonTextOnAccent);
                         }
 
-                        ImGui.BeginDisabled(excluded);
+                        var automaticMode = _configService.Current.TextureProcessingMode == TextureProcessingMode.Automatic;
+                        bool modHasUsed = false;
+                        try { modHasUsed = files.Any(f => _penumbraUsedFiles.Contains(f)); } catch { }
+                        var restoreDisabledByAuto = automaticMode && hasBackup && modHasUsed;
+                        ImGui.BeginDisabled(excluded || restoreDisabledByAuto || _conversionService.IsConverting);
                         if (ImGui.Button(actionLabel))
                         {
                             _running = true;
@@ -1309,22 +1460,49 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                             _currentRestoreMod = mod;
                             var progress = new Progress<(string, int, int)>(e => { _currentTexture = e.Item1; _backupIndex = e.Item2; _backupTotal = e.Item3; _currentRestoreModIndex = e.Item2; _currentRestoreModTotal = e.Item3; });
                             _ = _backupService.RestoreLatestForModAsync(mod, progress, CancellationToken.None)
-                                .ContinueWith(_ => {
+                                .ContinueWith(t => {
+                                    var success = t.Status == TaskStatus.RanToCompletion && t.Result;
                                     try { _backupService.RedrawPlayer(); } catch { }
                                     _logger.LogDebug("Heavy scan triggered: restore completed (mod button in folder view)");
                                     RefreshScanResults(true, "restore-folder-view");
                                     TriggerMetricsRefresh();
+                                    // Recompute per-mod savings after restore to refresh Uncompressed/Compressed sizes
+                                    _perModSavingsTask = _backupService.ComputePerModSavingsAsync();
+                                    _perModSavingsTask.ContinueWith(ps =>
+                                    {
+                                        if (ps.Status == TaskStatus.RanToCompletion && ps.Result != null)
+                                        {
+                                            _cachedPerModSavings = ps.Result;
+                                            _needsUIRefresh = true;
+                                        }
+                                    }, TaskScheduler.Default);
                                     _ = _backupService.HasBackupForModAsync(mod).ContinueWith(bt =>
                                     {
                                         if (bt.Status == TaskStatus.RanToCompletion)
                                             _modsWithBackupCache[mod] = bt.Result;
                                     });
+                                    if (success)
+                                    {
+                                        try
+                                        {
+                                            if (_configService.Current.ExternalConvertedMods.Remove(mod))
+                                                _configService.Save();
+                                        }
+                                        catch { }
+                                    }
                                     _running = false;
                                 });
                             }
                             else
                             {
-                            var toConvert = files.ToDictionary(f => f, f => Array.Empty<string>(), StringComparer.Ordinal);
+                            var allFilesForMod = files;
+                            try
+                            {
+                                if (_configService.Current.IncludeHiddenModTexturesOnConvert && _scannedByMod.TryGetValue(mod, out var all) && all != null && all.Count > 0)
+                                    allFilesForMod = all;
+                            }
+                            catch { }
+                            var toConvert = allFilesForMod.ToDictionary(f => f, f => Array.Empty<string>(), StringComparer.Ordinal);
                             // Reset progress state for a fresh conversion
                             ResetConversionProgress();
                             ResetRestoreProgress();
@@ -1342,10 +1520,25 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                         }
                         // Tooltip for action button (Convert/Restore)
                         ImGui.PopStyleColor(1);
-                        if (excluded && ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
-                            ImGui.SetTooltip("Mod excluded by tags");
-                        else
-                            ShowTooltip(hasBackup ? "Restore backups for this mod." : "Convert all visible textures for this mod.");
+                        if (ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
+                        {
+                            if (excluded)
+                                ImGui.SetTooltip("Mod excluded by tags");
+                            else if (restoreDisabledByAuto)
+                                ImGui.SetTooltip("Automatic mode active: restoring currently used textures is disabled.");
+                            else
+                            {
+                                if (hasBackup)
+                                    ShowTooltip("Restore backups for this mod.");
+                                else
+                                {
+                                    var msg = _configService.Current.IncludeHiddenModTexturesOnConvert
+                                        ? "Convert all textures for this mod."
+                                        : "Convert all visible textures for this mod.";
+                                    ShowTooltip(msg);
+                                }
+                            }
+                        }
                         ImGui.PopStyleColor(3);
                         ImGui.EndDisabled();
                     }
@@ -1381,14 +1574,48 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                                 
 
                                 ImGui.TableSetColumnIndex(2);
+                                var hasBackupForMod = GetOrQueryModBackup(mod);
                                 var fileSize = GetCachedOrComputeSize(file);
-                                if (fileSize > 0)
-                                    DrawRightAlignedSizeColored(fileSize, _compressedTextColor);
+                                if (!hasBackupForMod)
+                                {
+                                    DrawRightAlignedTextColored("-", _compressedTextColor);
+                                }
                                 else
-                                    ImGui.TextUnformatted("");
+                                {
+                                    if (fileSize > 0)
+                                        DrawRightAlignedSizeColored(fileSize, _compressedTextColor);
+                                    else
+                                        ImGui.TextUnformatted("");
+                                }
 
                                 ImGui.TableSetColumnIndex(3);
-                                ImGui.TextUnformatted("");
+                                if (!hasBackupForMod)
+                                {
+                                    if (fileSize > 0)
+                                        DrawRightAlignedSize(fileSize);
+                                    else
+                                        ImGui.TextUnformatted("");
+                                }
+                                else
+                                {
+                                    long originalSize = 0;
+                                    if (_modPaths.TryGetValue(mod, out var modRoot) && !string.IsNullOrWhiteSpace(modRoot))
+                                    {
+                                        try
+                                        {
+                                            var rel = Path.GetRelativePath(modRoot, file).Replace('\\', '/');
+                                            if (_cachedPerModOriginalSizes.TryGetValue(mod, out var map) && map != null)
+                                            {
+                                                map.TryGetValue(rel, out originalSize);
+                                            }
+                                        }
+                                        catch { }
+                                    }
+                                    if (originalSize > 0)
+                                        DrawRightAlignedSize(originalSize);
+                                    else
+                                        ImGui.TextUnformatted("");
+                                }
 
                                 ImGui.TableSetColumnIndex(4);
                                 idx++;
@@ -1407,7 +1634,7 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
         ImGui.TextColored(ShrinkUColors.Accent, "Actions");
         ImGui.Dummy(new Vector2(0, 6f));
         ImGui.SetWindowFontScale(1.0f);
-        ImGui.BeginDisabled(_running);
+        ImGui.BeginDisabled(_running || _conversionService.IsConverting);
         if (ImGui.Button("Re-Scan All Mod Textures"))
         {
             _ = _conversionService.GetGroupedCandidateTexturesAsync().ContinueWith(t =>
@@ -1452,7 +1679,7 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
         ShowTooltip("Scan all mods for candidate textures and refresh the table.");
         ImGui.EndDisabled();
 
-        if (!_running)
+        if (!(_running || _conversionService.IsConverting))
         {
             // Aggregate mod statistics
             int totalMods = _scannedByMod.Count;
@@ -1520,6 +1747,8 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                 ImGui.Text($"File: {_currentTexture}");
             }
 
+            // Disable cancel when conversion was initiated externally (Sphene automatic)
+            ImGui.BeginDisabled(!_running);
             if (ImGui.Button("Cancel"))
             {
                 // Mark that we want to restore the currently converting mod after cancellation completes
@@ -1530,6 +1759,7 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                 _restoreCancellationTokenSource?.Cancel();
                 _logger.LogDebug("Cancel pressed; will restore current mod {mod} after conversion stops", _cancelTargetMod);
             }
+            ImGui.EndDisabled();
             ShowTooltip("Cancel the current conversion or restore operation.");
         }
     }
@@ -2127,7 +2357,35 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                     var sz = GetCachedOrComputeSize(f);
                     if (sz > 0) modVisibleSize += sz;
                 }
-                var header = $"{ResolveModDisplayName(mod)} ({files.Count})";
+                // Build header using full mod totals (independent of filters)
+                int totalAll = _scannedByMod.TryGetValue(mod, out var allModFiles) && allModFiles != null ? allModFiles.Count : files.Count;
+                int convertedAll = 0;
+                if (hasBackup && totalAll > 0)
+                {
+                    // Ensure original-size map is hydrated
+                    _ = GetOrQueryModOriginalTotal(mod);
+                    if (_modPaths.TryGetValue(mod, out var modRoot) && !string.IsNullOrWhiteSpace(modRoot))
+                    {
+                        if (_cachedPerModOriginalSizes.TryGetValue(mod, out var map) && map != null && map.Count > 0 && allModFiles != null)
+                        {
+                            foreach (var f in allModFiles)
+                            {
+                                try
+                                {
+                                    var rel = Path.GetRelativePath(modRoot, f).Replace('\\', '/');
+                                    if (map.ContainsKey(rel)) convertedAll++;
+                                }
+                                catch { }
+                            }
+                        }
+                    }
+                    // Fallback to stats count when map not yet available
+                    if (convertedAll == 0 && _cachedPerModSavings.TryGetValue(mod, out var s) && s != null && s.ComparedFiles > 0)
+                        convertedAll = Math.Min(s.ComparedFiles, totalAll);
+                }
+                var header = hasBackup
+                    ? $"{ResolveModDisplayName(mod)} ({convertedAll}/{totalAll})"
+                    : $"{ResolveModDisplayName(mod)} ({totalAll})";
                 bool open = ImGui.TreeNodeEx($"##mod-{mod}", nodeFlags);
                 if (ImGui.BeginPopupContextItem($"modctx-{mod}"))
                 {
@@ -2154,6 +2412,33 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                 ImGui.PopFont();
                 ImGui.SameLine();
                 ImGui.TextUnformatted(header);
+                // If an external change was detected recently or persisted, show a small plug indicator
+                var hasPersistent = _configService.Current.ExternalConvertedMods.ContainsKey(mod);
+                var showExternal = hasBackup && (((DateTime.UtcNow - _lastExternalChangeAt).TotalSeconds < 30 && !string.IsNullOrEmpty(_lastExternalChangeReason)) || hasPersistent);
+                if (showExternal)
+                {
+                    ImGui.SameLine();
+                    ImGui.PushFont(UiBuilder.IconFont);
+                    ImGui.TextColored(new Vector4(0.70f, 0.85f, 1.00f, 1f), FontAwesomeIcon.Plug.ToIconString());
+                    ImGui.PopFont();
+                    if (ImGui.IsItemHovered())
+                    {
+                        string reason = _lastExternalChangeReason;
+                        if (hasPersistent)
+                        {
+                            try
+                            {
+                                if (_configService.Current.ExternalConvertedMods.TryGetValue(mod, out var marker) && marker != null)
+                                    reason = marker.Reason ?? reason;
+                            }
+                            catch { }
+                        }
+                        var tip = !string.IsNullOrWhiteSpace(reason) && reason.Equals("ipc-auto-conversion-complete", StringComparison.OrdinalIgnoreCase)
+                            ? "Automatic via Sphene"
+                            : string.IsNullOrWhiteSpace(reason) ? "External conversion detected" : "External conversion detected: " + reason;
+                        ImGui.SetTooltip(tip);
+                    }
+                }
                 ImGui.SameLine();
                 if (IsModInefficient(mod))
                 {
@@ -2173,19 +2458,7 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                 // Uncompressed and Compressed columns for mod row
                 ImGui.TableSetColumnIndex(3);
                 _cachedPerModSavings.TryGetValue(mod, out var modStats);
-                long modOriginalBytes = 0;
-                if (modStats != null && modStats.OriginalBytes > 0)
-                {
-                    modOriginalBytes = modStats.OriginalBytes;
-                }
-                else if (_scannedByMod.TryGetValue(mod, out var allModFiles) && allModFiles != null)
-                {
-                    foreach (var f in allModFiles)
-                    {
-                        var sz = GetCachedOrComputeSize(f);
-                        if (sz > 0) modOriginalBytes += sz;
-                    }
-                }
+                long modOriginalBytes = GetOrQueryModOriginalTotal(mod);
                 if (modOriginalBytes > 0)
                     DrawRightAlignedSize(modOriginalBytes);
                 else
@@ -2193,17 +2466,20 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
 
                 ImGui.TableSetColumnIndex(2);
                 var modCurrentBytes = hasBackup ? (modStats?.CurrentBytes ?? 0) : 0; // force 0 when no backup
-                if (modCurrentBytes > 0)
+                if (modCurrentBytes <= 0)
+                {
+                    // After restore or when no compressed stats exist, show '-'
+                    DrawRightAlignedTextColored("-", _compressedTextColor);
+                }
+                else
                 {
                     var color = modCurrentBytes > modOriginalBytes ? ShrinkUColors.WarningLight : _compressedTextColor;
                     DrawRightAlignedSizeColored(modCurrentBytes, color);
                 }
-                else
-                    DrawRightAlignedTextColored("-", _compressedTextColor);
 
                 // Action column
                 ImGui.TableSetColumnIndex(4);
-                ImGui.BeginDisabled(_running);
+                ImGui.BeginDisabled(_running || _conversionService.IsConverting);
                 // hasBackup already computed above
                 if (hasBackup || files.Count > 0)
                 {
@@ -2238,22 +2514,49 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                             _currentRestoreMod = mod;
                             var progress = new Progress<(string, int, int)>(e => { _currentTexture = e.Item1; _backupIndex = e.Item2; _backupTotal = e.Item3; _currentRestoreModIndex = e.Item2; _currentRestoreModTotal = e.Item3; });
                             _ = _backupService.RestoreLatestForModAsync(mod, progress, CancellationToken.None)
-                                .ContinueWith(_ => {
+                                .ContinueWith(t => {
+                                    var success = t.Status == TaskStatus.RanToCompletion && t.Result;
                                     try { _backupService.RedrawPlayer(); } catch { }
                                     _logger.LogDebug("Heavy scan triggered: restore completed (mod button in mod-only view, async)");
                                     RefreshScanResults(true, "restore-mod-only-view-async");
                                     TriggerMetricsRefresh();
+                                    // Recompute per-mod savings after restore to refresh Uncompressed/Compressed sizes
+                                    _perModSavingsTask = _backupService.ComputePerModSavingsAsync();
+                                    _perModSavingsTask.ContinueWith(ps =>
+                                    {
+                                        if (ps.Status == TaskStatus.RanToCompletion && ps.Result != null)
+                                        {
+                                            _cachedPerModSavings = ps.Result;
+                                            _needsUIRefresh = true;
+                                        }
+                                    }, TaskScheduler.Default);
                                     _ = _backupService.HasBackupForModAsync(mod).ContinueWith(bt =>
                                     {
                                         if (bt.Status == TaskStatus.RanToCompletion)
                                             _modsWithBackupCache[mod] = bt.Result;
                                     });
+                                    if (success)
+                                    {
+                                        try
+                                        {
+                                            if (_configService.Current.ExternalConvertedMods.Remove(mod))
+                                                _configService.Save();
+                                        }
+                                        catch { }
+                                    }
                                     _running = false;
                                 });
                         }
                         else
                         {
-                            var toConvert = files.ToDictionary(f => f, f => Array.Empty<string>(), StringComparer.Ordinal);
+                            var allFilesForMod = files;
+                            try
+                            {
+                                if (_configService.Current.IncludeHiddenModTexturesOnConvert && _scannedByMod.TryGetValue(mod, out var all) && all != null && all.Count > 0)
+                                    allFilesForMod = all;
+                            }
+                            catch { }
+                            var toConvert = allFilesForMod.ToDictionary(f => f, f => Array.Empty<string>(), StringComparer.Ordinal);
                             // Reset progress state for a fresh conversion
                             ResetConversionProgress();
                             ResetRestoreProgress();
@@ -2275,7 +2578,17 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                     if (excluded && ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
                         ImGui.SetTooltip("Mod excluded by tags");
                     else
-                        ShowTooltip(hasBackup ? "Restore backups for this mod." : "Convert all visible textures for this mod.");
+                    {
+                        if (hasBackup)
+                            ShowTooltip("Restore backups for this mod.");
+                        else
+                        {
+                            var msg = _configService.Current.IncludeHiddenModTexturesOnConvert
+                                ? "Convert all textures for this mod."
+                                : "Convert all visible textures for this mod.";
+                            ShowTooltip(msg);
+                        }
+                    }
                     ImGui.EndDisabled();
                     ImGui.PopStyleColor(3);
                 }
@@ -2283,6 +2596,21 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
 
                 if (open)
                 {
+                    // Warm up original-size map for this mod when expanded
+                    if (!_cachedPerModOriginalSizes.ContainsKey(mod) && !_perModOriginalSizesTasks.ContainsKey(mod))
+                    {
+                        _perModOriginalSizesTasks[mod] = _backupService.GetLatestOriginalSizesForModAsync(mod);
+                        _perModOriginalSizesTasks[mod].ContinueWith(t =>
+                        {
+                            if (t.Status == TaskStatus.RanToCompletion && t.Result != null)
+                            {
+                                _cachedPerModOriginalSizes[mod] = t.Result;
+                                _needsUIRefresh = true;
+                            }
+                            _perModOriginalSizesTasks.Remove(mod);
+                        }, TaskScheduler.Default);
+                    }
+
                     if (_configService.Current.ShowModFilesInOverview)
                     {
                         // Child file rows
@@ -2311,14 +2639,49 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                             if (ImGui.IsItemHovered())
                                 ImGui.SetTooltip(file);
 
-                            // Per-file size (now in Uncompressed column 3)
+                            // Compressed column: show '-' when no backup; otherwise current file size
                             ImGui.TableSetColumnIndex(2);
-                            ImGui.TextUnformatted("");
+                            if (hasBackup)
+                            {
+                                var currentSize = GetCachedOrComputeSize(file);
+                                DrawRightAlignedSize(currentSize);
+                            }
+                            else
+                            {
+                                DrawRightAlignedTextColored("-", _compressedTextColor);
+                            }
 
+                            // Uncompressed column: show original size when backup exists; otherwise visible current size
                             ImGui.TableSetColumnIndex(3);
-                            var fileSize = GetCachedOrComputeSize(file);
-                            DrawRightAlignedSize(fileSize);
-                            
+                            long originalSize = 0;
+                            if (hasBackup)
+                            {
+                                if (_modPaths.TryGetValue(mod, out var modRoot) && !string.IsNullOrWhiteSpace(modRoot))
+                                {
+                                    try
+                                    {
+                                        var rel = Path.GetRelativePath(modRoot, file).Replace('\\', '/');
+                                        if (_cachedPerModOriginalSizes.TryGetValue(mod, out var map) && map != null)
+                                        {
+                                            map.TryGetValue(rel, out originalSize);
+                                        }
+                                    }
+                                    catch { }
+                                }
+                                if (originalSize > 0)
+                                    DrawRightAlignedSize(originalSize);
+                                else
+                                    ImGui.TextUnformatted("");
+                            }
+                            else
+                            {
+                                var currentSize = GetCachedOrComputeSize(file);
+                                if (currentSize > 0)
+                                    DrawRightAlignedSize(currentSize);
+                                else
+                                    ImGui.TextUnformatted("");
+                            }
+
                             idx++;
                         }
                     }
@@ -2379,31 +2742,112 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
         {
             long totalUncompressed = 0;
             long totalCompressed = 0;
+            long savedBytes = 0;
+            bool showFiles = _configService.Current.ShowModFilesInOverview;
             foreach (var m in mods)
             {
                 var hasBackupM = GetOrQueryModBackup(m);
-                if (!hasBackupM) continue; // Only include converted mods in both sums
-                
-                // Get original size for converted mod
-                long modOrig = 0;
-                if (_cachedPerModSavings.TryGetValue(m, out var stats) && stats != null && stats.OriginalBytes > 0)
+                visibleByMod.TryGetValue(m, out var files);
+                if (showFiles)
                 {
-                    modOrig = stats.OriginalBytes;
-                }
-                else if (_scannedByMod.TryGetValue(m, out var allFiles) && allFiles != null)
-                {
-                    foreach (var f in allFiles)
+                    long perFileUncompressed = 0;
+                    long perFileCompressed = 0;
+                    long perFileSaved = 0;
+                    bool anyFileOrigShown = false;
+                    if (files != null)
                     {
-                        var sz = GetCachedOrComputeSize(f);
-                        if (sz > 0) modOrig += sz;
+                        foreach (var file in files)
+                        {
+                            if (hasBackupM)
+                            {
+                                long orig = 0;
+                                if (_modPaths.TryGetValue(m, out var modRoot) && !string.IsNullOrWhiteSpace(modRoot))
+                                {
+                                    try
+                                    {
+                                        var rel = Path.GetRelativePath(modRoot, file).Replace('\\', '/');
+                                        if (_cachedPerModOriginalSizes.TryGetValue(m, out var map) && map != null)
+                                            map.TryGetValue(rel, out orig);
+                                    }
+                                    catch { }
+                                }
+                                if (orig > 0)
+                                {
+                                    perFileUncompressed += orig;
+                                    anyFileOrigShown = true;
+                                }
+                                var cur = GetCachedOrComputeSize(file);
+                                if (cur > 0)
+                                {
+                                    perFileCompressed += cur;
+                                    if (orig > 0)
+                                        perFileSaved += Math.Max(0, orig - cur);
+                                }
+                            }
+                            else
+                            {
+                                var cur = GetCachedOrComputeSize(file);
+                                if (cur > 0) perFileUncompressed += cur;
+                            }
+                        }
+                    }
+
+                    if (anyFileOrigShown || !hasBackupM)
+                    {
+                        // File rows reflect uncompressed values; use them directly
+                        totalUncompressed += perFileUncompressed;
+                        totalCompressed += perFileCompressed;
+                        savedBytes += perFileSaved;
+                    }
+                    else
+                    {
+                        long modVisibleSize = 0;
+                        if (files != null)
+                        {
+                            foreach (var f in files)
+                            {
+                                var s = GetCachedOrComputeSize(f);
+                                if (s > 0) modVisibleSize += s;
+                            }
+                        }
+                        var modOrig = GetOrQueryModOriginalTotal(m);
+                        if (modOrig > 0) totalUncompressed += modOrig; else totalUncompressed += modVisibleSize;
+
+                        long modCur = 0;
+                        if (_cachedPerModSavings.TryGetValue(m, out var stats) && stats != null)
+                        {
+                            if (stats.CurrentBytes > 0)
+                                modCur = stats.CurrentBytes;
+                            if (stats.OriginalBytes > 0 && stats.CurrentBytes > 0)
+                                savedBytes += Math.Max(0, stats.OriginalBytes - stats.CurrentBytes);
+                        }
+                        if (modCur > 0) totalCompressed += modCur;
                     }
                 }
-                if (modOrig > 0)
-                    totalUncompressed += modOrig;
-                
-                // Get compressed size for converted mod
-                if (stats != null && stats.CurrentBytes > 0)
-                    totalCompressed += stats.CurrentBytes;
+                else
+                {
+                    long modVisibleSize = 0;
+                    if (files != null)
+                    {
+                        foreach (var f in files)
+                        {
+                            var s = GetCachedOrComputeSize(f);
+                            if (s > 0) modVisibleSize += s;
+                        }
+                    }
+                    var modOrig = GetOrQueryModOriginalTotal(m);
+                    if (modOrig > 0) totalUncompressed += modOrig; else totalUncompressed += modVisibleSize;
+
+                    long modCur = 0;
+                    if (hasBackupM && _cachedPerModSavings.TryGetValue(m, out var stats) && stats != null)
+                    {
+                        if (stats.CurrentBytes > 0)
+                            modCur = stats.CurrentBytes;
+                        if (stats.OriginalBytes > 0 && stats.CurrentBytes > 0)
+                            savedBytes += Math.Max(0, stats.OriginalBytes - stats.CurrentBytes);
+                    }
+                    if (modCur > 0) totalCompressed += modCur;
+                }
             }
 
             var footerFlags = ImGuiTableFlags.BordersOuter | ImGuiTableFlags.BordersV | ImGuiTableFlags.RowBg | ImGuiTableFlags.SizingFixedFit;
@@ -2419,7 +2863,7 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                 ImGui.TableSetBgColor(ImGuiTableBgTarget.RowBg0, ImGui.GetColorU32((_zebraRowIndex++ % 2 == 0) ? _zebraEvenColor : _zebraOddColor));
                 ImGui.TableSetColumnIndex(1);
                 var reduction = totalUncompressed > 0
-                    ? MathF.Max(0f, (float)(totalUncompressed - totalCompressed) / totalUncompressed * 100f)
+                    ? MathF.Max(0f, (float)savedBytes / totalUncompressed * 100f)
                     : 0f;
                 ImGui.TextUnformatted($"Total saved ({reduction.ToString("0.00")}%)");
                 ImGui.TableSetColumnIndex(2);
@@ -2451,7 +2895,7 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
         bool hasRestorableMods = restorableMods > 0;
         bool hasOnlyRestorableMods = hasRestorableMods && !hasConvertableMods;
 
-        ImGui.BeginDisabled(_running || hasOnlyRestorableMods || !hasConvertableMods);
+                ImGui.BeginDisabled(_running || _conversionService.IsConverting || hasOnlyRestorableMods || !hasConvertableMods);
         ImGui.PushStyleColor(ImGuiCol.Button, ShrinkUColors.Accent);
         ImGui.PushStyleColor(ImGuiCol.ButtonHovered, ShrinkUColors.AccentHovered);
         ImGui.PushStyleColor(ImGuiCol.ButtonActive, ShrinkUColors.AccentActive);
@@ -2479,9 +2923,16 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
         ImGui.SameLine();
 
         var restorableModsForAction = GetRestorableModsForCurrentSelection();
-        bool canRestore = restorableModsForAction.Count > 0;
+        var automaticMode = _configService.Current.TextureProcessingMode == TextureProcessingMode.Automatic;
+        var restorableFiltered = automaticMode
+            ? restorableModsForAction.Where(m =>
+                !_scannedByMod.TryGetValue(m, out var files) || !files.Any(f => _penumbraUsedFiles.Contains(f)))
+                .ToList()
+            : restorableModsForAction;
+        bool canRestore = restorableFiltered.Count > 0;
+        bool someSkippedByAuto = automaticMode && restorableFiltered.Count < restorableModsForAction.Count;
 
-        ImGui.BeginDisabled(_running || !canRestore);
+                ImGui.BeginDisabled(_running || _conversionService.IsConverting || !canRestore);
         ImGui.PushStyleColor(ImGuiCol.Button, ShrinkUColors.Accent);
         ImGui.PushStyleColor(ImGuiCol.ButtonHovered, ShrinkUColors.AccentHovered);
         ImGui.PushStyleColor(ImGuiCol.ButtonActive, ShrinkUColors.AccentActive);
@@ -2506,7 +2957,7 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
 
             _ = Task.Run(async () =>
             {
-                foreach (var mod in restorableModsForAction)
+                foreach (var mod in restorableFiltered)
                 {
                     try
                     {
@@ -2523,8 +2974,18 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                 _logger.LogDebug("Heavy scan triggered: restore completed (bulk action)");
                 RefreshScanResults(true, "restore-bulk");
                 TriggerMetricsRefresh();
+                // Recompute per-mod savings after bulk restore to refresh Uncompressed/Compressed sizes
+                _perModSavingsTask = _backupService.ComputePerModSavingsAsync();
+                _perModSavingsTask.ContinueWith(ps =>
+                {
+                    if (ps.Status == TaskStatus.RanToCompletion && ps.Result != null)
+                    {
+                        _cachedPerModSavings = ps.Result;
+                        _needsUIRefresh = true;
+                    }
+                }, TaskScheduler.Default);
                 // Re-check backup availability for each restored mod and update cache
-                foreach (var m in restorableModsForAction)
+                foreach (var m in restorableFiltered)
                 {
                     _ = _backupService.HasBackupForModAsync(m).ContinueWith(bt =>
                     {
@@ -2532,6 +2993,19 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                             _modsWithBackupCache[m] = bt.Result;
                     });
                 }
+                // Clear persistent external conversion markers for all restored mods
+                try
+                {
+                    int removed = 0;
+                    foreach (var m in restorableFiltered)
+                    {
+                        if (_configService.Current.ExternalConvertedMods.Remove(m))
+                            removed++;
+                    }
+                    if (removed > 0)
+                        _configService.Save();
+                }
+                catch { }
                 _running = false;
                 _restoreCancellationTokenSource?.Dispose();
                 _restoreCancellationTokenSource = null;
@@ -2543,9 +3017,12 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
         ImGui.PopStyleColor(4);
         ImGui.EndDisabled();
 
-        if (!canRestore && ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
+        if (ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
         {
-            ImGui.SetTooltip("No selected mods have backups to restore.");
+            if (!canRestore)
+                ImGui.SetTooltip("No selected mods have backups to restore.");
+            else if (someSkippedByAuto)
+                ImGui.SetTooltip("Automatic mode: skipping mods with currently used textures.");
         }
     }
 
@@ -2668,22 +3145,56 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
 
     // Removed mod-level size aggregation to focus only on file sizes per request
 
+    // Get per-mod original total bytes, preferring computed savings; fallback to latest backup manifest.
+    private long GetOrQueryModOriginalTotal(string mod)
+    {
+        try
+        {
+            if (_cachedPerModSavings.TryGetValue(mod, out var modStats) && modStats != null && modStats.OriginalBytes > 0)
+                return modStats.OriginalBytes;
+
+            if (_cachedPerModOriginalSizes.TryGetValue(mod, out var map) && map != null && map.Count > 0)
+                return map.Values.Sum();
+
+            // Only query backup sizes when the mod has a backup; otherwise use current file sizes
+            if (GetOrQueryModBackup(mod))
+            {
+                var sizes = _backupService.GetLatestOriginalSizesForModAsync(mod).GetAwaiter().GetResult();
+                if (sizes != null && sizes.Count > 0)
+                {
+                    _cachedPerModOriginalSizes[mod] = sizes;
+                    return sizes.Values.Sum();
+                }
+            }
+
+            // Fallback for unconverted mods: sum current file sizes
+            if (_scannedByMod.TryGetValue(mod, out var files) && files != null)
+            {
+                long total = 0;
+                foreach (var f in files)
+                {
+                    var sz = GetCachedOrComputeSize(f);
+                    if (sz > 0) total += sz;
+                }
+                return total;
+            }
+        }
+        catch { }
+        return 0;
+    }
+
     private bool GetOrQueryModBackup(string mod)
     {
         if (_modsWithBackupCache.TryGetValue(mod, out var has))
             return has;
-        if (_modsBackupCheckInFlight.ContainsKey(mod))
-            return false;
-        _modsBackupCheckInFlight.TryAdd(mod, 1);
-        _ = _backupService.HasBackupForModAsync(mod).ContinueWith(t =>
+        try
         {
-            if (t.Status == TaskStatus.RanToCompletion)
-            {
-                _modsWithBackupCache[mod] = t.Result;
-            }
-            _modsBackupCheckInFlight.TryRemove(mod, out _);
-        }, TaskScheduler.Default);
-        return false;
+            // Perform a synchronous check to avoid race conditions enabling conversion before backup status is known
+            var res = _backupService.HasBackupForModAsync(mod).GetAwaiter().GetResult();
+            _modsWithBackupCache[mod] = res;
+            return res;
+        }
+        catch { return false; }
     }
 
     private void DrawSplitter(float totalWidth, ref float leftWidth)

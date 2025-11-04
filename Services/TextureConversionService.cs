@@ -21,6 +21,7 @@ public sealed class TextureConversionService : IDisposable
     private readonly Progress<(string, int, int)> _backupProgress = new();
     private CancellationTokenSource _cts = new();
     private volatile bool _cancelRequested = false;
+    public bool IsConverting { get; private set; } = false;
 
     public event Action<(string, int)>? OnConversionProgress;
     public event Action<(string, int, int)>? OnBackupProgress;
@@ -86,6 +87,7 @@ public sealed class TextureConversionService : IDisposable
 
         try
         {
+            IsConverting = true;
             // Reset cancellation state for this run
             _cts.Dispose();
             _cts = new CancellationTokenSource();
@@ -176,6 +178,7 @@ public sealed class TextureConversionService : IDisposable
         finally
         {
             _cancelRequested = false;
+            IsConverting = false;
             OnConversionCompleted?.Invoke();
         }
     }

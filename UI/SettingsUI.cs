@@ -72,11 +72,19 @@ public sealed class SettingsUI : Window
                 ImGui.Dummy(new Vector2(0, 6f));
                 ImGui.SetWindowFontScale(1.0f);
                 var mode = _configService.Current.TextureProcessingMode;
-                if (ImGui.BeginCombo("Mode", mode.ToString()))
+                var controller = _configService.Current.AutomaticControllerName ?? string.Empty;
+                var modeDisplay = mode == TextureProcessingMode.Automatic && !string.IsNullOrWhiteSpace(controller)
+                    ? $"Automatic (handled by {controller})"
+                    : (mode == TextureProcessingMode.Automatic && _configService.Current.AutomaticHandledBySphene ? "Automatic (handled by Sphene)" : mode.ToString());
+                var disableModeCombo = mode == TextureProcessingMode.Automatic && (!string.IsNullOrWhiteSpace(controller) || _configService.Current.AutomaticHandledBySphene);
+                if (disableModeCombo) ImGui.BeginDisabled();
+                if (ImGui.BeginCombo("Mode", modeDisplay))
                 {
                     if (ImGui.Selectable("Manual", mode == TextureProcessingMode.Manual))
                     {
                         _configService.Current.TextureProcessingMode = TextureProcessingMode.Manual;
+                        _configService.Current.AutomaticHandledBySphene = false;
+                        _configService.Current.AutomaticControllerName = string.Empty;
                         _configService.Save();
                     }
                     if (ImGui.Selectable("Automatic", mode == TextureProcessingMode.Automatic))
@@ -85,6 +93,13 @@ public sealed class SettingsUI : Window
                         _configService.Save();
                     }
                     ImGui.EndCombo();
+                }
+                if (disableModeCombo)
+                {
+                    ImGui.EndDisabled();
+                    var ctrlLabel = !string.IsNullOrWhiteSpace(controller) ? controller : "Sphene";
+                    if (ImGui.IsItemHovered())
+                        ImGui.SetTooltip($"Controlled by {ctrlLabel}");
                 }
                 ShowTooltip("Select how ShrinkU processes textures: Manual or Automatic.");
 
@@ -127,6 +142,15 @@ public sealed class SettingsUI : Window
                     _configService.Save();
                 }
                 ShowTooltip("Display individual files under each mod in the overview table.");
+
+                // Include hidden mod textures on convert (UI-only)
+                bool includeHiddenOnConvert = _configService.Current.IncludeHiddenModTexturesOnConvert;
+                if (ImGui.Checkbox("Include hidden mod textures on Convert (UI)", ref includeHiddenOnConvert))
+                {
+                    _configService.Current.IncludeHiddenModTexturesOnConvert = includeHiddenOnConvert;
+                    _configService.Save();
+                }
+                ShowTooltip("When converting via ShrinkU UI, include non-visible mod textures even if filters hide them. Sphene automatic behavior remains unchanged.");
 
                 // Backup folder selection
                 ImGui.Text("Backup Folder:");

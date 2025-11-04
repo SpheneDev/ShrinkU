@@ -40,8 +40,8 @@ public sealed class Plugin : IDalamudPlugin
         _configService = new ShrinkUConfigService(pluginInterface, _logger);
         _penumbraIpc = new PenumbraIpc(pluginInterface, _logger);
         _backupService = new TextureBackupService(_logger, _configService, _penumbraIpc);
-        _shrinkuIpc = new ShrinkU.Interop.ShrinkUIpc(pluginInterface, _logger, _backupService, _penumbraIpc);
         _conversionService = new TextureConversionService(_logger, _penumbraIpc, _backupService, _configService);
+        _shrinkuIpc = new ShrinkU.Interop.ShrinkUIpc(pluginInterface, _logger, _backupService, _penumbraIpc, _configService, _conversionService);
 
         // Create UI windows and register
         _settingsUi = new SettingsUI(_logger, _configService, _conversionService);

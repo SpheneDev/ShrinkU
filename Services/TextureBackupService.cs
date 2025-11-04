@@ -171,6 +171,36 @@ public sealed class TextureBackupService
 
     public async Task BackupAsync(Dictionary<string, string[]> textures, IProgress<(string, int, int)>? progress, CancellationToken token)
     {
+        // Build index of already backed up files to avoid overwriting originals with converted versions
+        var existingByMod = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            var overview = await GetBackupOverviewAsync().ConfigureAwait(false);
+            foreach (var session in overview)
+            {
+                foreach (var e in session.Entries)
+                {
+                    var mod = e.ModFolderName;
+                    if (string.IsNullOrWhiteSpace(mod) && !string.IsNullOrWhiteSpace(e.PrefixedOriginalPath))
+                        mod = ExtractModFolderName(e.PrefixedOriginalPath);
+                    if (string.IsNullOrWhiteSpace(mod))
+                        continue;
+
+                    var key = !string.IsNullOrEmpty(e.PrefixedOriginalPath) ? e.PrefixedOriginalPath : e.OriginalPath;
+                    if (string.IsNullOrWhiteSpace(key))
+                        continue;
+
+                    if (!existingByMod.TryGetValue(mod, out var set))
+                    {
+                        set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                        existingByMod[mod] = set;
+                    }
+                    set.Add(key);
+                }
+            }
+        }
+        catch { }
+
         var backupDirectory = _configService.Current.BackupFolderPath;
         var timestamp = DateTime.Now;
         var sessionName = $"session_{timestamp:yyyyMMdd_HHmmss}";
@@ -195,6 +225,17 @@ public sealed class TextureBackupService
             var source = kvp.Key;
             var prefixed = BuildPrefixedPath(source);
             var modName = ExtractModFolderName(prefixed) ?? "_unknown";
+            // Skip backing up files that have already been backed up in any previous session
+            try
+            {
+                var currentKey = !string.IsNullOrEmpty(prefixed) ? prefixed : source;
+                if (!string.IsNullOrWhiteSpace(modName) && existingByMod.TryGetValue(modName, out var set) && set.Contains(currentKey))
+                {
+                    _logger.LogDebug("Skipping backup for already backed up texture {path}", source);
+                    continue;
+                }
+            }
+            catch { }
             var modDirInSession = Path.Combine(sessionDir, modName);
             try { Directory.CreateDirectory(modDirInSession); } catch { }
             // Determine path inside the mod by computing relative path from the mod root
@@ -634,6 +675,104 @@ public sealed class TextureBackupService
         {
             // Swallow to keep UI resilient
         }
+        return result;
+    }
+
+    // Return a map of mod-relative paths to original bytes from the latest backup for a mod
+    public async Task<Dictionary<string, long>> GetLatestOriginalSizesForModAsync(string modFolderName)
+    {
+        var result = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            var backupDirectory = _configService.Current.BackupFolderPath;
+            if (!Directory.Exists(backupDirectory)) return result;
+
+            // Prefer latest per-mod zip
+            var modDir = Path.Combine(backupDirectory, modFolderName);
+            if (Directory.Exists(modDir))
+            {
+                var latestZip = Directory.EnumerateFiles(modDir, "backup_*.zip").OrderByDescending(f => f).FirstOrDefault();
+                if (!string.IsNullOrEmpty(latestZip))
+                {
+                    try
+                    {
+                        using var za = ZipFile.OpenRead(latestZip);
+                        var manifestEntry = za.Entries.FirstOrDefault(e => string.Equals(e.FullName, "manifest.json", StringComparison.OrdinalIgnoreCase));
+                        if (manifestEntry != null)
+                        {
+                            using var ms = new MemoryStream();
+                            using (var zs = manifestEntry.Open()) zs.CopyTo(ms);
+                            ms.Position = 0;
+                            var manifest = JsonSerializer.Deserialize<BackupManifest>(ms.ToArray());
+                            if (manifest != null)
+                            {
+                                foreach (var e in manifest.Entries)
+                                {
+                                    System.IO.Compression.ZipArchiveEntry? zipEntry = null;
+                                    if (!string.IsNullOrWhiteSpace(e.ModRelativePath))
+                                    {
+                                        var normalized = e.ModRelativePath.Replace('\\', '/');
+                                        zipEntry = za.Entries.FirstOrDefault(z => string.Equals(z.FullName, normalized, StringComparison.OrdinalIgnoreCase));
+                                    }
+                                    if (zipEntry == null)
+                                    {
+                                        zipEntry = za.Entries.FirstOrDefault(z => string.Equals(z.Name, e.BackupFileName, StringComparison.OrdinalIgnoreCase))
+                                            ?? za.Entries.FirstOrDefault(z => string.Equals(z.FullName, e.BackupFileName, StringComparison.OrdinalIgnoreCase)
+                                                                        || z.FullName.EndsWith($"/{e.BackupFileName}", StringComparison.OrdinalIgnoreCase)
+                                                                        || z.FullName.EndsWith($"\\{e.BackupFileName}", StringComparison.OrdinalIgnoreCase));
+                                    }
+                                    if (zipEntry != null)
+                                    {
+                                        var key = (e.ModRelativePath ?? e.BackupFileName ?? zipEntry.FullName)?.Replace('\\', '/');
+                                        if (!string.IsNullOrWhiteSpace(key))
+                                            result[key] = zipEntry.Length;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    catch { }
+                    return result;
+                }
+            }
+
+            // Fallback to latest session containing this mod
+            foreach (var sessionDir in Directory.EnumerateDirectories(backupDirectory, "session_*").OrderByDescending(f => f))
+            {
+                var modSub = Path.Combine(sessionDir, modFolderName);
+                var manifestPath = Path.Combine(modSub, "manifest.json");
+                if (!Directory.Exists(modSub) || !File.Exists(manifestPath))
+                    continue;
+                try
+                {
+                    var manifest = JsonSerializer.Deserialize<BackupManifest>(File.ReadAllText(manifestPath));
+                    if (manifest == null) { break; }
+                    foreach (var e in manifest.Entries)
+                    {
+                        var relPath = e.ModRelativePath;
+                        long bytes = 0L;
+                        var relCandidate = !string.IsNullOrWhiteSpace(relPath) ? Path.Combine(modSub, relPath) : string.Empty;
+                        if (!string.IsNullOrWhiteSpace(relCandidate) && File.Exists(relCandidate))
+                        {
+                            bytes = new FileInfo(relCandidate).Length;
+                        }
+                        else
+                        {
+                            var direct = Path.Combine(modSub, e.BackupFileName);
+                            if (File.Exists(direct))
+                                bytes = new FileInfo(direct).Length;
+                        }
+                        var key = (relPath ?? e.BackupFileName ?? string.Empty).Replace('\\', '/');
+                        if (!string.IsNullOrWhiteSpace(key) && bytes > 0)
+                            result[key] = bytes;
+                    }
+                }
+                catch { }
+                // Use the latest session only
+                break;
+            }
+        }
+        catch { }
         return result;
     }
 
