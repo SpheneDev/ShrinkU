@@ -34,6 +34,10 @@ public sealed class TextureConversionService : IDisposable
     public event Action<string>? OnExternalTexturesChanged;
     public event Action? OnPlayerResourcesChanged;
     private DateTime _lastModSettingChangedAt = DateTime.MinValue;
+    private DateTime _lastAutoAttemptUtc = DateTime.MinValue;
+    private Dictionary<string, string[]>? _lastAutoCandidates;
+    private CancellationTokenSource? _autoPollCts;
+    private Task? _autoPollTask;
 
     public TextureConversionService(ILogger logger, PenumbraIpc penumbraIpc, TextureBackupService backupService, ShrinkUConfigService configService)
     {
@@ -53,10 +57,22 @@ public sealed class TextureConversionService : IDisposable
         {
             _lastModSettingChangedAt = DateTime.UtcNow;
             OnPenumbraModSettingChanged?.Invoke(change, collectionId, modDir, inherited);
+            // When a mod setting changes (enable/disable, priority, etc.),
+            // attempt an automatic conversion run if in Automatic mode.
+            TryScheduleAutomaticConversion("mod-setting-changed");
         };
-        _onModsChanged = () => OnPenumbraModsChanged?.Invoke();
+        _onModsChanged = () =>
+        {
+            OnPenumbraModsChanged?.Invoke();
+            // ModsAdded/Deleted/Path changes may reflect newly used files.
+            TryScheduleAutomaticConversion("mods-changed");
+        };
 
-        _onPlayerResourcesChanged = () => OnPlayerResourcesChanged?.Invoke();
+        _onPlayerResourcesChanged = () =>
+        {
+            OnPlayerResourcesChanged?.Invoke();
+            TryScheduleAutomaticConversion("player-resources-changed");
+        };
 
         _penumbraIpc.ModAdded += _onModAdded;
         _penumbraIpc.ModDeleted += _onModDeleted;
@@ -64,6 +80,9 @@ public sealed class TextureConversionService : IDisposable
         _penumbraIpc.ModSettingChanged += _onModSettingChanged;
         _penumbraIpc.ModsChanged += _onModsChanged;
         _penumbraIpc.PlayerResourcesChanged += _onPlayerResourcesChanged;
+
+        // Start lightweight auto-conversion watcher for standalone mode
+        StartAutoConversionWatcher();
     }
 
     public void Cancel()
@@ -76,6 +95,128 @@ public sealed class TextureConversionService : IDisposable
 
     // Debounce/coalesce ModsChanged events to avoid repeated heavy scans
     private void HandleModsChanged() { /* intentionally ignored */ }
+
+    private void TryScheduleAutomaticConversion(string reason)
+    {
+        try
+        {
+            if (_configService.Current.TextureProcessingMode != TextureProcessingMode.Automatic)
+                return;
+            if (_configService.Current.AutomaticHandledBySphene)
+            {
+                try { _logger.LogDebug("Automatic conversion handled by Sphene; skipping trigger: {reason}", reason); } catch { }
+                return;
+            }
+            if (IsConverting)
+                return;
+
+            var now = DateTime.UtcNow;
+            if (now - _lastAutoAttemptUtc < TimeSpan.FromSeconds(2))
+                return;
+            _lastAutoAttemptUtc = now;
+
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    var candidates = await GetAutomaticCandidateTexturesAsync().ConfigureAwait(false);
+                    if (candidates == null || candidates.Count == 0)
+                    {
+                        try { _logger.LogDebug("No automatic candidates found on trigger: {reason}", reason); } catch { }
+                        return;
+                    }
+
+                    if (_lastAutoCandidates != null && candidates.Count == _lastAutoCandidates.Count)
+                    {
+                        bool same = true;
+                        foreach (var k in candidates.Keys)
+                        {
+                            if (!_lastAutoCandidates.TryGetValue(k, out var prev))
+                            {
+                                same = false;
+                                break;
+                            }
+                            var curr = candidates[k];
+                            if ((curr?.Length ?? 0) != (prev?.Length ?? 0))
+                            {
+                                same = false;
+                                break;
+                            }
+                        }
+                        if (same)
+                        {
+                            try { _logger.LogDebug("Skipping automatic conversion; candidates unchanged since last run"); } catch { }
+                            return;
+                        }
+                    }
+
+                    _lastAutoCandidates = candidates;
+                    try { _logger.LogDebug("Starting automatic conversion (standalone) due to: {reason}", reason); } catch { }
+                    await StartConversionAsync(candidates).ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    try { _logger.LogDebug(ex, "Automatic conversion trigger failed: {reason}", reason); } catch { }
+                }
+            });
+        }
+        catch (Exception ex)
+        {
+            try { _logger.LogDebug(ex, "Failed to schedule automatic conversion: {reason}", reason); } catch { }
+        }
+    }
+
+    private void StartAutoConversionWatcher()
+    {
+        try
+        {
+            StopAutoConversionWatcher();
+            _autoPollCts = new CancellationTokenSource();
+            var token = _autoPollCts.Token;
+            _autoPollTask = Task.Run(async () =>
+            {
+                while (!token.IsCancellationRequested)
+                {
+                    try
+                    {
+                        await Task.Delay(2000, token).ConfigureAwait(false);
+                        if (token.IsCancellationRequested)
+                            break;
+
+                        // Only act in Automatic mode and when not controlled by Sphene
+                        if (_configService.Current.TextureProcessingMode != TextureProcessingMode.Automatic)
+                            continue;
+                        if (_configService.Current.AutomaticHandledBySphene)
+                            continue;
+                        if (IsConverting)
+                            continue;
+
+                        // Attempt automatic conversion based on current candidates
+                        TryScheduleAutomaticConversion("auto-poll");
+                    }
+                    catch (TaskCanceledException) { }
+                    catch (Exception ex)
+                    {
+                        try { _logger.LogDebug(ex, "Auto-conversion watcher iteration failed"); } catch { }
+                    }
+                }
+            }, token);
+            try { _logger.LogDebug("Auto-conversion watcher started"); } catch { }
+        }
+        catch (Exception ex)
+        {
+            try { _logger.LogDebug(ex, "Failed to start auto-conversion watcher"); } catch { }
+        }
+    }
+
+    private void StopAutoConversionWatcher()
+    {
+        try { _autoPollCts?.Cancel(); } catch { }
+        try { _autoPollCts?.Dispose(); } catch { }
+        _autoPollCts = null;
+        _autoPollTask = null;
+        try { _logger.LogDebug("Auto-conversion watcher stopped"); } catch { }
+    }
 
     public async Task StartConversionAsync(Dictionary<string, string[]> textures)
     {
@@ -140,28 +281,42 @@ public sealed class TextureConversionService : IDisposable
                 try
                 {
                     var perMod = await _backupService.ComputePerModSavingsAsync().ConfigureAwait(false);
-                    if (perMod.TryGetValue(modName, out var stats) && stats != null && stats.ComparedFiles > 0 && stats.CurrentBytes > stats.OriginalBytes)
+                    if (perMod.TryGetValue(modName, out var stats) && stats != null && stats.ComparedFiles > 0)
                     {
-                        // Persist inefficient mod marker
-                        _configService.Current.InefficientMods ??= new List<string>();
-                        if (!_configService.Current.InefficientMods.Any(m => string.Equals(m, modName, StringComparison.OrdinalIgnoreCase)))
+                        if (stats.CurrentBytes > stats.OriginalBytes)
                         {
-                            _configService.Current.InefficientMods.Add(modName);
-                            _configService.Save();
-                            _logger.LogDebug("Marked mod {modName} as inefficient (larger after conversion)", modName);
-                        }
-
-                        // Auto-restore latest backup for this mod if enabled
-                        if (_configService.Current.AutoRestoreInefficientMods)
-                        {
-                            _logger.LogDebug("Auto-restoring mod {modName} due to increased size after conversion", modName);
-                            try
+                            // Persist inefficient mod marker
+                            _configService.Current.InefficientMods ??= new List<string>();
+                            if (!_configService.Current.InefficientMods.Any(m => string.Equals(m, modName, StringComparison.OrdinalIgnoreCase)))
                             {
-                                await _backupService.RestoreLatestForModAsync(modName, _backupProgress, token).ConfigureAwait(false);
+                                _configService.Current.InefficientMods.Add(modName);
+                                _configService.Save();
+                                _logger.LogDebug("Marked mod {modName} as inefficient (larger after conversion)", modName);
                             }
-                            catch (Exception rex)
+
+                            // Auto-restore latest backup for this mod if enabled
+                            if (_configService.Current.AutoRestoreInefficientMods)
                             {
-                                _logger.LogDebug(rex, "Auto-restore failed for mod {modName}", modName);
+                                _logger.LogDebug("Auto-restoring mod {modName} due to increased size after conversion", modName);
+                                try
+                                {
+                                    await _backupService.RestoreLatestForModAsync(modName, _backupProgress, token).ConfigureAwait(false);
+                                }
+                                catch (Exception rex)
+                                {
+                                    _logger.LogDebug(rex, "Auto-restore failed for mod {modName}", modName);
+                                }
+                            }
+                        }
+                        else
+                        {
+                            // Remove inefficient marker if the mod is no longer larger after conversion
+                            var list = _configService.Current.InefficientMods;
+                            if (list != null && list.Any(m => string.Equals(m, modName, StringComparison.OrdinalIgnoreCase)))
+                            {
+                                _configService.Current.InefficientMods = list.Where(m => !string.Equals(m, modName, StringComparison.OrdinalIgnoreCase)).ToList();
+                                _configService.Save();
+                                _logger.LogDebug("Cleared inefficient marker for mod {modName} (no longer larger)", modName);
                             }
                         }
                     }
@@ -190,7 +345,86 @@ public sealed class TextureConversionService : IDisposable
             _logger.LogDebug("Penumbra API not available; auto-scan aborted");
             return new Dictionary<string, string[]>();
         }
-        return await _penumbraIpc.ScanModTexturesAsync().ConfigureAwait(false);
+        // Scan all mod textures, then filter to only currently-used textures,
+        // and include only files that are not yet backed up (incremental mode).
+        var all = await _penumbraIpc.ScanModTexturesAsync().ConfigureAwait(false);
+        if (all.Count == 0)
+            return all;
+
+        var used = await _penumbraIpc.GetCurrentlyUsedTextureModPathsAsync().ConfigureAwait(false);
+        if (used.Count == 0)
+            return new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase);
+
+        var root = _penumbraIpc.ModDirectory ?? string.Empty;
+        var modsToCheck = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var path in used)
+        {
+            try
+            {
+                var rel = !string.IsNullOrWhiteSpace(root) ? Path.GetRelativePath(root, path) : path;
+                var parts = rel.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                var modName = parts.Length > 1 ? parts[0] : string.Empty;
+                if (!string.IsNullOrWhiteSpace(modName))
+                    modsToCheck.Add(modName);
+            }
+            catch { }
+        }
+
+        // Query backed keys per mod to exclude already-backed files while allowing new ones.
+        var backedKeysPerMod = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            var tasks = modsToCheck
+                .Select(m => _backupService.GetBackedKeysForModAsync(m)
+                    .ContinueWith(t => (Mod: m, Keys: t.IsCompletedSuccessfully ? t.Result : new HashSet<string>(StringComparer.OrdinalIgnoreCase)), TaskScheduler.Default))
+                .ToArray();
+            await Task.WhenAll(tasks).ConfigureAwait(false);
+            foreach (var t in tasks)
+            {
+                var (mod, keys) = t.Result;
+                backedKeysPerMod[mod] = keys ?? new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            }
+        }
+        catch { }
+
+        var result = new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase);
+        foreach (var kv in all)
+        {
+            var file = kv.Key;
+            if (!used.Contains(file))
+                continue;
+
+            try
+            {
+                var rel = !string.IsNullOrWhiteSpace(root) ? Path.GetRelativePath(root, file) : file;
+                var parts = rel.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                var modName = parts.Length > 1 ? parts[0] : string.Empty;
+                if (!string.IsNullOrWhiteSpace(modName))
+                {
+                    // Build a prefixed path like BackupService uses to match keys
+                    var prefixed = file;
+                    if (!string.IsNullOrWhiteSpace(root))
+                    {
+                        prefixed = prefixed.Replace(root, root.EndsWith('\\') ? "{penumbra}\\" : "{penumbra}", StringComparison.OrdinalIgnoreCase);
+                        while (prefixed.Contains("\\\\", StringComparison.Ordinal))
+                            prefixed = prefixed.Replace("\\\\", "\\", StringComparison.Ordinal);
+                    }
+
+                    if (backedKeysPerMod.TryGetValue(modName, out var keys) && keys != null && keys.Contains(prefixed))
+                        continue; // skip already-backed files
+                }
+            }
+            catch { }
+
+            result[file] = kv.Value;
+        }
+
+        return result;
+    }
+
+    private static bool SafeBool(Task<bool> t)
+    {
+        try { return t.IsCompletedSuccessfully ? t.Result : false; } catch { return false; }
     }
 
     // Notify UI consumers that external texture changes occurred (e.g., conversions/restores done outside ShrinkU).
@@ -325,6 +559,7 @@ public sealed class TextureConversionService : IDisposable
         try { _penumbraIpc.ModSettingChanged -= _onModSettingChanged; } catch { }
         try { _penumbraIpc.ModsChanged -= _onModsChanged; } catch { }
         try { _penumbraIpc.PlayerResourcesChanged -= _onPlayerResourcesChanged; } catch { }
+        StopAutoConversionWatcher();
         try { _cts.Cancel(); } catch { }
         try { _cts.Dispose(); } catch { }
     }

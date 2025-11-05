@@ -921,6 +921,37 @@ public sealed class TextureBackupService
         return result;
     }
 
+    // Return all backed keys for a mod across all sessions/zips (prefixed or original paths)
+    public async Task<HashSet<string>> GetBackedKeysForModAsync(string modFolderName)
+    {
+        var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            var overview = await GetBackupOverviewAsync().ConfigureAwait(false);
+            if (overview == null || overview.Count == 0)
+                return set;
+
+            foreach (var session in overview)
+            {
+                foreach (var entry in session.Entries)
+                {
+                    // Determine mod attribution for the entry
+                    var mod = entry.ModFolderName;
+                    if (string.IsNullOrWhiteSpace(mod) && !string.IsNullOrWhiteSpace(entry.PrefixedOriginalPath))
+                        mod = ExtractModFolderName(entry.PrefixedOriginalPath);
+                    if (!string.Equals(mod, modFolderName, StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    var key = !string.IsNullOrEmpty(entry.PrefixedOriginalPath) ? entry.PrefixedOriginalPath : entry.OriginalPath;
+                    if (!string.IsNullOrWhiteSpace(key))
+                        set.Add(key);
+                }
+            }
+        }
+        catch { }
+        return set;
+    }
+
     public Task<bool> HasBackupForModAsync(string modFolderName)
     {
         try

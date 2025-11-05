@@ -43,6 +43,19 @@ public sealed class Plugin : IDalamudPlugin
         _conversionService = new TextureConversionService(_logger, _penumbraIpc, _backupService, _configService);
         _shrinkuIpc = new ShrinkU.Interop.ShrinkUIpc(pluginInterface, _logger, _backupService, _penumbraIpc, _configService, _conversionService);
 
+        // Ensure standalone ShrinkU is not marked as controlled by Sphene
+        try
+        {
+            if (_configService.Current.AutomaticHandledBySphene || !string.IsNullOrWhiteSpace(_configService.Current.AutomaticControllerName))
+            {
+                _logger.LogDebug("Resetting automatic controller flags in standalone ShrinkU");
+                _configService.Current.AutomaticHandledBySphene = false;
+                _configService.Current.AutomaticControllerName = string.Empty;
+                _configService.Save();
+            }
+        }
+        catch { }
+
         // Create UI windows and register
         _settingsUi = new SettingsUI(_logger, _configService, _conversionService);
         _conversionUi = new ConversionUI(_logger, _configService, _conversionService, _backupService, () => _settingsUi.IsOpen = true);

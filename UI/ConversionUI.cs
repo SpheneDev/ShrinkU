@@ -951,27 +951,27 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
         }
         ShowTooltip("Choose how textures are processed.");
 
-        bool backup = _configService.Current.EnableBackupBeforeConversion;
-        if (ImGui.Checkbox("Enable backup before conversion", ref backup))
-        {
-            _configService.Current.EnableBackupBeforeConversion = backup;
-            _configService.Save();
-        }
-        ShowTooltip("Create a backup before converting textures.");
-        bool zip = _configService.Current.EnableZipCompressionForBackups;
-        if (ImGui.Checkbox("ZIP backups by default", ref zip))
-        {
-            _configService.Current.EnableZipCompressionForBackups = zip;
-            _configService.Save();
-        }
-        ShowTooltip("Compress backups into ZIP archives by default.");
-        bool deleteOriginals = _configService.Current.DeleteOriginalBackupsAfterCompression;
-        if (ImGui.Checkbox("Delete originals after ZIP", ref deleteOriginals))
-        {
-            _configService.Current.DeleteOriginalBackupsAfterCompression = deleteOriginals;
-            _configService.Save();
-        }
-        ShowTooltip("Remove original backup files after ZIP compression.");
+        //bool backup = _configService.Current.EnableBackupBeforeConversion;
+        //if (ImGui.Checkbox("Enable backup before conversion", ref backup))
+        //{
+        //    _configService.Current.EnableBackupBeforeConversion = backup;
+        //    _configService.Save();
+        //}
+        //ShowTooltip("Create a backup before converting textures.");
+        //bool zip = _configService.Current.EnableZipCompressionForBackups;
+        //if (ImGui.Checkbox("ZIP backups by default", ref zip))
+        //{
+        //    _configService.Current.EnableZipCompressionForBackups = zip;
+        //    _configService.Save();
+        //}
+        //ShowTooltip("Compress backups into ZIP archives by default.");
+        //bool deleteOriginals = _configService.Current.DeleteOriginalBackupsAfterCompression;
+        //if (ImGui.Checkbox("Delete originals after ZIP", ref deleteOriginals))
+        //{
+        //    _configService.Current.DeleteOriginalBackupsAfterCompression = deleteOriginals;
+        //    _configService.Save();
+        //}
+        //ShowTooltip("Remove original backup files after ZIP compression.");
         bool autoRestore = _configService.Current.AutoRestoreInefficientMods;
         if (ImGui.Checkbox("Auto-restore backups for inefficient mods", ref autoRestore))
         {
@@ -1582,18 +1582,6 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                             {
                                 ImGui.TableNextRow();
                                 ImGui.TableSetColumnIndex(0);
-                                bool selected = _selectedTextures.Contains(file);
-                                ImGui.BeginDisabled(excluded);
-                                if (ImGui.Checkbox($"##selsub-{idx}", ref selected))
-                                {
-                                    if (selected) { _selectedTextures.Add(file); }
-                                    else _selectedTextures.Remove(file);
-                                }
-                                ImGui.EndDisabled();
-                                if (excluded && ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
-                                    ImGui.SetTooltip("Mod excluded by tags");
-                                else
-                                    ShowTooltip("Select or deselect this file.");
 
                                 ImGui.TableSetColumnIndex(1);
                                 ImGui.SetCursorPosX(ImGui.GetCursorPosX() + (depth + 2) * indentStep);
@@ -2457,8 +2445,9 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                 var header = hasBackup
                     ? $"{ResolveModDisplayName(mod)} ({convertedAll}/{totalAll})"
                     : $"{ResolveModDisplayName(mod)} ({totalAll})";
-                // Default-open mods when Penumbra used-only filter is active or when persisted expanded state contains the mod
-                var modDefaultOpen = _filterPenumbraUsedOnly || _expandedMods.Contains(mod);
+                // Keep expand arrow; in used-only without folder structure, default closed but allow manual expansion via _expandedMods
+                var preventOpen = !_useFolderStructure && _filterPenumbraUsedOnly;
+                var modDefaultOpen = preventOpen ? _expandedMods.Contains(mod) : (_filterPenumbraUsedOnly || _expandedMods.Contains(mod));
                 ImGui.SetNextItemOpen(modDefaultOpen, ImGuiCond.Always);
                 bool open = ImGui.TreeNodeEx($"##mod-{mod}", nodeFlags);
                 // Track toggles to persist expanded state per mod
@@ -2701,18 +2690,6 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                             ImGui.TableSetBgColor(ImGuiTableBgTarget.RowBg0, ImGui.GetColorU32((_zebraRowIndex++ % 2 == 0) ? _zebraEvenColor : _zebraOddColor));
                             ImGui.TableSetBgColor(ImGuiTableBgTarget.RowBg0, ImGui.GetColorU32((_zebraRowIndex++ % 2 == 0) ? _zebraEvenColor : _zebraOddColor));
                             ImGui.TableSetColumnIndex(0);
-                            bool selected = _selectedTextures.Contains(file);
-                            ImGui.BeginDisabled(excluded);
-                            if (ImGui.Checkbox($"##selsub-{idx}", ref selected))
-                            {
-                                if (selected) { _selectedTextures.Add(file); }
-                                else _selectedTextures.Remove(file);
-                            }
-                            ImGui.EndDisabled();
-                            if (excluded && ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
-                                ImGui.SetTooltip("Mod excluded by tags");
-                            else
-                                ShowTooltip("Select or deselect this file.");
 
                             ImGui.TableSetColumnIndex(1);
                             var baseName = Path.GetFileName(file);
