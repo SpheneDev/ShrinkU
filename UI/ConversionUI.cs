@@ -1659,44 +1659,8 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
         ImGui.BeginDisabled(_running || _conversionService.IsConverting);
         if (ImGui.Button("Re-Scan All Mod Textures"))
         {
-            _ = _conversionService.GetGroupedCandidateTexturesAsync().ContinueWith(t =>
-            {
-                if (t.Status == TaskStatus.RanToCompletion && t.Result != null)
-                {
-                    _scannedByMod.Clear();
-                    _selectedTextures.Clear();
-                    _texturesToConvert.Clear();
-                    foreach (var mod in t.Result)
-                    {
-                        _scannedByMod[mod.Key] = mod.Value;
-                        foreach (var file in mod.Value)
-                        {
-                            _texturesToConvert[file] = Array.Empty<string>();
-                        }
-                    }
-                    _logger.LogDebug("Scanned {mods} mods and {files} textures", _scannedByMod.Count, _texturesToConvert.Count);
-
-                    // Load Penumbra display names for mods
-                    _ = _conversionService.GetModDisplayNamesAsync().ContinueWith(dt =>
-                    {
-                        if (dt.Status == TaskStatus.RanToCompletion && dt.Result != null)
-                            _modDisplayNames = dt.Result;
-                    });
-
-                    // Ensure all Penumbra mods are present (even if no textures), so UI shows them
-                    _ = _conversionService.GetAllModFoldersAsync().ContinueWith(mt =>
-                    {
-                        if (mt.Status == TaskStatus.RanToCompletion && mt.Result != null)
-                        {
-                            foreach (var folder in mt.Result)
-                            {
-                                if (!_scannedByMod.ContainsKey(folder))
-                                    _scannedByMod[folder] = new List<string>();
-                            }
-                        }
-                    });
-                }
-            });
+            RefreshScanResults(true, "manual-rescan");
+            _needsUIRefresh = true;
         }
         ShowTooltip("Scan all mods for candidate textures and refresh the table.");
         ImGui.EndDisabled();
