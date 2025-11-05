@@ -1293,22 +1293,26 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                     ImGui.TableSetColumnIndex(0);
                     var hasBackup = GetOrQueryModBackup(mod);
                     var excluded = !hasBackup && IsModExcludedByTags(mod);
-                    // Always show mods; icon color indicates enabled/disabled state
-                    bool modSelected = files.All(f => _selectedTextures.Contains(f));
-                    ImGui.BeginDisabled(excluded);
-                    if (ImGui.Checkbox($"##modsel-{mod}", ref modSelected))
+                    var isNonConvertible = files.Count == 0;
+                    
+                    if (!isNonConvertible)
                     {
-                        if (modSelected)
-                            foreach (var f in files) _selectedTextures.Add(f);
-                        else
-                            foreach (var f in files) _selectedTextures.Remove(f);
+                        bool modSelected = files.All(f => _selectedTextures.Contains(f));
+                        ImGui.BeginDisabled(excluded);
+                        if (ImGui.Checkbox($"##modsel-{mod}", ref modSelected))
+                        {
+                            if (modSelected)
+                                foreach (var f in files) _selectedTextures.Add(f);
+                            else
+                                foreach (var f in files) _selectedTextures.Remove(f);
 
+                        }
+                        ImGui.EndDisabled();
+                        if (excluded && ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
+                            ImGui.SetTooltip("Mod excluded by tags");
+                        else
+                            ShowTooltip("Toggle selection for all files in this mod.");
                     }
-                    ImGui.EndDisabled();
-                    if (excluded && ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
-                        ImGui.SetTooltip("Mod excluded by tags");
-                    else
-                        ShowTooltip("Toggle selection for all files in this mod.");
 
                     ImGui.TableSetColumnIndex(1);
                     ImGui.SetCursorPosX(ImGui.GetCursorPosX() + (depth + 1) * indentStep);
@@ -2389,21 +2393,25 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                 ImGui.TableSetColumnIndex(0);
                 var hasBackup = GetOrQueryModBackup(mod);
                 var excluded = !hasBackup && IsModExcludedByTags(mod);
-                bool modSelected = files.All(f => _selectedTextures.Contains(f));
-                ImGui.BeginDisabled(excluded);
-                if (ImGui.Checkbox($"##modsel-{mod}", ref modSelected))
+                var isNonConvertible = files.Count == 0;
+                if (!isNonConvertible)
                 {
-                    if (modSelected)
-                        foreach (var f in files) _selectedTextures.Add(f);
-                    else
-                        foreach (var f in files) _selectedTextures.Remove(f);
+                    bool modSelected = files.All(f => _selectedTextures.Contains(f));
+                    ImGui.BeginDisabled(excluded);
+                    if (ImGui.Checkbox($"##modsel-{mod}", ref modSelected))
+                    {
+                        if (modSelected)
+                            foreach (var f in files) _selectedTextures.Add(f);
+                        else
+                            foreach (var f in files) _selectedTextures.Remove(f);
 
+                    }
+                    ImGui.EndDisabled();
+                    if (excluded && ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
+                        ImGui.SetTooltip("Mod excluded by tags");
+                    else
+                        ShowTooltip("Toggle selection for all files in this mod.");
                 }
-                ImGui.EndDisabled();
-                if (excluded && ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
-                    ImGui.SetTooltip("Mod excluded by tags");
-                else
-                    ShowTooltip("Toggle selection for all files in this mod.");
 
                 ImGui.TableSetColumnIndex(1);
                 var nodeFlags = ImGuiTreeNodeFlags.SpanFullWidth | ImGuiTreeNodeFlags.FramePadding;
