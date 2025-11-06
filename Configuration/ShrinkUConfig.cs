@@ -19,6 +19,7 @@ public sealed class ShrinkUConfig : IPluginConfiguration
     public bool AutomaticHandledBySphene { get; set; } = false;
     public string AutomaticControllerName { get; set; } = string.Empty;
     public bool EnableBackupBeforeConversion { get; set; } = true;
+    public bool EnableFullModBackupBeforeConversion { get; set; } = false;
     public bool EnableZipCompressionForBackups { get; set; } = true;
     public bool DeleteOriginalBackupsAfterCompression { get; set; } = true;
     public bool StrictPerModRestore { get; set; } = true;

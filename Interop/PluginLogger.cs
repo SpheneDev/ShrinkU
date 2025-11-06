@@ -22,6 +22,9 @@ public sealed class PluginLogger : ILogger
     public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception,
         Func<TState, Exception?, string> formatter)
     {
+        // Guard against missing plugin log implementation to prevent exceptions breaking UI flows
+        if (_pluginLog == null)
+            return;
         var message = formatter(state, exception);
         switch (logLevel)
         {

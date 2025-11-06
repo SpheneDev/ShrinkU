@@ -207,6 +207,218 @@ public sealed class TextureBackupService
         }
     }
 
+    public Task<List<string>> GetPmpBackupsForModAsync(string modFolderName)
+    {
+        var result = new List<string>();
+        try
+        {
+            var backupDirectory = _configService.Current.BackupFolderPath;
+            if (string.IsNullOrWhiteSpace(backupDirectory) || !Directory.Exists(backupDirectory))
+                return Task.FromResult(result);
+
+            var modDir = Path.Combine(backupDirectory, modFolderName);
+            if (!Directory.Exists(modDir))
+                return Task.FromResult(result);
+
+            result = Directory.EnumerateFiles(modDir, "mod_backup_*.pmp")
+                               .OrderByDescending(f => f)
+                               .ToList();
+        }
+        catch { }
+        return Task.FromResult(result);
+    }
+
+    // Check whether a mod has any full-mod PMP backup
+    public Task<bool> HasPmpBackupForModAsync(string modFolderName)
+    {
+        try
+        {
+            var backupDirectory = _configService.Current.BackupFolderPath;
+            if (string.IsNullOrWhiteSpace(backupDirectory) || !Directory.Exists(backupDirectory))
+                return Task.FromResult(false);
+            var modDir = Path.Combine(backupDirectory, modFolderName);
+            if (!Directory.Exists(modDir))
+                return Task.FromResult(false);
+            var any = Directory.EnumerateFiles(modDir, "mod_backup_*.pmp").Any();
+            return Task.FromResult(any);
+        }
+        catch { return Task.FromResult(false); }
+    }
+
+    // Restore a specific full-mod PMP backup by replacing the mod directory contents
+    public async Task<bool> RestorePmpAsync(string modFolderName, string pmpPath, IProgress<(string, int, int)>? progress, CancellationToken token)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(modFolderName) || string.IsNullOrWhiteSpace(pmpPath) || !File.Exists(pmpPath))
+            {
+                _logger.LogDebug("RestorePmp aborted: invalid args or file missing for {mod}, path={path}", modFolderName, pmpPath);
+                return false;
+            }
+
+            var modAbs = GetModAbsolutePath(modFolderName);
+            if (string.IsNullOrWhiteSpace(modAbs))
+            {
+                _logger.LogDebug("RestorePmp aborted: could not resolve mod absolute path for {mod}. Penumbra ModDirectory missing?", modFolderName);
+                return false;
+            }
+
+            var tempDir = Path.Combine(Path.GetTempPath(), "ShrinkU", "restore-pmp", Path.GetFileNameWithoutExtension(pmpPath));
+            try { if (Directory.Exists(tempDir)) Directory.Delete(tempDir, true); } catch { }
+            Directory.CreateDirectory(tempDir);
+
+            // Step 1: extract archive
+            await Task.Run(() =>
+            {
+                if (token.IsCancellationRequested) return;
+                ZipFile.ExtractToDirectory(pmpPath, tempDir, overwriteFiles: true);
+            }, token).ConfigureAwait(false);
+            progress?.Report(($"Extracted {Path.GetFileName(pmpPath)}", 1, 2));
+
+            var parentDir = Path.GetDirectoryName(modAbs!) ?? string.Empty;
+            if (string.IsNullOrEmpty(parentDir))
+                parentDir = _penumbraIpc.ModDirectory ?? string.Empty;
+            if (string.IsNullOrEmpty(parentDir))
+            {
+                _logger.LogDebug("RestorePmp aborted: parent directory not resolved for {mod}. Penumbra ModDirectory is empty.", modFolderName);
+                return false;
+            }
+
+            var backupOldDir = Path.Combine(parentDir, modFolderName + $".__restore_old__{DateTime.Now:yyyyMMdd_HHmmss}");
+
+            // Move current mod dir aside for rollback safety
+            bool movedOld = false;
+            try
+            {
+                if (Directory.Exists(modAbs))
+                {
+                    Directory.Move(modAbs!, backupOldDir);
+                    movedOld = true;
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning("Failed to move existing mod dir {dir}: {error}", modAbs, ex.Message);
+            }
+
+            // Create fresh mod directory
+            try { Directory.CreateDirectory(modAbs!); } catch { }
+
+            // Step 2: copy extracted contents into mod directory
+            try
+            {
+                await Task.Run(() =>
+                {
+                    if (token.IsCancellationRequested) return;
+                    CopyDirectoryRecursive(tempDir, modAbs!);
+                }, token).ConfigureAwait(false);
+                progress?.Report(($"Restored {modFolderName}", 2, 2));
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError("Failed to restore PMP for {mod}: {error}", modFolderName, ex.Message);
+                // Rollback: delete new dir and move back old
+                try { if (Directory.Exists(modAbs)) Directory.Delete(modAbs, true); } catch { }
+                if (movedOld)
+                {
+                    try { Directory.Move(backupOldDir, modAbs!); } catch { }
+                }
+                return false;
+            }
+
+            // Cleanup temp and old backup dir
+            try { Directory.Delete(tempDir, true); } catch { }
+            if (movedOld)
+            {
+                try { Directory.Delete(backupOldDir, true); } catch { }
+            }
+
+            _logger.LogDebug("Restored full mod from PMP {pmp} to {mod}", pmpPath, modAbs);
+
+            // After a successful PMP restore, remove normal texture backups and PMP files for this mod to free space
+            try
+            {
+                var backupDirectory = _configService.Current.BackupFolderPath;
+                if (!string.IsNullOrWhiteSpace(backupDirectory) && Directory.Exists(backupDirectory))
+                {
+                    var modBackupDir = Path.Combine(backupDirectory, modFolderName);
+                    if (Directory.Exists(modBackupDir))
+                    {
+                        // Delete all per-mod texture backup zips
+                        foreach (var zip in Directory.EnumerateFiles(modBackupDir, "backup_*.zip"))
+                        {
+                            try
+                            {
+                                File.Delete(zip);
+                                _logger.LogDebug("Deleted texture backup zip {zip} for {mod}", zip, modFolderName);
+                            }
+                            catch (Exception ex)
+                            {
+                                _logger.LogWarning("Failed to delete texture backup zip {zip} for {mod}: {error}", zip, modFolderName, ex.Message);
+                            }
+                        }
+
+                        // Delete all PMP archives for this mod
+                        foreach (var p in Directory.EnumerateFiles(modBackupDir, "mod_backup_*.pmp"))
+                        {
+                            try
+                            {
+                                File.Delete(p);
+                                _logger.LogDebug("Deleted PMP archive {pmp} for {mod}", p, modFolderName);
+                            }
+                            catch (Exception ex)
+                            {
+                                _logger.LogWarning("Failed to delete PMP archive {pmp} for {mod}: {error}", p, modFolderName, ex.Message);
+                            }
+                        }
+
+                        // Remove mod backup folder if it became empty
+                        try
+                        {
+                            if (!Directory.EnumerateFileSystemEntries(modBackupDir).Any())
+                            {
+                                Directory.Delete(modBackupDir, true);
+                                _logger.LogDebug("Deleted empty mod backup folder {dir}", modBackupDir);
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger.LogWarning("Failed to delete empty mod backup folder {dir}: {error}", modBackupDir, ex.Message);
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning("Post-restore cleanup encountered an error for {mod}: {error}", modFolderName, ex.Message);
+            }
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning("RestorePmp failed for {mod}: unexpected error: {error}", modFolderName, ex.Message);
+            return false;
+        }
+    }
+
+    private static void CopyDirectoryRecursive(string sourceDir, string targetDir)
+    {
+        foreach (var dir in Directory.EnumerateDirectories(sourceDir, "*", SearchOption.AllDirectories))
+        {
+            var rel = Path.GetRelativePath(sourceDir, dir);
+            var dest = Path.Combine(targetDir, rel);
+            Directory.CreateDirectory(dest);
+        }
+        foreach (var file in Directory.EnumerateFiles(sourceDir, "*", SearchOption.AllDirectories))
+        {
+            var rel = Path.GetRelativePath(sourceDir, file);
+            var dest = Path.Combine(targetDir, rel);
+            var destDir = Path.GetDirectoryName(dest);
+            if (!string.IsNullOrEmpty(destDir)) Directory.CreateDirectory(destDir);
+            File.Copy(file, dest, overwrite: true);
+        }
+    }
+
     // Delete old backups for a mod when its version changes
     private void DeleteOldBackupsForMod(string modFolderName, string currentVersion)
     {
@@ -491,6 +703,56 @@ public sealed class TextureBackupService
                     Directory.Delete(sessionDir, recursive: true);
                 }
                 catch { }
+            }
+        }
+
+        // Optionally create full mod PMP archives for touched mods
+        if (_configService.Current.EnableFullModBackupBeforeConversion)
+        {
+            foreach (var (mod, _) in entriesByMod)
+            {
+                try
+                {
+                    var modAbs = GetModAbsolutePath(mod);
+                    if (string.IsNullOrWhiteSpace(modAbs) || !Directory.Exists(modAbs))
+                        continue;
+
+                    var modBackupDir = Path.Combine(backupDirectory, mod);
+                    try { Directory.CreateDirectory(modBackupDir); } catch { }
+
+                    // Delete any existing PMP archives for this mod to avoid duplicates
+                    try
+                    {
+                        foreach (var old in Directory.EnumerateFiles(modBackupDir, "mod_backup_*.pmp"))
+                        {
+                            try
+                            {
+                                File.Delete(old);
+                                _logger.LogDebug("Deleted old PMP backup {pmp} for {mod}", old, mod);
+                            }
+                            catch { }
+                        }
+                    }
+                    catch { }
+
+                    var pmpPath = Path.Combine(modBackupDir, $"mod_backup_{timestamp:yyyyMMdd_HHmmss}.pmp");
+                    if (File.Exists(pmpPath))
+                    {
+                        try { File.Delete(pmpPath); } catch { }
+                    }
+
+                    await Task.Run(() =>
+                    {
+                        if (token.IsCancellationRequested) return;
+                        ZipFile.CreateFromDirectory(modAbs!, pmpPath);
+                    }, token).ConfigureAwait(false);
+                    _logger.LogDebug("Created full mod backup PMP {pmp}", pmpPath);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning("Failed to create full mod backup for {mod}: {error}", mod, ex.Message);
+                }
+                await Task.Yield();
             }
         }
     }

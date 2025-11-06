@@ -54,6 +54,19 @@ public sealed class SettingsUI : Window
             ImGui.SetTooltip(text);
     }
 
+    // Helper to show a width-constrained tooltip with wrapped text
+    private static void ShowTooltipWrapped(string text, float maxWidth)
+    {
+        if (!ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
+            return;
+
+        ImGui.BeginTooltip();
+        ImGui.PushTextWrapPos(ImGui.GetCursorPosX() + maxWidth);
+        ImGui.TextUnformatted(text);
+        ImGui.PopTextWrapPos();
+        ImGui.EndTooltip();
+    }
+
     public override void Draw()
     {
         // Subtle accent header bar for branding
@@ -73,11 +86,10 @@ public sealed class SettingsUI : Window
                 ImGui.SetWindowFontScale(1.0f);
                 var mode = _configService.Current.TextureProcessingMode;
                 var controller = _configService.Current.AutomaticControllerName ?? string.Empty;
-                var modeDisplay = mode == TextureProcessingMode.Automatic && !string.IsNullOrWhiteSpace(controller)
-                    ? $"Automatic (handled by {controller})"
-                    : (mode == TextureProcessingMode.Automatic && _configService.Current.AutomaticHandledBySphene ? "Automatic (handled by Sphene)" : mode.ToString());
-                var disableModeCombo = mode == TextureProcessingMode.Automatic && (!string.IsNullOrWhiteSpace(controller) || _configService.Current.AutomaticHandledBySphene);
-                if (disableModeCombo) ImGui.BeginDisabled();
+                var spheneIntegrated = !string.IsNullOrWhiteSpace(controller) || _configService.Current.AutomaticHandledBySphene;
+                var modeDisplay = mode == TextureProcessingMode.Automatic && spheneIntegrated
+                    ? "Automatic (handled by Sphene)"
+                    : mode.ToString();
                 if (ImGui.BeginCombo("Mode", modeDisplay))
                 {
                     if (ImGui.Selectable("Manual", mode == TextureProcessingMode.Manual))
@@ -87,21 +99,31 @@ public sealed class SettingsUI : Window
                         _configService.Current.AutomaticControllerName = string.Empty;
                         _configService.Save();
                     }
-                    if (ImGui.Selectable("Automatic", mode == TextureProcessingMode.Automatic))
+
+                    if (spheneIntegrated)
                     {
-                        _configService.Current.TextureProcessingMode = TextureProcessingMode.Automatic;
-                        _configService.Save();
+                        var isAuto = mode == TextureProcessingMode.Automatic;
+                        if (ImGui.Selectable("Automatic (handled by Sphene)", isAuto))
+                        {
+                            _configService.Current.TextureProcessingMode = TextureProcessingMode.Automatic;
+                            _configService.Current.AutomaticHandledBySphene = true;
+                            _configService.Current.AutomaticControllerName = string.IsNullOrWhiteSpace(controller) ? "Sphene" : controller;
+                            _configService.Save();
+                        }
+                    }
+                    else
+                    {
+                        if (ImGui.Selectable("Automatic", mode == TextureProcessingMode.Automatic))
+                        {
+                            _configService.Current.TextureProcessingMode = TextureProcessingMode.Automatic;
+                            _configService.Current.AutomaticHandledBySphene = false;
+                            _configService.Current.AutomaticControllerName = string.Empty;
+                            _configService.Save();
+                        }
                     }
                     ImGui.EndCombo();
                 }
-                if (disableModeCombo)
-                {
-                    ImGui.EndDisabled();
-                    var ctrlLabel = !string.IsNullOrWhiteSpace(controller) ? controller : "Sphene";
-                    if (ImGui.IsItemHovered())
-                        ImGui.SetTooltip($"Controlled by {ctrlLabel}");
-                }
-                ShowTooltip("Select how ShrinkU processes textures: Manual or Automatic.");
+                ShowTooltip("Select how ShrinkU processes textures. When integrated with Sphene, only the Sphene-handled automatic mode is available.");
 
                 //bool backup = _configService.Current.EnableBackupBeforeConversion;
                 //if (ImGui.Checkbox("Enable backup before conversion", ref backup))
@@ -160,6 +182,21 @@ public sealed class SettingsUI : Window
                     _configService.Save();
                 }
                 ShowTooltip("When converting via ShrinkU UI, include non-visible mod textures even if filters hide them. Sphene automatic behavior remains unchanged.");
+
+                // Full mod backup toggle
+                bool fullModBackup = _configService.Current.EnableFullModBackupBeforeConversion;
+                ImGui.PushFont(UiBuilder.IconFont);
+                ImGui.TextColored(ShrinkUColors.WarningLight, FontAwesomeIcon.ExclamationTriangle.ToIconString());
+                ImGui.PopFont();
+                ImGui.SameLine();
+                if (ImGui.Checkbox("Backup whole mod before conversion (.pmp)", ref fullModBackup))
+                {
+                    _configService.Current.EnableFullModBackupBeforeConversion = fullModBackup;
+                    _configService.Save();
+                }
+                ShowTooltipWrapped("Creates a full mod PMP archive that Penumbra can install. Experimental feature: enabling this may increase disk usage and conversion time, and restores will overwrite the mod to the archived state. Large mods or unusual layouts may fail or require manual cleanup. If anything unexpected happens, please enable and provide Debug logs to help diagnose issues.", 420f);
+                ImGui.SameLine();
+                ImGui.TextColored(ShrinkUColors.WarningLight, "[Experimental]");
 
                 // Backup folder selection
                 ImGui.Text("Backup Folder:");

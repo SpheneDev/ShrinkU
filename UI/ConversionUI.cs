@@ -101,6 +101,8 @@ public sealed class ConversionUI : Window, IDisposable
     private readonly HashSet<string> _selectedTextures = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, bool> _modsWithBackupCache = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, byte> _modsBackupCheckInFlight = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, bool> _modsWithPmpCache = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, byte> _modsPmpCheckInFlight = new(StringComparer.OrdinalIgnoreCase);
     // Cache file sizes to avoid per-frame disk I/O in UI rendering
     private readonly ConcurrentDictionary<string, long> _fileSizeCache = new(StringComparer.OrdinalIgnoreCase);
     private Task? _fileSizeWarmupTask = null;
@@ -114,6 +116,9 @@ public sealed class ConversionUI : Window, IDisposable
     private int _currentRestoreModTotal = 0;
     private bool _restoreAfterCancel = false;
     private string _cancelTargetMod = string.Empty;
+    private string _statusMessage = string.Empty;
+    private DateTime _statusMessageAt = DateTime.MinValue;
+    private bool _statusPersistent = false;
     
     // UI refresh flag to force ImGui redraw after async data updates
     private volatile bool _needsUIRefresh = false;
@@ -250,6 +255,7 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
 
             // Normal completion path: recompute savings and refresh UI
             _modsWithBackupCache.Clear();
+            _modsWithPmpCache.Clear();
             _perModSavingsTask = _backupService.ComputePerModSavingsAsync();
             _perModSavingsTask.ContinueWith(t =>
             {
@@ -272,6 +278,8 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
         _onPenumbraModsChanged = () =>
         {
             _modsWithBackupCache.Clear();
+            _modsWithPmpCache.Clear();
+            _modsPmpCheckInFlight.Clear();
             _logger.LogDebug("Penumbra mods changed (DIAG-v3); refreshing UI state");
             _needsUIRefresh = true;
             // Refresh hierarchical mod paths so folder moves/creations reflect in the UI
@@ -333,6 +341,8 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
             // Ensure backup states and metrics reflect latest changes from Sphene
             try { _modsWithBackupCache.Clear(); } catch { }
             try { _modsBackupCheckInFlight.Clear(); } catch { }
+            try { _modsWithPmpCache.Clear(); } catch { }
+            try { _modsPmpCheckInFlight.Clear(); } catch { }
             try { TriggerMetricsRefresh(); } catch { }
 
             // If Penumbra Used Only is enabled, reload the used textures set so filter applies immediately
@@ -458,6 +468,8 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
                             _uiThreadActions.Enqueue(() =>
                             {
                                 _modsWithBackupCache.Clear();
+                                _modsWithPmpCache.Clear();
+                                _modsPmpCheckInFlight.Clear();
                                 _logger.LogDebug("Suppressed heavy scan: mod folders unchanged after ModAdded");
                                 _needsUIRefresh = true;
                             });
@@ -514,6 +526,8 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
                             _uiThreadActions.Enqueue(() =>
                             {
                                 _modsWithBackupCache.Clear();
+                                _modsWithPmpCache.Clear();
+                                _modsPmpCheckInFlight.Clear();
                                 _logger.LogDebug("Suppressed heavy scan: mod folders unchanged after ModDeleted");
                                 _needsUIRefresh = true;
                             });
@@ -741,6 +755,21 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
         {
             try { action(); } catch { }
         }
+        if (!string.IsNullOrEmpty(_statusMessage))
+        {
+            var recent = (DateTime.UtcNow - _statusMessageAt).TotalSeconds <= 10.0;
+            if (_statusPersistent || recent)
+            {
+                ImGui.TextWrapped(_statusMessage);
+                ImGui.Separator();
+            }
+            else
+            {
+                _statusMessage = string.Empty;
+                _statusPersistent = false;
+                _statusMessageAt = DateTime.MinValue;
+            }
+        }
 
         // Check if UI needs refresh due to async data updates
         if (_needsUIRefresh)
@@ -921,11 +950,10 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
         ImGui.SetWindowFontScale(1.0f);
         var mode = _configService.Current.TextureProcessingMode;
         var controller = _configService.Current.AutomaticControllerName ?? string.Empty;
-        var modeDisplay = mode == TextureProcessingMode.Automatic && !string.IsNullOrWhiteSpace(controller)
-            ? $"Automatic (controlled by {controller})"
-            : (mode == TextureProcessingMode.Automatic && _configService.Current.AutomaticHandledBySphene ? "Automatic (controlled by Sphene)" : mode.ToString());
-        var disableModeCombo = mode == TextureProcessingMode.Automatic && (!string.IsNullOrWhiteSpace(controller) || _configService.Current.AutomaticHandledBySphene);
-        if (disableModeCombo) ImGui.BeginDisabled();
+        var spheneIntegrated = !string.IsNullOrWhiteSpace(controller) || _configService.Current.AutomaticHandledBySphene;
+        var modeDisplay = mode == TextureProcessingMode.Automatic && spheneIntegrated
+            ? "Automatic (handled by Sphene)"
+            : mode.ToString();
         if (ImGui.BeginCombo("Mode", modeDisplay))
         {
             if (ImGui.Selectable("Manual", mode == TextureProcessingMode.Manual))
@@ -935,21 +963,31 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
                 _configService.Current.AutomaticControllerName = string.Empty;
                 _configService.Save();
             }
-            if (ImGui.Selectable("Automatic", mode == TextureProcessingMode.Automatic))
+
+            if (spheneIntegrated)
             {
-                _configService.Current.TextureProcessingMode = TextureProcessingMode.Automatic;
-                _configService.Save();
+                var isAuto = mode == TextureProcessingMode.Automatic;
+                if (ImGui.Selectable("Automatic (handled by Sphene)", isAuto))
+                {
+                    _configService.Current.TextureProcessingMode = TextureProcessingMode.Automatic;
+                    _configService.Current.AutomaticHandledBySphene = true;
+                    _configService.Current.AutomaticControllerName = string.IsNullOrWhiteSpace(controller) ? "Sphene" : controller;
+                    _configService.Save();
+                }
+            }
+            else
+            {
+                if (ImGui.Selectable("Automatic", mode == TextureProcessingMode.Automatic))
+                {
+                    _configService.Current.TextureProcessingMode = TextureProcessingMode.Automatic;
+                    _configService.Current.AutomaticHandledBySphene = false;
+                    _configService.Current.AutomaticControllerName = string.Empty;
+                    _configService.Save();
+                }
             }
             ImGui.EndCombo();
         }
-        if (disableModeCombo)
-        {
-            ImGui.EndDisabled();
-            var ctrlLabel = !string.IsNullOrWhiteSpace(controller) ? controller : "Sphene";
-            if (ImGui.IsItemHovered())
-                ImGui.SetTooltip($"Controlled by {ctrlLabel}");
-        }
-        ShowTooltip("Choose how textures are processed.");
+        ShowTooltip("Choose how textures are processed. When integrated with Sphene, only the Sphene-handled automatic mode is available.");
 
         //bool backup = _configService.Current.EnableBackupBeforeConversion;
         //if (ImGui.Checkbox("Enable backup before conversion", ref backup))
@@ -1379,6 +1417,31 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                     ImGui.PopFont();
                     ImGui.SameLine();
                     ImGui.TextUnformatted(header);
+                    // Rich mod tooltip with helpful information
+                    if (ImGui.IsItemHovered())
+                    {
+                        bool hasPmp = GetOrQueryModPmp(mod);
+                        long origBytesTip = GetOrQueryModOriginalTotal(mod);
+                        long compBytesTip = 0;
+                        if (_cachedPerModSavings.TryGetValue(mod, out var tipStats) && tipStats != null)
+                            compBytesTip = Math.Max(0, tipStats.CurrentBytes);
+
+                        float reductionPctTip = 0f;
+                        if (origBytesTip > 0 && compBytesTip > 0)
+                            reductionPctTip = MathF.Max(0f, (float)(origBytesTip - compBytesTip) / origBytesTip * 100f);
+
+                        ImGui.BeginTooltip();
+                        ImGui.TextUnformatted($"{ResolveModDisplayName(mod)}");
+                        ImGui.Separator();
+                        ImGui.TextUnformatted($"Textures: {(hasBackup ? convertedAll : 0)}/{totalAll} converted");
+                        ImGui.TextUnformatted($"Uncompressed: {FormatSize(origBytesTip)}");
+                        var compText = compBytesTip > 0 ? $"{FormatSize(compBytesTip)} ({reductionPctTip:0.00}% reduction)" : "-";
+                        ImGui.TextUnformatted($"Compressed: {compText}");
+                        ImGui.TextUnformatted($"Backups: {(hasBackup ? "Textures" : "None")}{(hasPmp ? ", PMP" : string.Empty)}");
+                        var enabledState = _modEnabledStates.TryGetValue(mod, out var st) ? (st.Enabled ? "Enabled" : "Disabled") : "Unknown";
+                        ImGui.TextUnformatted($"State: {enabledState}");
+                        ImGui.EndTooltip();
+                    }
                     // If an external change was detected recently or persisted, show a small plug indicator
                     var hasPersistent = _configService.Current.ExternalConvertedMods.ContainsKey(mod);
                     var showExternal = hasBackup && (((DateTime.UtcNow - _lastExternalChangeAt).TotalSeconds < 30 && !string.IsNullOrEmpty(_lastExternalChangeReason)) || hasPersistent);
@@ -1484,48 +1547,57 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                         ImGui.BeginDisabled(excluded || restoreDisabledByAuto || _conversionService.IsConverting);
                         if (ImGui.Button(actionLabel))
                         {
-                            _running = true;
                             if (hasBackup)
                             {
-                            _modsWithBackupCache.TryRemove(mod, out _);
-                            // Reset progress state for restore and initialize current restore mod
-                            ResetConversionProgress();
-                            ResetRestoreProgress();
-                            _currentRestoreMod = mod;
-                            var progress = new Progress<(string, int, int)>(e => { _currentTexture = e.Item1; _backupIndex = e.Item2; _backupTotal = e.Item3; _currentRestoreModIndex = e.Item2; _currentRestoreModTotal = e.Item3; });
-                            _ = _backupService.RestoreLatestForModAsync(mod, progress, CancellationToken.None)
-                                .ContinueWith(t => {
-                                    var success = t.Status == TaskStatus.RanToCompletion && t.Result;
-                                    try { _backupService.RedrawPlayer(); } catch { }
-                                    _logger.LogDebug("Heavy scan triggered: restore completed (mod button in folder view)");
-                                    RefreshScanResults(true, "restore-folder-view");
-                                    TriggerMetricsRefresh();
-                                    // Recompute per-mod savings after restore to refresh Uncompressed/Compressed sizes
-                                    _perModSavingsTask = _backupService.ComputePerModSavingsAsync();
-                                    _perModSavingsTask.ContinueWith(ps =>
-                                    {
-                                        if (ps.Status == TaskStatus.RanToCompletion && ps.Result != null)
-                                        {
-                                            _cachedPerModSavings = ps.Result;
-                                            _needsUIRefresh = true;
-                                        }
-                                    }, TaskScheduler.Default);
-                                    _ = _backupService.HasBackupForModAsync(mod).ContinueWith(bt =>
-                                    {
-                                        if (bt.Status == TaskStatus.RanToCompletion)
-                                            _modsWithBackupCache[mod] = bt.Result;
-                                    });
-                                    if (success)
-                                    {
-                                        try
-                                        {
-                                            if (_configService.Current.ExternalConvertedMods.Remove(mod))
-                                                _configService.Save();
-                                        }
-                                        catch { }
-                                    }
-                                    _running = false;
-                                });
+                                // If PMP is available, open the context menu on normal click instead of immediate restore
+                                var hasPmpForClick = GetOrQueryModPmp(mod);
+                                if (hasPmpForClick)
+                                {
+                                    ImGui.OpenPopup($"restorectx-{mod}");
+                                }
+                                else
+                                {
+                                    _running = true;
+                                    _modsWithBackupCache.TryRemove(mod, out _);
+                                    // Reset progress state for restore and initialize current restore mod
+                                    ResetConversionProgress();
+                                    ResetRestoreProgress();
+                                    _currentRestoreMod = mod;
+                                    var progress = new Progress<(string, int, int)>(e => { _currentTexture = e.Item1; _backupIndex = e.Item2; _backupTotal = e.Item3; _currentRestoreModIndex = e.Item2; _currentRestoreModTotal = e.Item3; });
+                                    _ = _backupService.RestoreLatestForModAsync(mod, progress, CancellationToken.None)
+                                        .ContinueWith(t => {
+                                            var success = t.Status == TaskStatus.RanToCompletion && t.Result;
+                                            try { _backupService.RedrawPlayer(); } catch { }
+                                            _logger.LogDebug("Heavy scan triggered: restore completed (mod button in folder view)");
+                                            RefreshScanResults(true, "restore-folder-view");
+                                            TriggerMetricsRefresh();
+                                            // Recompute per-mod savings after restore to refresh Uncompressed/Compressed sizes
+                                            _perModSavingsTask = _backupService.ComputePerModSavingsAsync();
+                                            _perModSavingsTask.ContinueWith(ps =>
+                                            {
+                                                if (ps.Status == TaskStatus.RanToCompletion && ps.Result != null)
+                                                {
+                                                    _cachedPerModSavings = ps.Result;
+                                                    _needsUIRefresh = true;
+                                                }
+                                            }, TaskScheduler.Default);
+                                            _ = _backupService.HasBackupForModAsync(mod).ContinueWith(bt =>
+                                            {
+                                                if (bt.Status == TaskStatus.RanToCompletion)
+                                                    _modsWithBackupCache[mod] = bt.Result;
+                                            });
+                                            if (success)
+                                            {
+                                                try
+                                                {
+                                                    if (_configService.Current.ExternalConvertedMods.Remove(mod))
+                                                        _configService.Save();
+                                                }
+                                                catch { }
+                                            }
+                                            _running = false;
+                                        });
+                                }
                             }
                             else
                             {
@@ -1572,6 +1644,139 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                                     ShowTooltip(msg);
                                 }
                             }
+                        }
+                        // Enhance Restore button when PMP is available: accent stripe and context menu
+                        var hasPmp = GetOrQueryModPmp(mod);
+                        if (hasBackup && hasPmp)
+                        {
+                            // Draw a small accent stripe on the right side of the last button to suggest two-tone
+                            var min = ImGui.GetItemRectMin();
+                            var max = ImGui.GetItemRectMax();
+                            var stripeWidth = MathF.Min(12f, MathF.Max(6f, (max.X - min.X) * 0.12f));
+                            var dl = ImGui.GetWindowDrawList();
+                            dl.AddRectFilled(new Vector2(max.X - stripeWidth, min.Y), new Vector2(max.X, max.Y), ImGui.GetColorU32(ShrinkUColors.Accent));
+
+                            // Right-click opens named popup; left-click also opens it above
+                            if (ImGui.BeginPopupContextItem($"restorectx-{mod}"))
+                            {
+                                ImGui.OpenPopup($"restorectx-{mod}");
+                                ImGui.EndPopup();
+                            }
+                            // Unified context menu popup
+                            if (ImGui.BeginPopup($"restorectx-{mod}"))
+                            {
+                                if (ImGui.MenuItem("Restore textures"))
+                                {
+                                    _running = true;
+                                    _modsWithBackupCache.TryRemove(mod, out _);
+                                    ResetConversionProgress();
+                                    ResetRestoreProgress();
+                                    _currentRestoreMod = mod;
+                                    _statusMessage = $"Restore requested for {mod}";
+                                    _statusMessageAt = DateTime.UtcNow;
+                                    _statusPersistent = false;
+                                    var progress = new Progress<(string, int, int)>(e => { _currentTexture = e.Item1; _backupIndex = e.Item2; _backupTotal = e.Item3; _currentRestoreModIndex = e.Item2; _currentRestoreModTotal = e.Item3; });
+                                    _logger.LogInformation("Restore requested for {mod}", mod);
+                                    _ = _backupService.RestoreLatestForModAsync(mod, progress, CancellationToken.None)
+                                        .ContinueWith(t => {
+                                            var success = t.Status == TaskStatus.RanToCompletion && t.Result;
+                                            try { _backupService.RedrawPlayer(); } catch { }
+                                            _logger.LogDebug(success
+                                                ? "Restore completed successfully (context menu, folder view)"
+                                                : "Restore failed or aborted (context menu, folder view)");
+                                            _logger.LogInformation(success
+                                                ? "Restore completed for {mod}"
+                                                : "Restore failed for {mod}", mod);
+                                            _uiThreadActions.Enqueue(() => {
+                                                _statusMessage = success ? $"Restore completed for {mod}" : $"Restore failed for {mod}";
+                                                _statusMessageAt = DateTime.UtcNow;
+                                                _statusPersistent = false;
+                                            });
+                                            RefreshScanResults(true, "restore-folder-view-context");
+                                            TriggerMetricsRefresh();
+                                            _perModSavingsTask = _backupService.ComputePerModSavingsAsync();
+                                            _perModSavingsTask.ContinueWith(ps =>
+                                            {
+                                                if (ps.Status == TaskStatus.RanToCompletion && ps.Result != null)
+                                                {
+                                                    _cachedPerModSavings = ps.Result;
+                                                    _needsUIRefresh = true;
+                                                }
+                                            }, TaskScheduler.Default);
+                                            _ = _backupService.HasBackupForModAsync(mod).ContinueWith(bt =>
+                                            {
+                                                if (bt.Status == TaskStatus.RanToCompletion)
+                                                    _modsWithBackupCache[mod] = bt.Result;
+                                            });
+                                            _running = false;
+                                            ImGui.CloseCurrentPopup();
+                                        });
+                                }
+                                // restore PMP if available
+                                if (ImGui.MenuItem("Restore PMP"))
+                                {
+                                    List<string> pmpFiles = null;
+                                    try { pmpFiles = _backupService.GetPmpBackupsForModAsync(mod).GetAwaiter().GetResult(); } catch { }
+                                    if (pmpFiles != null && pmpFiles.Count > 0)
+                                    {
+                                        var latest = pmpFiles.OrderByDescending(f => f).First();
+                                        var display = Path.GetFileName(latest);
+                                        _running = true;
+                                        ResetConversionProgress();
+                                        ResetRestoreProgress();
+                                        _currentRestoreMod = mod;
+                                        _statusMessage = $"PMP restore requested for {mod}: {display}";
+                                        _statusMessageAt = DateTime.UtcNow;
+                                        _statusPersistent = false;
+                                        _logger.LogInformation("PMP restore requested for {mod}: {file}", mod, display);
+                                        var progress = new Progress<(string, int, int)>(e => { _currentTexture = e.Item1; _backupIndex = e.Item2; _backupTotal = e.Item3; _currentRestoreModIndex = e.Item2; _currentRestoreModTotal = e.Item3; });
+                                        _ = _backupService.RestorePmpAsync(mod, latest, progress, CancellationToken.None)
+                                            .ContinueWith(t =>
+                                            {
+                                                var success = t.Status == TaskStatus.RanToCompletion && t.Result;
+                                                try { _backupService.RedrawPlayer(); } catch { }
+                                                _logger.LogDebug(success
+                                                    ? "PMP restore completed successfully (folder view via context)"
+                                                    : "PMP restore failed or aborted (folder view via context)");
+                                                _logger.LogInformation(success
+                                                    ? "PMP restore completed for {mod}: {file}"
+                                                    : "PMP restore failed for {mod}: {file}", mod, display);
+                                                _uiThreadActions.Enqueue(() => {
+                                                    _statusMessage = success ? $"PMP restore completed for {mod}: {display}" : $"PMP restore failed for {mod}: {display}";
+                                                    _statusMessageAt = DateTime.UtcNow;
+                                                    _statusPersistent = false;
+                                                });
+                                                RefreshScanResults(true, "pmp-restore-folder-view-context-newest");
+                                                TriggerMetricsRefresh();
+                                                _perModSavingsTask = _backupService.ComputePerModSavingsAsync();
+                                                _perModSavingsTask.ContinueWith(ps =>
+                                                {
+                                                    if (ps.Status == TaskStatus.RanToCompletion && ps.Result != null)
+                                                    {
+                                                        _cachedPerModSavings = ps.Result;
+                                                        _needsUIRefresh = true;
+                                                    }
+                                                }, TaskScheduler.Default);
+                                                _ = _backupService.HasBackupForModAsync(mod).ContinueWith(bt =>
+                                                {
+                                                    if (bt.Status == TaskStatus.RanToCompletion)
+                                                        _modsWithBackupCache[mod] = bt.Result;
+                                                });
+                                                _running = false;
+                                                ImGui.CloseCurrentPopup();
+                                            });
+                                    }
+                                    else
+                                    {
+                                        _statusMessage = $"No .pmp backups found for {mod}";
+                                        _statusMessageAt = DateTime.UtcNow;
+                                        _statusPersistent = false;
+                                    }
+                                }
+                                
+                                ImGui.EndPopup();
+                            }
+                            
                         }
                         ImGui.PopStyleColor(3);
                         ImGui.EndDisabled();
@@ -2454,6 +2659,31 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                 ImGui.PopFont();
                 ImGui.SameLine();
                 ImGui.TextUnformatted(header);
+                // Rich mod tooltip with helpful information
+                if (ImGui.IsItemHovered())
+                {
+                    bool hasPmp = GetOrQueryModPmp(mod);
+                    long origBytesTip = GetOrQueryModOriginalTotal(mod);
+                    long compBytesTip = 0;
+                    if (_cachedPerModSavings.TryGetValue(mod, out var tipStats) && tipStats != null)
+                        compBytesTip = Math.Max(0, tipStats.CurrentBytes);
+
+                    float reductionPctTip = 0f;
+                    if (origBytesTip > 0 && compBytesTip > 0)
+                        reductionPctTip = MathF.Max(0f, (float)(origBytesTip - compBytesTip) / origBytesTip * 100f);
+
+                    ImGui.BeginTooltip();
+                    ImGui.TextUnformatted($"{ResolveModDisplayName(mod)}");
+                    ImGui.Separator();
+                    ImGui.TextUnformatted($"Textures: {(hasBackup ? convertedAll : 0)}/{totalAll} converted");
+                    ImGui.TextUnformatted($"Uncompressed: {FormatSize(origBytesTip)}");
+                    var compText = compBytesTip > 0 ? $"{FormatSize(compBytesTip)} ({reductionPctTip:0.00}% reduction)" : "-";
+                    ImGui.TextUnformatted($"Compressed: {compText}");
+                    ImGui.TextUnformatted($"Backups: {(hasBackup ? "Textures" : "None")}{(hasPmp ? ", PMP" : string.Empty)}");
+                    var enabledState = _modEnabledStates.TryGetValue(mod, out var st) ? (st.Enabled ? "Enabled" : "Disabled") : "Unknown";
+                    ImGui.TextUnformatted($"State: {enabledState}");
+                    ImGui.EndTooltip();
+                }
                 // If an external change was detected recently or persisted, show a small plug indicator
                 var hasPersistent = _configService.Current.ExternalConvertedMods.ContainsKey(mod);
                 var showExternal = hasBackup && (((DateTime.UtcNow - _lastExternalChangeAt).TotalSeconds < 30 && !string.IsNullOrEmpty(_lastExternalChangeReason)) || hasPersistent);
@@ -2546,48 +2776,57 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                     ImGui.BeginDisabled(excluded);
                     if (ImGui.Button(actionLabel))
                     {
-                        _running = true;
                         if (hasBackup)
                         {
-                            _modsWithBackupCache.TryRemove(mod, out _);
-                            // Reset progress state for restore and initialize current restore mod
-                            ResetConversionProgress();
-                            ResetRestoreProgress();
-                            _currentRestoreMod = mod;
-                            var progress = new Progress<(string, int, int)>(e => { _currentTexture = e.Item1; _backupIndex = e.Item2; _backupTotal = e.Item3; _currentRestoreModIndex = e.Item2; _currentRestoreModTotal = e.Item3; });
-                            _ = _backupService.RestoreLatestForModAsync(mod, progress, CancellationToken.None)
-                                .ContinueWith(t => {
-                                    var success = t.Status == TaskStatus.RanToCompletion && t.Result;
-                                    try { _backupService.RedrawPlayer(); } catch { }
-                                    _logger.LogDebug("Heavy scan triggered: restore completed (mod button in mod-only view, async)");
-                                    RefreshScanResults(true, "restore-mod-only-view-async");
-                                    TriggerMetricsRefresh();
-                                    // Recompute per-mod savings after restore to refresh Uncompressed/Compressed sizes
-                                    _perModSavingsTask = _backupService.ComputePerModSavingsAsync();
-                                    _perModSavingsTask.ContinueWith(ps =>
-                                    {
-                                        if (ps.Status == TaskStatus.RanToCompletion && ps.Result != null)
+                            // If PMP is available, open the context menu on normal click instead of immediate restore
+                            var hasPmpForClick = GetOrQueryModPmp(mod);
+                            if (hasPmpForClick)
+                            {
+                                ImGui.OpenPopup($"restorectx-{mod}");
+                            }
+                            else
+                            {
+                                _running = true;
+                                _modsWithBackupCache.TryRemove(mod, out _);
+                                // Reset progress state for restore and initialize current restore mod
+                                ResetConversionProgress();
+                                ResetRestoreProgress();
+                                _currentRestoreMod = mod;
+                                var progress = new Progress<(string, int, int)>(e => { _currentTexture = e.Item1; _backupIndex = e.Item2; _backupTotal = e.Item3; _currentRestoreModIndex = e.Item2; _currentRestoreModTotal = e.Item3; });
+                                _ = _backupService.RestoreLatestForModAsync(mod, progress, CancellationToken.None)
+                                    .ContinueWith(t => {
+                                        var success = t.Status == TaskStatus.RanToCompletion && t.Result;
+                                        try { _backupService.RedrawPlayer(); } catch { }
+                                        _logger.LogDebug("Heavy scan triggered: restore completed (mod button in mod-only view, async)");
+                                        RefreshScanResults(true, "restore-mod-only-view-async");
+                                        TriggerMetricsRefresh();
+                                        // Recompute per-mod savings after restore to refresh Uncompressed/Compressed sizes
+                                        _perModSavingsTask = _backupService.ComputePerModSavingsAsync();
+                                        _perModSavingsTask.ContinueWith(ps =>
                                         {
-                                            _cachedPerModSavings = ps.Result;
-                                            _needsUIRefresh = true;
+                                            if (ps.Status == TaskStatus.RanToCompletion && ps.Result != null)
+                                            {
+                                                _cachedPerModSavings = ps.Result;
+                                                _needsUIRefresh = true;
+                                            }
+                                        }, TaskScheduler.Default);
+                                        _ = _backupService.HasBackupForModAsync(mod).ContinueWith(bt =>
+                                        {
+                                            if (bt.Status == TaskStatus.RanToCompletion)
+                                                _modsWithBackupCache[mod] = bt.Result;
+                                        });
+                                        if (success)
+                                        {
+                                            try
+                                            {
+                                                if (_configService.Current.ExternalConvertedMods.Remove(mod))
+                                                    _configService.Save();
+                                            }
+                                            catch { }
                                         }
-                                    }, TaskScheduler.Default);
-                                    _ = _backupService.HasBackupForModAsync(mod).ContinueWith(bt =>
-                                    {
-                                        if (bt.Status == TaskStatus.RanToCompletion)
-                                            _modsWithBackupCache[mod] = bt.Result;
+                                        _running = false;
                                     });
-                                    if (success)
-                                    {
-                                        try
-                                        {
-                                            if (_configService.Current.ExternalConvertedMods.Remove(mod))
-                                                _configService.Save();
-                                        }
-                                        catch { }
-                                    }
-                                    _running = false;
-                                });
+                            }
                         }
                         else
                         {
@@ -2630,6 +2869,140 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                                 : "Convert all visible textures for this mod.";
                             ShowTooltip(msg);
                         }
+                    }
+
+                    // Enhance Restore button when PMP is available: accent stripe and context menu
+                    var hasPmp = GetOrQueryModPmp(mod);
+                    if (hasBackup && hasPmp)
+                    {
+                        // Draw accent stripe to make the single Restore button stand out when PMP exists
+                        var min = ImGui.GetItemRectMin();
+                        var max = ImGui.GetItemRectMax();
+                        var stripeWidth = MathF.Min(12f, MathF.Max(6f, (max.X - min.X) * 0.12f));
+                        var dl = ImGui.GetWindowDrawList();
+                        dl.AddRectFilled(new Vector2(max.X - stripeWidth, min.Y), new Vector2(max.X, max.Y), ImGui.GetColorU32(ShrinkUColors.Accent));
+
+                        // Right-click opens named popup; left-click also opens it above
+                        if (ImGui.BeginPopupContextItem($"restorectx-{mod}"))
+                        {
+                            ImGui.OpenPopup($"restorectx-{mod}");
+                            ImGui.EndPopup();
+                        }
+                        // Unified context menu popup
+                        if (ImGui.BeginPopup($"restorectx-{mod}"))
+                        {
+                            if (ImGui.MenuItem("Restore textures"))
+                            {
+                                _running = true;
+                                _modsWithBackupCache.TryRemove(mod, out _);
+                                ResetConversionProgress();
+                                ResetRestoreProgress();
+                                _currentRestoreMod = mod;
+                                _statusMessage = $"Restore requested for {mod}";
+                                _statusMessageAt = DateTime.UtcNow;
+                                _statusPersistent = false;
+                                var progress = new Progress<(string, int, int)>(e => { _currentTexture = e.Item1; _backupIndex = e.Item2; _backupTotal = e.Item3; _currentRestoreModIndex = e.Item2; _currentRestoreModTotal = e.Item3; });
+                                _logger.LogInformation("Restore requested for {mod}", mod);
+                                _ = _backupService.RestoreLatestForModAsync(mod, progress, CancellationToken.None)
+                                    .ContinueWith(t => {
+                                        var success = t.Status == TaskStatus.RanToCompletion && t.Result;
+                                        try { _backupService.RedrawPlayer(); } catch { }
+                                        _logger.LogDebug(success
+                                            ? "Restore completed successfully (context menu, mod-only view)"
+                                            : "Restore failed or aborted (context menu, mod-only view)");
+                                        _logger.LogInformation(success
+                                            ? "Restore completed for {mod}"
+                                            : "Restore failed for {mod}", mod);
+                                        _uiThreadActions.Enqueue(() => {
+                                            _statusMessage = success ? $"Restore completed for {mod}" : $"Restore failed for {mod}";
+                                            _statusMessageAt = DateTime.UtcNow;
+                                            _statusPersistent = false;
+                                        });
+                                        RefreshScanResults(true, "restore-mod-only-view-context");
+                                        TriggerMetricsRefresh();
+                                        _perModSavingsTask = _backupService.ComputePerModSavingsAsync();
+                                        _perModSavingsTask.ContinueWith(ps =>
+                                        {
+                                            if (ps.Status == TaskStatus.RanToCompletion && ps.Result != null)
+                                            {
+                                                _cachedPerModSavings = ps.Result;
+                                                _needsUIRefresh = true;
+                                            }
+                                        }, TaskScheduler.Default);
+                                        _ = _backupService.HasBackupForModAsync(mod).ContinueWith(bt =>
+                                        {
+                                            if (bt.Status == TaskStatus.RanToCompletion)
+                                                _modsWithBackupCache[mod] = bt.Result;
+                                        });
+                                        _running = false;
+                                        ImGui.CloseCurrentPopup();
+                                    });
+                        }
+                        // restore PMP if available
+                        if (ImGui.MenuItem("Restore PMP"))
+                        {
+                            List<string> pmpFiles = null;
+                            try { pmpFiles = _backupService.GetPmpBackupsForModAsync(mod).GetAwaiter().GetResult(); } catch { }
+                            if (pmpFiles != null && pmpFiles.Count > 0)
+                            {
+                                var latest = pmpFiles.OrderByDescending(f => f).First();
+                                var display = Path.GetFileName(latest);
+                                _running = true;
+                                ResetConversionProgress();
+                                ResetRestoreProgress();
+                                _currentRestoreMod = mod;
+                                _statusMessage = $"PMP restore requested for {mod}: {display}";
+                                _statusMessageAt = DateTime.UtcNow;
+                                _statusPersistent = false;
+                                _logger.LogInformation("PMP restore requested for {mod}: {file}", mod, display);
+                                var progress = new Progress<(string, int, int)>(e => { _currentTexture = e.Item1; _backupIndex = e.Item2; _backupTotal = e.Item3; _currentRestoreModIndex = e.Item2; _currentRestoreModTotal = e.Item3; });
+                                _ = _backupService.RestorePmpAsync(mod, latest, progress, CancellationToken.None)
+                                    .ContinueWith(t =>
+                                    {
+                                        var success = t.Status == TaskStatus.RanToCompletion && t.Result;
+                                        try { _backupService.RedrawPlayer(); } catch { }
+                                        _logger.LogDebug(success
+                                            ? "PMP restore completed successfully (mod-only view via context)"
+                                            : "PMP restore failed or aborted (mod-only view via context)");
+                                        _logger.LogInformation(success
+                                            ? "PMP restore completed for {mod}: {file}"
+                                            : "PMP restore failed for {mod}: {file}", mod, display);
+                                        _uiThreadActions.Enqueue(() => {
+                                            _statusMessage = success ? $"PMP restore completed for {mod}: {display}" : $"PMP restore failed for {mod}: {display}";
+                                            _statusMessageAt = DateTime.UtcNow;
+                                            _statusPersistent = false;
+                                        });
+                                        RefreshScanResults(true, "pmp-restore-mod-only-view-context-newest");
+                                        TriggerMetricsRefresh();
+                                        _perModSavingsTask = _backupService.ComputePerModSavingsAsync();
+                                        _perModSavingsTask.ContinueWith(ps =>
+                                        {
+                                            if (ps.Status == TaskStatus.RanToCompletion && ps.Result != null)
+                                            {
+                                                _cachedPerModSavings = ps.Result;
+                                                _needsUIRefresh = true;
+                                            }
+                                        }, TaskScheduler.Default);
+                                        _ = _backupService.HasBackupForModAsync(mod).ContinueWith(bt =>
+                                        {
+                                            if (bt.Status == TaskStatus.RanToCompletion)
+                                                _modsWithBackupCache[mod] = bt.Result;
+                                        });
+                                        _running = false;
+                                        ImGui.CloseCurrentPopup();
+                                    });
+                            }
+                            else
+                            {
+                                _statusMessage = $"No .pmp backups found for {mod}";
+                                _statusMessageAt = DateTime.UtcNow;
+                                _statusPersistent = false;
+                            }
+                        }
+                        
+                        ImGui.EndPopup();
+                        }
+                        
                     }
                     ImGui.EndDisabled();
                     ImGui.PopStyleColor(3);
@@ -3222,6 +3595,20 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
             // Perform a synchronous check to avoid race conditions enabling conversion before backup status is known
             var res = _backupService.HasBackupForModAsync(mod).GetAwaiter().GetResult();
             _modsWithBackupCache[mod] = res;
+            return res;
+        }
+        catch { return false; }
+    }
+
+    // Query whether a mod has PMP backup, caching the result
+    private bool GetOrQueryModPmp(string mod)
+    {
+        if (_modsWithPmpCache.TryGetValue(mod, out var has))
+            return has;
+        try
+        {
+            var res = _backupService.HasPmpBackupForModAsync(mod).GetAwaiter().GetResult();
+            _modsWithPmpCache[mod] = res;
             return res;
         }
         catch { return false; }
