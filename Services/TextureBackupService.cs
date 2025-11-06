@@ -720,25 +720,24 @@ public sealed class TextureBackupService
                     var modBackupDir = Path.Combine(backupDirectory, mod);
                     try { Directory.CreateDirectory(modBackupDir); } catch { }
 
-                    // Delete any existing PMP archives for this mod to avoid duplicates
+                    // If any PMP exists already, skip creating a new one to preserve the oldest/original
                     try
                     {
-                        foreach (var old in Directory.EnumerateFiles(modBackupDir, "mod_backup_*.pmp"))
+                        var existingPmp = Directory.EnumerateFiles(modBackupDir, "mod_backup_*.pmp").FirstOrDefault();
+                        if (!string.IsNullOrEmpty(existingPmp))
                         {
-                            try
-                            {
-                                File.Delete(old);
-                                _logger.LogDebug("Deleted old PMP backup {pmp} for {mod}", old, mod);
-                            }
-                            catch { }
+                            _logger.LogDebug("Skipping full mod PMP creation for {mod}; existing PMP found: {pmp}", mod, existingPmp);
+                            continue;
                         }
                     }
                     catch { }
 
                     var pmpPath = Path.Combine(modBackupDir, $"mod_backup_{timestamp:yyyyMMdd_HHmmss}.pmp");
+                    // In the unlikely event the target path exists (timestamp collision), do not overwrite
                     if (File.Exists(pmpPath))
                     {
-                        try { File.Delete(pmpPath); } catch { }
+                        _logger.LogDebug("Skipping full mod PMP creation for {mod}; target path already exists: {pmp}", mod, pmpPath);
+                        continue;
                     }
 
                     await Task.Run(() =>
@@ -1262,6 +1261,29 @@ public sealed class TextureBackupService
                     // If restore from zip succeeded, and mod folder became empty, remove the folder
                     if (zipSuccess)
                     {
+                        // After a successful normal texture restore from zip:
+                        // Only delete PMP archives if there are no remaining zip backups in the mod folder.
+                        try
+                        {
+                            var anyZipLeft = Directory.Exists(modDir) && Directory.EnumerateFiles(modDir, "backup_*.zip").Any();
+                            if (!anyZipLeft && Directory.Exists(modDir))
+                            {
+                                foreach (var p in Directory.EnumerateFiles(modDir, "mod_backup_*.pmp"))
+                                {
+                                    try
+                                    {
+                                        File.Delete(p);
+                                        _logger.LogDebug("Deleted PMP archive after normal restore because no zip backups remain: {pmp}", p);
+                                    }
+                                    catch (Exception ex)
+                                    {
+                                        _logger.LogWarning("Failed to delete PMP archive {pmp} after normal restore: {error}", p, ex.Message);
+                                    }
+                                }
+                            }
+                        }
+                        catch { }
+
                         try
                         {
                             if (Directory.Exists(modDir) && !Directory.EnumerateFileSystemEntries(modDir).Any())
@@ -1288,6 +1310,28 @@ public sealed class TextureBackupService
                 if (Directory.Exists(modSub) && File.Exists(manifestPath))
                 {
                     var sessionSuccess = await RestoreFromSessionAsync(modSub, progress, token).ConfigureAwait(false);
+                    // After a successful normal texture restore from session:
+                    // Only delete PMP archives if there are no remaining zip backups in the mod folder.
+                    try
+                    {
+                        var anyZipLeft = Directory.Exists(modDir) && Directory.EnumerateFiles(modDir, "backup_*.zip").Any();
+                        if (!anyZipLeft && Directory.Exists(modDir))
+                        {
+                            foreach (var p in Directory.EnumerateFiles(modDir, "mod_backup_*.pmp"))
+                            {
+                                try
+                                {
+                                    File.Delete(p);
+                                    _logger.LogDebug("Deleted PMP archive after normal restore (session) because no zip backups remain: {pmp}", p);
+                                }
+                                catch (Exception ex)
+                                {
+                                    _logger.LogWarning("Failed to delete PMP archive {pmp} after normal restore (session): {error}", p, ex.Message);
+                                }
+                            }
+                        }
+                    }
+                    catch { }
                     // After restoring from session, also attempt to remove empty mod folder in root backup directory
                     try
                     {
