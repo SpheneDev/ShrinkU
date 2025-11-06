@@ -268,6 +268,9 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
             _logger.LogDebug("Heavy scan triggered: conversion completed");
             RefreshScanResults(true, "conversion-completed");
             _running = false;
+            // Clear progress so UI returns to Waiting...
+            ResetConversionProgress();
+            ResetRestoreProgress();
         };
         _conversionService.OnConversionCompleted += _onConversionCompleted;
 
@@ -1549,9 +1552,52 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                         {
                             if (hasBackup)
                             {
-                                // If PMP is available, open the context menu on normal click instead of immediate restore
+                                // Prefer PMP restore when available if configured; otherwise show context menu
                                 var hasPmpForClick = GetOrQueryModPmp(mod);
-                                if (hasPmpForClick)
+                                if (hasPmpForClick && _configService.Current.PreferPmpRestoreWhenAvailable)
+                                {
+                                    List<string> pmpFiles = null;
+                                    try { pmpFiles = _backupService.GetPmpBackupsForModAsync(mod).GetAwaiter().GetResult(); } catch { }
+                                    if (pmpFiles != null && pmpFiles.Count > 0)
+                                    {
+                                        var latest = pmpFiles.OrderByDescending(f => f).First();
+                                        var display = Path.GetFileName(latest);
+                                        _running = true;
+                                        _modsWithBackupCache.TryRemove(mod, out _);
+                                        ResetConversionProgress();
+                                        ResetRestoreProgress();
+                                        _currentRestoreMod = mod;
+                                        _statusMessage = $"PMP restore requested for {mod}: {display}";
+                                        _statusMessageAt = DateTime.UtcNow;
+                                        _statusPersistent = false;
+                                        var progress = new Progress<(string, int, int)>(e => { _currentTexture = e.Item1; _backupIndex = e.Item2; _backupTotal = e.Item3; _currentRestoreModIndex = e.Item2; _currentRestoreModTotal = e.Item3; });
+                                        _ = _backupService.RestorePmpAsync(mod, latest, progress, CancellationToken.None)
+                                            .ContinueWith(t => {
+                                                try { _backupService.RedrawPlayer(); } catch { }
+                                                _logger.LogDebug("Heavy scan triggered: PMP restore completed (folder view)");
+                                                RefreshScanResults(true, "restore-pmp-folder-view");
+                                                TriggerMetricsRefresh();
+                                                _perModSavingsTask = _backupService.ComputePerModSavingsAsync();
+                                                _perModSavingsTask.ContinueWith(ps =>
+                                                {
+                                                    if (ps.Status == TaskStatus.RanToCompletion && ps.Result != null)
+                                                    {
+                                                        _cachedPerModSavings = ps.Result;
+                                                        _needsUIRefresh = true;
+                                                    }
+                                                }, TaskScheduler.Default);
+                                                _ = _backupService.HasBackupForModAsync(mod).ContinueWith(bt =>
+                                                {
+                                                    if (bt.Status == TaskStatus.RanToCompletion)
+                                                        _modsWithBackupCache[mod] = bt.Result;
+                                                });
+                                                _running = false;
+                                                // Clear restore progress after completion
+                                                ResetRestoreProgress();
+                                            });
+                                    }
+                                }
+                                else if (hasPmpForClick)
                                 {
                                     ImGui.OpenPopup($"restorectx-{mod}");
                                 }
@@ -1564,39 +1610,32 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                                     ResetRestoreProgress();
                                     _currentRestoreMod = mod;
                                     var progress = new Progress<(string, int, int)>(e => { _currentTexture = e.Item1; _backupIndex = e.Item2; _backupTotal = e.Item3; _currentRestoreModIndex = e.Item2; _currentRestoreModTotal = e.Item3; });
-                                    _ = _backupService.RestoreLatestForModAsync(mod, progress, CancellationToken.None)
-                                        .ContinueWith(t => {
-                                            var success = t.Status == TaskStatus.RanToCompletion && t.Result;
-                                            try { _backupService.RedrawPlayer(); } catch { }
-                                            _logger.LogDebug("Heavy scan triggered: restore completed (mod button in folder view)");
-                                            RefreshScanResults(true, "restore-folder-view");
-                                            TriggerMetricsRefresh();
-                                            // Recompute per-mod savings after restore to refresh Uncompressed/Compressed sizes
-                                            _perModSavingsTask = _backupService.ComputePerModSavingsAsync();
-                                            _perModSavingsTask.ContinueWith(ps =>
-                                            {
-                                                if (ps.Status == TaskStatus.RanToCompletion && ps.Result != null)
-                                                {
-                                                    _cachedPerModSavings = ps.Result;
-                                                    _needsUIRefresh = true;
-                                                }
-                                            }, TaskScheduler.Default);
-                                            _ = _backupService.HasBackupForModAsync(mod).ContinueWith(bt =>
-                                            {
-                                                if (bt.Status == TaskStatus.RanToCompletion)
-                                                    _modsWithBackupCache[mod] = bt.Result;
-                                            });
-                                            if (success)
-                                            {
-                                                try
-                                                {
-                                                    if (_configService.Current.ExternalConvertedMods.Remove(mod))
-                                                        _configService.Save();
-                                                }
-                                                catch { }
-                                            }
-                                            _running = false;
-                                        });
+                                            _ = _backupService.RestoreLatestForModAsync(mod, progress, CancellationToken.None)
+                                                .ContinueWith(t => {
+                                                    var success = t.Status == TaskStatus.RanToCompletion && t.Result;
+                                                    try { _backupService.RedrawPlayer(); } catch { }
+                                                    _logger.LogDebug("Heavy scan triggered: restore completed (mod button in folder view)");
+                                                    RefreshScanResults(true, "restore-folder-view");
+                                                    TriggerMetricsRefresh();
+                                                    // Recompute per-mod savings after restore to refresh Uncompressed/Compressed sizes
+                                                    _perModSavingsTask = _backupService.ComputePerModSavingsAsync();
+                                                    _perModSavingsTask.ContinueWith(ps =>
+                                                    {
+                                                        if (ps.Status == TaskStatus.RanToCompletion && ps.Result != null)
+                                                        {
+                                                            _cachedPerModSavings = ps.Result;
+                                                            _needsUIRefresh = true;
+                                                        }
+                                                    }, TaskScheduler.Default);
+                                                    _ = _backupService.HasBackupForModAsync(mod).ContinueWith(bt =>
+                                                    {
+                                                        if (bt.Status == TaskStatus.RanToCompletion)
+                                                            _modsWithBackupCache[mod] = bt.Result;
+                                                    });
+                                                    _running = false;
+                                                    // Clear restore progress after completion
+                                                    ResetRestoreProgress();
+                                                });
                                 }
                             }
                             else
@@ -2169,7 +2208,8 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
 
     private void DrawProgress()
     {
-        if (!_running)
+        // Show progress whenever a conversion or restore is active, even if triggered externally
+        if (!(_running || _conversionService.IsConverting || _backupTotal > 0 || _convertedCount > 0))
         {
             ImGui.Text("Waiting...");
             return;
@@ -2778,9 +2818,52 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                     {
                         if (hasBackup)
                         {
-                            // If PMP is available, open the context menu on normal click instead of immediate restore
+                            // Prefer PMP restore when available if configured; otherwise show context menu
                             var hasPmpForClick = GetOrQueryModPmp(mod);
-                            if (hasPmpForClick)
+                            if (hasPmpForClick && _configService.Current.PreferPmpRestoreWhenAvailable)
+                            {
+                                List<string> pmpFiles = null;
+                                try { pmpFiles = _backupService.GetPmpBackupsForModAsync(mod).GetAwaiter().GetResult(); } catch { }
+                                if (pmpFiles != null && pmpFiles.Count > 0)
+                                {
+                                    var latest = pmpFiles.OrderByDescending(f => f).First();
+                                    var display = Path.GetFileName(latest);
+                                    _running = true;
+                                    _modsWithBackupCache.TryRemove(mod, out _);
+                                    ResetConversionProgress();
+                                    ResetRestoreProgress();
+                                    _currentRestoreMod = mod;
+                                    _statusMessage = $"PMP restore requested for {mod}: {display}";
+                                    _statusMessageAt = DateTime.UtcNow;
+                                    _statusPersistent = false;
+                                    var progress = new Progress<(string, int, int)>(e => { _currentTexture = e.Item1; _backupIndex = e.Item2; _backupTotal = e.Item3; _currentRestoreModIndex = e.Item2; _currentRestoreModTotal = e.Item3; });
+                                    _ = _backupService.RestorePmpAsync(mod, latest, progress, CancellationToken.None)
+                                        .ContinueWith(t => {
+                                            try { _backupService.RedrawPlayer(); } catch { }
+                                            _logger.LogDebug("Heavy scan triggered: PMP restore completed (mod-only view)");
+                                            RefreshScanResults(true, "restore-pmp-mod-only-view");
+                                            TriggerMetricsRefresh();
+                                            _perModSavingsTask = _backupService.ComputePerModSavingsAsync();
+                                            _perModSavingsTask.ContinueWith(ps =>
+                                            {
+                                                if (ps.Status == TaskStatus.RanToCompletion && ps.Result != null)
+                                                {
+                                                    _cachedPerModSavings = ps.Result;
+                                                    _needsUIRefresh = true;
+                                                }
+                                            }, TaskScheduler.Default);
+                                            _ = _backupService.HasBackupForModAsync(mod).ContinueWith(bt =>
+                                            {
+                                                if (bt.Status == TaskStatus.RanToCompletion)
+                                                    _modsWithBackupCache[mod] = bt.Result;
+                                            });
+                                            _running = false;
+                                            // Clear conversion progress after completion (defensive)
+                                            ResetConversionProgress();
+                                        });
+                                }
+                            }
+                            else if (hasPmpForClick)
                             {
                                 ImGui.OpenPopup($"restorectx-{mod}");
                             }
@@ -2815,15 +2898,6 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                                             if (bt.Status == TaskStatus.RanToCompletion)
                                                 _modsWithBackupCache[mod] = bt.Result;
                                         });
-                                        if (success)
-                                        {
-                                            try
-                                            {
-                                                if (_configService.Current.ExternalConvertedMods.Remove(mod))
-                                                    _configService.Save();
-                                            }
-                                            catch { }
-                                        }
                                         _running = false;
                                     });
                             }

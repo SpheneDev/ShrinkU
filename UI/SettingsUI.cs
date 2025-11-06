@@ -198,6 +198,16 @@ public sealed class SettingsUI : Window
                 ImGui.SameLine();
                 ImGui.TextColored(ShrinkUColors.WarningLight, "[Experimental]");
 
+                // Prefer PMP restore when available
+                var preferPmp = _configService.Current.PreferPmpRestoreWhenAvailable;
+                if (ImGui.Checkbox("Prefer PMP restore when available", ref preferPmp))
+                {
+                    _configService.Current.PreferPmpRestoreWhenAvailable = preferPmp;
+                    _configService.Save();
+                    _logger.LogDebug("Updated preference for PMP restore: {value}", preferPmp);
+                }
+                ShowTooltipWrapped("If a full-mod PMP backup exists for the selected mod, ShrinkU will restore it directly instead of showing the restore menu. This overwrites the mod to the archived state.", 420f);
+
                 // Backup folder selection
                 ImGui.Text("Backup Folder:");
                 ImGui.SameLine();
@@ -237,7 +247,7 @@ public sealed class SettingsUI : Window
                 ImGui.EndTabItem();
             }
 
-            if (ImGui.BeginTabItem("Extras"))
+            if (ImGui.BeginTabItem("Filters"))
             {
                 ImGui.SetWindowFontScale(1.15f);
                 ImGui.TextColored(ShrinkUColors.Accent, "Filters");
