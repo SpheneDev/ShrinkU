@@ -557,8 +557,74 @@ public sealed class TextureBackupService
         }
 
         int current = 0;
+        // Precompute expected totals: textures to back up + per-mod ZIPs + per-mod PMP archives
+        // Build a list of textures that actually need backing up (skip already-backed ones)
+        var toBackup = new List<(string source, string modName, string modVersion)>();
+        var modsTouched = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            foreach (var kvp in textures)
+            {
+                var source = kvp.Key;
+                var prefixed = BuildPrefixedPath(source);
+                var modName = ExtractModFolderName(prefixed) ?? "_unknown";
+                var currentModVersion = GetModVersion(modName) ?? string.Empty;
+
+                // Skip backing up files that have already been backed up for this mod+version
+                var currentKey = !string.IsNullOrEmpty(prefixed) ? prefixed : source;
+                if (!string.IsNullOrWhiteSpace(modName)
+                    && existingByModVersion.TryGetValue(modName, out var byVersion)
+                    && byVersion.TryGetValue(currentModVersion, out var set)
+                    && set.Contains(currentKey))
+                {
+                    continue;
+                }
+
+                toBackup.Add((source, modName, currentModVersion));
+                if (!string.IsNullOrWhiteSpace(modName))
+                    modsTouched.Add(modName);
+            }
+        }
+        catch { }
+
+        int zipCount = 0;
+        int pmpCount = 0;
+        try
+        {
+            if (_configService.Current.EnableZipCompressionForBackups)
+            {
+                zipCount = modsTouched.Count;
+            }
+            if (_configService.Current.EnableFullModBackupBeforeConversion)
+            {
+                foreach (var mod in modsTouched)
+                {
+                    try
+                    {
+                        var modAbs = GetModAbsolutePath(mod);
+                        if (string.IsNullOrWhiteSpace(modAbs) || !Directory.Exists(modAbs))
+                            continue;
+                        var modBackupDir = Path.Combine(backupDirectory, mod);
+                        var hasExistingPmp = Directory.Exists(modBackupDir)
+                            && Directory.EnumerateFiles(modBackupDir, "mod_backup_*.pmp").Any();
+                        if (!hasExistingPmp)
+                            pmpCount++;
+                    }
+                    catch { }
+                }
+            }
+        }
+        catch { }
+
+        var expectedTotal = toBackup.Count + zipCount + pmpCount;
+        if (expectedTotal <= 0)
+        {
+            // Fallback to textures.Count for total when nothing is scheduled
+            expectedTotal = textures.Count;
+        }
         var manifest = new BackupManifest { Entries = new List<BackupManifestEntry>() };
         var entriesByMod = new Dictionary<string, List<BackupManifestEntry>>(StringComparer.OrdinalIgnoreCase);
+        // Perform backups for the computed list of textures to back up
         foreach (var kvp in textures)
         {
             if (token.IsCancellationRequested) break;
@@ -612,7 +678,7 @@ public sealed class TextureBackupService
                 if (!string.IsNullOrWhiteSpace(targetDir))
                     Directory.CreateDirectory(targetDir);
                 File.Copy(source, target, overwrite: true);
-                progress?.Report((source, ++current, textures.Count));
+                progress?.Report((source, ++current, expectedTotal));
                 _logger.LogDebug("Backed up texture {path}", source);
                 var entry = new BackupManifestEntry
                 {
@@ -689,6 +755,8 @@ public sealed class TextureBackupService
                     }
                     ZipFile.CreateFromDirectory(modSessionSubdir, zipPath);
                     _logger.LogDebug("Created mod backup ZIP {zip}", zipPath);
+                    // Report ZIP creation to progress so UI can show current step
+                    try { progress?.Report((zipPath, ++current, expectedTotal)); } catch { }
                 }
                 catch
                 {
@@ -746,6 +814,8 @@ public sealed class TextureBackupService
                         ZipFile.CreateFromDirectory(modAbs!, pmpPath);
                     }, token).ConfigureAwait(false);
                     _logger.LogDebug("Created full mod backup PMP {pmp}", pmpPath);
+                    // Report PMP creation to progress so UI can show current step
+                    try { progress?.Report((pmpPath, ++current, expectedTotal)); } catch { }
                 }
                 catch (Exception ex)
                 {
