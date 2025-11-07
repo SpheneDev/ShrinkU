@@ -3,6 +3,7 @@ using Dalamud.Configuration;
 using Microsoft.Extensions.Logging;
 using System;
 using System.Collections.Generic;
+using System.Linq;
 
 namespace ShrinkU.Configuration;
 
@@ -27,6 +28,18 @@ public sealed class ShrinkUConfigService
     {
         try
         {
+            // Ensure ExcludedModTags are normalized and distinct before persisting
+            try
+            {
+                var tags = _current.ExcludedModTags ?? new List<string>();
+                _current.ExcludedModTags = tags
+                    .Select(NormalizeTag)
+                    .Where(s => s.Length > 0)
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+            }
+            catch { }
+
             _pi.SavePluginConfig(_current);
             _logger.LogDebug("Saved ShrinkU configuration");
         }
@@ -58,11 +71,27 @@ public sealed class ShrinkUConfigService
             var cfg = _pi.GetPluginConfig() as ShrinkUConfig;
             if (cfg != null)
                 _current = cfg;
+            // Normalize and deduplicate any existing tags to avoid repeated entries
+            try
+            {
+                var tags = _current.ExcludedModTags ?? new List<string>();
+                _current.ExcludedModTags = tags
+                    .Select(NormalizeTag)
+                    .Where(s => s.Length > 0)
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+            }
+            catch { }
             _logger.LogDebug("Loaded ShrinkU configuration");
         }
         catch
         {
             // Swallow to avoid noisy logs
         }
+    }
+
+    private static string NormalizeTag(string tag)
+    {
+        return (tag ?? string.Empty).Trim();
     }
 }
