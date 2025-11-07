@@ -19,17 +19,19 @@ public sealed class SettingsUI : Window
     private readonly ILogger _logger;
     private readonly ShrinkUConfigService _configService;
     private readonly TextureConversionService _conversionService;
+    private readonly Action? _openReleaseNotes;
 
     // Tag filtering input state (persisted via config on Apply)
     private string _excludedTagsInput = string.Empty;
     private List<string> _excludedTagsEditable = new();
 
-    public SettingsUI(ILogger logger, ShrinkUConfigService configService, TextureConversionService conversionService)
+    public SettingsUI(ILogger logger, ShrinkUConfigService configService, TextureConversionService conversionService, Action? openReleaseNotes = null)
         : base("ShrinkU Settings###ShrinkUSettingsUI")
     {
         _logger = logger;
         _configService = configService;
         _conversionService = conversionService;
+        _openReleaseNotes = openReleaseNotes;
 
         SizeConstraints = new WindowSizeConstraints
         {
@@ -84,6 +86,14 @@ public sealed class SettingsUI : Window
                 ImGui.TextColored(ShrinkUColors.Accent, "Texture Settings");
                 ImGui.Dummy(new Vector2(0, 6f));
                 ImGui.SetWindowFontScale(1.0f);
+
+                // Open Release Notes button
+                if (ImGui.Button("Open Release Notes"))
+                {
+                    try { _openReleaseNotes?.Invoke(); } catch { }
+                }
+                ShowTooltip("Open recent changes and highlights for ShrinkU.");
+                ImGui.Spacing();
                 var mode = _configService.Current.TextureProcessingMode;
                 var controller = _configService.Current.AutomaticControllerName ?? string.Empty;
                 var spheneIntegrated = !string.IsNullOrWhiteSpace(controller) || _configService.Current.AutomaticHandledBySphene;

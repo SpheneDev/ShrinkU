@@ -59,6 +59,10 @@ public sealed class ShrinkUConfig : IPluginConfiguration
 
     // First-run setup gating
     public bool FirstRunCompleted { get; set; } = false;
+
+    // Release changelog tracking
+    public string LastSeenReleaseChangelogVersion { get; set; } = string.Empty;
+    public string ReleaseChangelogUrl { get; set; } = "https://sphene.online/shrinku/changelog.json";
 }
 
 public sealed class ExternalChangeMarker

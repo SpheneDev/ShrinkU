@@ -29,6 +29,8 @@ public sealed class Plugin : IDalamudPlugin
     private readonly SettingsUI _settingsUi;
     private readonly FirstRunSetupUI _firstRunUi;
     private readonly ShrinkU.Interop.ShrinkUIpc _shrinkuIpc;
+    private readonly ChangelogService _changelogService;
+    private readonly ReleaseChangelogUI _releaseChangelogUi;
 
     public Plugin(IDalamudPluginInterface pluginInterface, IFramework framework, ICommandManager commandManager, IPluginLog pluginLog)
     {
@@ -57,7 +59,7 @@ public sealed class Plugin : IDalamudPlugin
         catch { }
 
         // Create UI windows and register
-        _settingsUi = new SettingsUI(_logger, _configService, _conversionService);
+        _settingsUi = new SettingsUI(_logger, _configService, _conversionService, () => _releaseChangelogUi.IsOpen = true);
         _conversionUi = new ConversionUI(_logger, _configService, _conversionService, _backupService, () => _settingsUi.IsOpen = true);
         _firstRunUi = new FirstRunSetupUI(_logger, _configService)
         {
@@ -71,9 +73,13 @@ public sealed class Plugin : IDalamudPlugin
                 catch { }
             }
         };
+        // Initialize changelog service and UI
+        _changelogService = new ChangelogService(_logger, new System.Net.Http.HttpClient(), _configService);
+        _releaseChangelogUi = new ReleaseChangelogUI(_pluginInterface, _logger, _configService, _changelogService);
         _windowSystem.AddWindow(_conversionUi);
         _windowSystem.AddWindow(_settingsUi);
         _windowSystem.AddWindow(_firstRunUi);
+        _windowSystem.AddWindow(_releaseChangelogUi);
 
         _pluginInterface.UiBuilder.Draw += DrawUi;
         _pluginInterface.UiBuilder.OpenConfigUi += OpenConfigUi;
@@ -119,6 +125,17 @@ public sealed class Plugin : IDalamudPlugin
             {
                 _firstRunUi.IsOpen = true;
                 _logger.LogDebug("First run detected: opening setup guide window");
+            }
+            else
+            {
+                // Standalone ShrinkU: show changelog after update automatically
+                var currentVer = typeof(Plugin).Assembly?.GetName()?.Version?.ToString() ?? string.Empty;
+                var lastSeen = _configService.Current.LastSeenReleaseChangelogVersion ?? string.Empty;
+                if (!string.IsNullOrWhiteSpace(currentVer) && !string.Equals(currentVer, lastSeen, StringComparison.OrdinalIgnoreCase))
+                {
+                    _releaseChangelogUi.IsOpen = true;
+                    _logger.LogDebug("Opening ShrinkU release notes window: current={cur} lastSeen={last}", currentVer, lastSeen);
+                }
             }
         }
         catch { }
