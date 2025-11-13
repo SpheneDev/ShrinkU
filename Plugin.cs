@@ -9,14 +9,13 @@ using System.IO;
 using ShrinkU.Services;
 using ShrinkU.UI;
 using ShrinkU.Configuration;
-using Dalamud.Plugin.Services;
 using ShrinkU.Interop;
 
 namespace ShrinkU;
 
 public sealed class Plugin : IDalamudPlugin
 {
-    private readonly IDalamudPluginInterface _pluginInterface;
+    private readonly IDalamudPluginInterface _pluginInterface = null!;
     private readonly ILogger _logger;
     private readonly WindowSystem _windowSystem = new("ShrinkU");
     private readonly ICommandManager _commandManager;
@@ -34,7 +33,7 @@ public sealed class Plugin : IDalamudPlugin
 
     public Plugin(IDalamudPluginInterface pluginInterface, IFramework framework, ICommandManager commandManager, IPluginLog pluginLog)
     {
-        _pluginInterface = pluginInterface;
+        _pluginInterface = pluginInterface ?? throw new ArgumentNullException(nameof(pluginInterface));
         _logger = new PluginLogger(pluginLog);
         _commandManager = commandManager;
 
@@ -58,6 +57,10 @@ public sealed class Plugin : IDalamudPlugin
         }
         catch { }
 
+        // Initialize changelog service and UI before wiring callbacks
+        _changelogService = new ChangelogService(_logger, new System.Net.Http.HttpClient(), _configService);
+        _releaseChangelogUi = new ReleaseChangelogUI(_pluginInterface, _logger, _configService, _changelogService);
+
         // Create UI windows and register
         _settingsUi = new SettingsUI(_logger, _configService, _conversionService, () => _releaseChangelogUi.IsOpen = true);
         _conversionUi = new ConversionUI(_logger, _configService, _conversionService, _backupService, () => _settingsUi.IsOpen = true);
@@ -73,9 +76,6 @@ public sealed class Plugin : IDalamudPlugin
                 catch { }
             }
         };
-        // Initialize changelog service and UI
-        _changelogService = new ChangelogService(_logger, new System.Net.Http.HttpClient(), _configService);
-        _releaseChangelogUi = new ReleaseChangelogUI(_pluginInterface, _logger, _configService, _changelogService);
         _windowSystem.AddWindow(_conversionUi);
         _windowSystem.AddWindow(_settingsUi);
         _windowSystem.AddWindow(_firstRunUi);

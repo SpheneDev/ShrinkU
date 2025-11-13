@@ -14,7 +14,6 @@ using System.Windows.Forms;
 using System.IO;
 using System.Linq;
 using System.Diagnostics;
-using System.Collections.Concurrent;
 
 namespace ShrinkU.UI;
 
@@ -50,9 +49,7 @@ public sealed class ConversionUI : Window, IDisposable
     private Dictionary<string, string> _modPaths = new(StringComparer.OrdinalIgnoreCase);
     private bool _loadingModPaths = false;
     private Dictionary<Guid, string> _collections = new();
-    private bool _loadingCollections = false;
     private Guid? _selectedCollectionId = null;
-    private bool _loadingEnabledStates = false;
     private Dictionary<string, (bool Enabled, int Priority, bool Inherited, bool Temporary)> _modEnabledStates
         = new(StringComparer.OrdinalIgnoreCase);
     // Debounce heavy scans to avoid repeated disk IO during rapid Penumbra changes
@@ -572,13 +569,11 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
                         await Task.Delay(350, token).ConfigureAwait(false);
                         if (token.IsCancellationRequested)
                             return;
-                        _loadingEnabledStates = true;
                         var states = await _conversionService.GetAllModEnabledStatesAsync(_selectedCollectionId.Value).ConfigureAwait(false);
                         _uiThreadActions.Enqueue(() =>
                         {
                             if (states != null)
                                 _modEnabledStates = states;
-                            _loadingEnabledStates = false;
                             _needsUIRefresh = true;
                         });
                     }
@@ -1556,7 +1551,7 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                                 var hasPmpForClick = GetOrQueryModPmp(mod);
                                 if (hasPmpForClick && _configService.Current.PreferPmpRestoreWhenAvailable)
                                 {
-                                    List<string> pmpFiles = null;
+                                    List<string>? pmpFiles = null;
                                     try { pmpFiles = _backupService.GetPmpBackupsForModAsync(mod).GetAwaiter().GetResult(); } catch { }
                                     if (pmpFiles != null && pmpFiles.Count > 0)
                                     {
@@ -1754,7 +1749,7 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                                 // restore PMP if available
                                 if (ImGui.MenuItem("Restore PMP"))
                                 {
-                                    List<string> pmpFiles = null;
+                                    List<string>? pmpFiles = null;
                                     try { pmpFiles = _backupService.GetPmpBackupsForModAsync(mod).GetAwaiter().GetResult(); } catch { }
                                     if (pmpFiles != null && pmpFiles.Count > 0)
                                     {
@@ -2415,12 +2410,10 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                     _selectedCollectionId = cc.Result?.Id;
                     if (_selectedCollectionId.HasValue)
                     {
-                        _loadingEnabledStates = true;
                         _ = _conversionService.GetAllModEnabledStatesAsync(_selectedCollectionId.Value).ContinueWith(es =>
                         {
                             if (es.Status == TaskStatus.RanToCompletion && es.Result != null)
                                 _modEnabledStates = es.Result;
-                            _loadingEnabledStates = false;
                         });
                     }
                 }
@@ -2822,7 +2815,7 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                             var hasPmpForClick = GetOrQueryModPmp(mod);
                             if (hasPmpForClick && _configService.Current.PreferPmpRestoreWhenAvailable)
                             {
-                                List<string> pmpFiles = null;
+                                List<string>? pmpFiles = null;
                                 try { pmpFiles = _backupService.GetPmpBackupsForModAsync(mod).GetAwaiter().GetResult(); } catch { }
                                 if (pmpFiles != null && pmpFiles.Count > 0)
                                 {
@@ -3015,7 +3008,7 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                         // restore PMP if available
                         if (ImGui.MenuItem("Restore PMP"))
                         {
-                            List<string> pmpFiles = null;
+                            List<string>? pmpFiles = null;
                             try { pmpFiles = _backupService.GetPmpBackupsForModAsync(mod).GetAwaiter().GetResult(); } catch { }
                             if (pmpFiles != null && pmpFiles.Count > 0)
                             {
@@ -3775,7 +3768,7 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
         {
             foreach (var texture in _selectedTextures)
             {
-                string ownerMod = null;
+                string? ownerMod = null;
                 foreach (var (mod, files) in _scannedByMod)
                 {
                     if (files.Contains(texture))
@@ -3834,7 +3827,7 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
         foreach (var texture in _selectedTextures)
         {
             // Find which mod this texture belongs to
-            string ownerMod = null;
+            string? ownerMod = null;
             foreach (var (mod, files) in _scannedByMod)
             {
                 if (files.Contains(texture))

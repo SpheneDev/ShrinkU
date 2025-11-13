@@ -828,6 +828,7 @@ public sealed class TextureBackupService
 
     public async Task<List<BackupSessionInfo>> GetBackupOverviewAsync()
     {
+        await Task.Yield();
         var backupDirectory = _configService.Current.BackupFolderPath;
         var overview = new List<BackupSessionInfo>();
         try
@@ -1157,6 +1158,7 @@ public sealed class TextureBackupService
     // Return a map of mod-relative paths to original bytes from the latest backup for a mod
     public async Task<Dictionary<string, long>> GetLatestOriginalSizesForModAsync(string modFolderName)
     {
+        await Task.Yield();
         var result = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
         try
         {
@@ -1232,7 +1234,7 @@ public sealed class TextureBackupService
                         {
                             bytes = new FileInfo(relCandidate).Length;
                         }
-                        else
+                        else if (!string.IsNullOrWhiteSpace(e.BackupFileName))
                         {
                             var direct = Path.Combine(modSub, e.BackupFileName);
                             if (File.Exists(direct))
