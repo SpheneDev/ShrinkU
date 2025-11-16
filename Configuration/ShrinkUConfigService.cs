@@ -4,6 +4,8 @@ using Microsoft.Extensions.Logging;
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.IO;
+using System.Text.Json;
 
 namespace ShrinkU.Configuration;
 
@@ -40,8 +42,24 @@ public sealed class ShrinkUConfigService
             }
             catch { }
 
-            _pi.SavePluginConfig(_current);
-            _logger.LogDebug("Saved ShrinkU configuration");
+            var cfgRoot = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "XIVLauncher", "pluginConfigs");
+            if (!string.IsNullOrWhiteSpace(cfgRoot))
+            {
+                try { Directory.CreateDirectory(cfgRoot); } catch { }
+                var path = Path.Combine(cfgRoot, "ShrinkU.json");
+                try
+                {
+                    var opts = new JsonSerializerOptions { WriteIndented = true };
+                    var json = JsonSerializer.Serialize(_current, opts);
+                    File.WriteAllText(path, json);
+                    _logger.LogDebug("Saved ShrinkU configuration to file: {path}", path);
+                }
+                catch { }
+            }
+            else
+            {
+                // No ConfigDirectory available; skip API save to avoid creating Sphene.json
+            }
         }
         catch
         {
@@ -68,9 +86,39 @@ public sealed class ShrinkUConfigService
     {
         try
         {
-            var cfg = _pi.GetPluginConfig() as ShrinkUConfig;
-            if (cfg != null)
-                _current = cfg;
+            var cfgRoot = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "XIVLauncher", "pluginConfigs");
+            var path = string.IsNullOrWhiteSpace(cfgRoot) ? string.Empty : Path.Combine(cfgRoot, "ShrinkU.json");
+            bool loadedFromFile = false;
+            if (!string.IsNullOrWhiteSpace(path) && File.Exists(path))
+            {
+                try
+                {
+                    var json = File.ReadAllText(path);
+                    var cfgFile = JsonSerializer.Deserialize<ShrinkUConfig>(json);
+                    if (cfgFile != null)
+                    {
+                        _current = cfgFile;
+                        loadedFromFile = true;
+                        _logger.LogDebug("Loaded ShrinkU configuration from file: {path}", path);
+                    }
+                }
+                catch { }
+            }
+
+            if (!loadedFromFile)
+            {
+                try
+                {
+                    if (!string.IsNullOrWhiteSpace(path))
+                    {
+                        var opts = new JsonSerializerOptions { WriteIndented = true };
+                        var json = JsonSerializer.Serialize(_current, opts);
+                        File.WriteAllText(path, json);
+                        _logger.LogDebug("Initialized ShrinkU configuration file: {path}", path);
+                    }
+                }
+                catch { }
+            }
             // Normalize and deduplicate any existing tags to avoid repeated entries
             try
             {

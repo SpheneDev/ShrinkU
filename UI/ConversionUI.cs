@@ -406,6 +406,37 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
             try { _modsPmpCheckInFlight.Clear(); } catch { }
             try { TriggerMetricsRefresh(); } catch { }
 
+            // Persist per-mod external-change markers so indicators survive restarts
+            try
+            {
+                _ = Task.Run(async () =>
+                {
+                    try
+                    {
+                        var candidates = await _conversionService.GetAutomaticCandidateTexturesAsync().ConfigureAwait(false);
+                        var now = DateTime.UtcNow;
+                        if (candidates != null && candidates.Count > 0)
+                        {
+                            foreach (var mod in candidates.Keys)
+                            {
+                                try
+                                {
+                                    _configService.Current.ExternalConvertedMods[mod] = new ShrinkU.Configuration.ExternalChangeMarker
+                                    {
+                                        Reason = string.IsNullOrWhiteSpace(reason) ? "external" : reason,
+                                        AtUtc = now,
+                                    };
+                                }
+                                catch { }
+                            }
+                            try { _configService.Save(); } catch { }
+                        }
+                    }
+                    catch { }
+                });
+            }
+            catch { }
+
             // If Penumbra Used Only is enabled, reload the used textures set so filter applies immediately
             if (_filterPenumbraUsedOnly)
             {
@@ -1503,7 +1534,7 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                     }
                     // If an external change was detected recently or persisted, show a small plug indicator
                     var hasPersistent = _configService.Current.ExternalConvertedMods.ContainsKey(mod);
-                    var showExternal = hasBackup && (((DateTime.UtcNow - _lastExternalChangeAt).TotalSeconds < 30 && !string.IsNullOrEmpty(_lastExternalChangeReason)) || hasPersistent);
+                    var showExternal = ((DateTime.UtcNow - _lastExternalChangeAt).TotalSeconds < 30 && !string.IsNullOrEmpty(_lastExternalChangeReason)) || hasPersistent;
                     if (showExternal)
                     {
                         ImGui.SameLine();
@@ -2685,7 +2716,7 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                 }
                 // If an external change was detected recently or persisted, show a small plug indicator
                 var hasPersistent = _configService.Current.ExternalConvertedMods.ContainsKey(mod);
-                var showExternal = hasBackup && (((DateTime.UtcNow - _lastExternalChangeAt).TotalSeconds < 30 && !string.IsNullOrEmpty(_lastExternalChangeReason)) || hasPersistent);
+                var showExternal = ((DateTime.UtcNow - _lastExternalChangeAt).TotalSeconds < 30 && !string.IsNullOrEmpty(_lastExternalChangeReason)) || hasPersistent;
                 if (showExternal)
                 {
                     ImGui.SameLine();
