@@ -137,20 +137,48 @@ public sealed class SettingsUI : Window
                 ImGui.Separator();
                 ImGui.TextColored(ShrinkUColors.Accent, "Backups");
                 ImGui.Spacing();
-                bool fullModBackup = _configService.Current.EnableFullModBackupBeforeConversion;
-                if (ImGui.Checkbox("Backup whole mod before conversion (.pmp)", ref fullModBackup))
+                var texturesBackup = _configService.Current.EnableBackupBeforeConversion;
+                var fullModBackup = _configService.Current.EnableFullModBackupBeforeConversion;
+                if (!texturesBackup && !fullModBackup)
                 {
-                    _configService.Current.EnableFullModBackupBeforeConversion = fullModBackup;
+                    _configService.Current.EnableBackupBeforeConversion = true;
+                    _configService.Current.EnableFullModBackupBeforeConversion = false;
                     _configService.Save();
+                    texturesBackup = true;
+                    fullModBackup = false;
                 }
-                ShowTooltipWrapped("Creates a full mod PMP archive that Penumbra can install. PMP backups use more disk space than per-texture backups, but enable safer full mod restoration. Consider the trade-off between storage usage and restore safety.", 420f);
-                bool backup = _configService.Current.EnableBackupBeforeConversion;
-                if (ImGui.Checkbox("Backup Mod Textures before conversion", ref backup))
+                string currentBackupMode = (texturesBackup, fullModBackup) switch
                 {
-                    _configService.Current.EnableBackupBeforeConversion = backup;
-                    _configService.Save();
+                    (true, false) => "Texture",
+                    (false, true) => "Full Mod",
+                    (true, true) => "Both",
+                    _ => "Texture",
+                };
+                ImGui.TextUnformatted("Backup Mode:");
+                ImGui.SameLine();
+                if (ImGui.BeginCombo("##ShrinkUBackupMode", currentBackupMode))
+                {
+                    if (ImGui.Selectable("Texture", currentBackupMode == "Texture"))
+                    {
+                        _configService.Current.EnableBackupBeforeConversion = true;
+                        _configService.Current.EnableFullModBackupBeforeConversion = false;
+                        _configService.Save();
+                    }
+                    if (ImGui.Selectable("Full Mod", currentBackupMode == "Full Mod"))
+                    {
+                        _configService.Current.EnableBackupBeforeConversion = false;
+                        _configService.Current.EnableFullModBackupBeforeConversion = true;
+                        _configService.Save();
+                    }
+                    if (ImGui.Selectable("Both", currentBackupMode == "Both"))
+                    {
+                        _configService.Current.EnableBackupBeforeConversion = true;
+                        _configService.Current.EnableFullModBackupBeforeConversion = true;
+                        _configService.Save();
+                    }
+                    ImGui.EndCombo();
                 }
-                ShowTooltipWrapped("Create a backup of original textures before converting. Uses less storage than full-mod PMP and restores individual files only.", 420f);
+                ShowTooltipWrapped("Backup Modes:\n- Texture: smaller storage; per-file restore\n- Full Mod: larger storage; safer full restore\n- Both: combines advantages; highest storage use", 420f);
 
                 ImGui.Separator();
                 ImGui.TextColored(ShrinkUColors.Accent, "Restore");

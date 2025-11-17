@@ -1200,6 +1200,16 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
         {
             try { _openSettings?.Invoke(); } catch { }
         }
+        try
+        {
+            if (!_configService.Current.EnableBackupBeforeConversion && !_configService.Current.EnableFullModBackupBeforeConversion)
+            {
+                _configService.Current.EnableBackupBeforeConversion = true;
+                _configService.Current.EnableFullModBackupBeforeConversion = false;
+                _configService.Save();
+            }
+        }
+        catch { }
     }
 
     // Nested folder tree for Table View
