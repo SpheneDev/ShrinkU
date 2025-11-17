@@ -143,14 +143,14 @@ public sealed class SettingsUI : Window
                     _configService.Current.EnableFullModBackupBeforeConversion = fullModBackup;
                     _configService.Save();
                 }
-                ShowTooltipWrapped("Creates a full mod PMP archive that Penumbra can install. Experimental feature: enabling this may increase disk usage and conversion time, and restores will overwrite the mod to the archived state. Large mods or unusual layouts may fail or require manual cleanup. If anything unexpected happens, please enable and provide Debug logs to help diagnose issues.", 420f);
+                ShowTooltipWrapped("Creates a full mod PMP archive that Penumbra can install. PMP backups use more disk space than per-texture backups, but enable safer full mod restoration. Consider the trade-off between storage usage and restore safety.", 420f);
                 bool backup = _configService.Current.EnableBackupBeforeConversion;
                 if (ImGui.Checkbox("Backup Mod Textures before conversion", ref backup))
                 {
                     _configService.Current.EnableBackupBeforeConversion = backup;
                     _configService.Save();
                 }
-                ShowTooltip("Create a backup of original textures before converting.");
+                ShowTooltipWrapped("Create a backup of original textures before converting. Uses less storage than full-mod PMP and restores individual files only.", 420f);
 
                 ImGui.Separator();
                 ImGui.TextColored(ShrinkUColors.Accent, "Restore");
