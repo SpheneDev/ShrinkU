@@ -90,7 +90,14 @@ public sealed class ConversionUI : Window, IDisposable
         var display = Path.GetFileName(latest);
 
         if (removeCacheBefore)
-            _modsWithBackupCache.TryRemove(mod, out _);
+        {
+            bool _removedAny;
+            _modsWithBackupCache.TryRemove(mod, out _removedAny);
+            bool _removedPmp;
+            _modsWithPmpCache.TryRemove(mod, out _removedPmp);
+            (string version, string author, DateTime createdUtc, string pmpFileName) _removedMeta;
+            _modsPmpMetaCache.TryRemove(mod, out _removedMeta);
+        }
 
         _running = true;
         ResetConversionProgress();
@@ -131,6 +138,10 @@ public sealed class ConversionUI : Window, IDisposable
                         bool any = bt.Result;
                         try { any = any || _backupService.HasPmpBackupForModAsync(mod).GetAwaiter().GetResult(); } catch { }
                         _modsWithBackupCache[mod] = any;
+                        // Refresh PMP-specific caches after restore
+                        try { bool _r; _modsWithPmpCache.TryRemove(mod, out _r); } catch { }
+                        try { (string version, string author, DateTime createdUtc, string pmpFileName) _rm; _modsPmpMetaCache.TryRemove(mod, out _rm); } catch { }
+                        try { var hasPmpNow = _backupService.HasPmpBackupForModAsync(mod).GetAwaiter().GetResult(); _modsWithPmpCache[mod] = hasPmpNow; } catch { }
                     }
                 });
                 _running = false;
@@ -164,6 +175,8 @@ public sealed class ConversionUI : Window, IDisposable
     private readonly ConcurrentDictionary<string, byte> _modsBackupCheckInFlight = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, bool> _modsWithPmpCache = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, byte> _modsPmpCheckInFlight = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, (string version, string author, DateTime createdUtc, string pmpFileName)> _modsPmpMetaCache = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, (string version, string author, DateTime createdUtc, string zipFileName)> _modsZipMetaCache = new(StringComparer.OrdinalIgnoreCase);
     // Cache file sizes to avoid per-frame disk I/O in UI rendering
     private readonly ConcurrentDictionary<string, long> _fileSizeCache = new(StringComparer.OrdinalIgnoreCase);
     private Task? _fileSizeWarmupTask = null;
@@ -366,6 +379,8 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
 
             // Normal completion path: recompute savings and refresh UI
             _modsWithBackupCache.Clear();
+            _modsPmpMetaCache.Clear();
+            _modsZipMetaCache.Clear();
             _modsWithPmpCache.Clear();
             _perModSavingsTask = _backupService.ComputePerModSavingsAsync();
             _perModSavingsTask.ContinueWith(t =>
@@ -392,6 +407,8 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
         _onPenumbraModsChanged = () =>
         {
             _modsWithBackupCache.Clear();
+            _modsPmpMetaCache.Clear();
+            _modsZipMetaCache.Clear();
             _modsWithPmpCache.Clear();
             _modsPmpCheckInFlight.Clear();
             _logger.LogDebug("Penumbra mods changed (DIAG-v3); refreshing UI state");
@@ -454,6 +471,8 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
             try { _lastExternalChangeReason = reason ?? string.Empty; _lastExternalChangeAt = DateTime.UtcNow; } catch { }
             // Ensure backup states and metrics reflect latest changes from Sphene
             try { _modsWithBackupCache.Clear(); } catch { }
+            try { _modsPmpMetaCache.Clear(); } catch { }
+            try { _modsZipMetaCache.Clear(); } catch { }
             try { _modsBackupCheckInFlight.Clear(); } catch { }
             try { _modsWithPmpCache.Clear(); } catch { }
             try { _modsPmpCheckInFlight.Clear(); } catch { }
@@ -613,6 +632,8 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
                             _uiThreadActions.Enqueue(() =>
                             {
                                 _modsWithBackupCache.Clear();
+                                _modsPmpMetaCache.Clear();
+                                _modsZipMetaCache.Clear();
                                 _modsWithPmpCache.Clear();
                                 _modsPmpCheckInFlight.Clear();
                                 _logger.LogDebug("Suppressed heavy scan: mod folders unchanged after ModAdded");
@@ -671,6 +692,8 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
                             _uiThreadActions.Enqueue(() =>
                             {
                                 _modsWithBackupCache.Clear();
+                                _modsPmpMetaCache.Clear();
+                                _modsZipMetaCache.Clear();
                                 _modsWithPmpCache.Clear();
                                 _modsPmpCheckInFlight.Clear();
                                 _logger.LogDebug("Suppressed heavy scan: mod folders unchanged after ModDeleted");
@@ -837,11 +860,8 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
         _filterPenumbraUsedOnly = _configService.Current.FilterPenumbraUsedOnly;
         _filterNonConvertibleMods = _configService.Current.FilterNonConvertibleMods;
         _filterInefficientMods = _configService.Current.HideInefficientMods;
-        _scanSortAsc = _configService.Current.ScanSortAsc;
-        var sortKey = _configService.Current.ScanSortKey ?? "ModName";
-        _scanSortKind = string.Equals(sortKey, "FileName", StringComparison.OrdinalIgnoreCase)
-            ? ScanSortKind.FileName
-            : ScanSortKind.ModName;
+        _scanSortAsc = true;
+        _scanSortKind = ScanSortKind.ModName;
 
         // Initialize first column width from config (default 30px on first open)
         _scannedFirstColWidth = _configService.Current.ScannedFilesFirstColWidth > 0f
@@ -1589,9 +1609,45 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                         ImGui.TextUnformatted($"Uncompressed: {FormatSize(origBytesTip)}");
                         var compText = compBytesTip > 0 ? $"{FormatSize(compBytesTip)} ({reductionPctTip:0.00}% reduction)" : "-";
                         ImGui.TextUnformatted($"Compressed: {compText}");
-                        var backupText = hasPmp ? "PMP" : (hasBackup ? "Textures" : "None");
-                        ImGui.TextUnformatted($"Backups: {backupText}");
-                        var enabledState = _modEnabledStates.TryGetValue(mod, out var st) ? (st.Enabled ? "Enabled" : "Disabled") : "Unknown";
+                        var texturesEnabled = _configService.Current.EnableBackupBeforeConversion;
+                        var pmpEnabled = _configService.Current.EnableFullModBackupBeforeConversion;
+                        string backupText = (hasBackup && hasPmp && texturesEnabled && pmpEnabled) ? "Tex, PMP" : (hasPmp ? "PMP" : (hasBackup ? "Textures" : "None"));
+                        if (hasPmp)
+                        {
+                            var meta = GetOrQueryModPmpMeta(mod);
+                            if (meta.HasValue)
+                            {
+                                var (v, a, created, fileName) = meta.Value;
+                                ImGui.TextUnformatted($"Backups: {backupText}");
+                                if (!string.IsNullOrWhiteSpace(v)) ImGui.TextUnformatted($"Version: {v}");
+                                if (!string.IsNullOrWhiteSpace(a)) ImGui.TextUnformatted($"Author: {a}");
+                            }
+                            else
+                            {
+                                ImGui.TextUnformatted($"Backups: {backupText}");
+                            }
+                        }
+                        else
+                        {
+                            ImGui.TextUnformatted($"Backups: {backupText}");
+                            if (hasBackup)
+                            {
+                                var zmeta = GetOrQueryModZipMeta(mod);
+                                if (zmeta.HasValue)
+                                {
+                                    var (v2, a2, created2, fileName2) = zmeta.Value;
+                                    if (!string.IsNullOrWhiteSpace(v2)) ImGui.TextUnformatted($"Version: {v2}");
+                                    if (!string.IsNullOrWhiteSpace(a2)) ImGui.TextUnformatted($"Author: {a2}");
+                                }
+                                else
+                                {
+                                    var live = _backupService.GetLiveModMeta(mod);
+                                    if (!string.IsNullOrWhiteSpace(live.version)) ImGui.TextUnformatted($"Version: {live.version}");
+                                    if (!string.IsNullOrWhiteSpace(live.author)) ImGui.TextUnformatted($"Author: {live.author}");
+                                }
+                            }
+                        }
+                        var enabledState = _modEnabledStates.TryGetValue(mod, out var st) ? (st.Enabled ? "Enabled" : "Disabled") : "Disabled";
                         ImGui.TextUnformatted($"State: {enabledState}");
                         ImGui.EndTooltip();
                     }
@@ -2392,31 +2448,7 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
         
 
         // Place sort controls below the search text field for better horizontal space
-        ImGui.NewLine();
-        ImGui.Text("Sort:");
-        ImGui.SameLine();
-        if (ImGui.RadioButton("File", _scanSortKind == ScanSortKind.FileName))
-        {
-            _scanSortKind = ScanSortKind.FileName;
-            _configService.Current.ScanSortKey = "FileName";
-            _configService.Save();
-        }
-        ShowTooltip("Sort entries by file name.");
-        ImGui.SameLine();
-        if (ImGui.RadioButton("Mod", _scanSortKind == ScanSortKind.ModName))
-        {
-            _scanSortKind = ScanSortKind.ModName;
-            _configService.Current.ScanSortKey = "ModName";
-            _configService.Save();
-        }
-        ShowTooltip("Sort entries by mod name.");
-        ImGui.SameLine();
-        if (ImGui.Checkbox("Asc", ref _scanSortAsc))
-        {
-            _configService.Current.ScanSortAsc = _scanSortAsc;
-            _configService.Save();
-        }
-        ShowTooltip("Use ascending sort order.");
+        
         ImGui.SameLine();
         if (ImGui.Checkbox("Penumbra Used Only", ref _filterPenumbraUsedOnly))
         {
@@ -2955,6 +2987,8 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                 // Re-check backup availability for each restored mod and update cache
                 foreach (var m in restorableFiltered)
                 {
+                    try { bool _r; _modsWithPmpCache.TryRemove(m, out _r); } catch { }
+                    try { (string version, string author, DateTime createdUtc, string pmpFileName) _rm; _modsPmpMetaCache.TryRemove(m, out _rm); } catch { }
                     _ = _backupService.HasBackupForModAsync(m).ContinueWith(bt =>
                     {
                         if (bt.Status == TaskStatus.RanToCompletion)
@@ -2962,6 +2996,8 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                             bool any = bt.Result;
                             try { any = any || _backupService.HasPmpBackupForModAsync(m).GetAwaiter().GetResult(); } catch { }
                             _modsWithBackupCache[m] = any;
+                            // Reprime PMP cache with current status
+                            try { var hasPmpNow = _backupService.HasPmpBackupForModAsync(m).GetAwaiter().GetResult(); _modsWithPmpCache[m] = hasPmpNow; } catch { }
                         }
                     });
                 }
@@ -3048,6 +3084,40 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
         {
             // Swallow exceptions; caching is best-effort
         }
+    }
+
+    private (string version, string author, DateTime createdUtc, string pmpFileName)? GetOrQueryModPmpMeta(string mod)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(mod)) return null;
+            if (_modsPmpMetaCache.TryGetValue(mod, out var v)) return v;
+            var meta = _backupService.GetLatestPmpManifestForModAsync(mod).GetAwaiter().GetResult();
+            if (meta.HasValue)
+            {
+                _modsPmpMetaCache[mod] = meta.Value;
+                return meta.Value;
+            }
+            return null;
+        }
+        catch { return null; }
+    }
+
+    private (string version, string author, DateTime createdUtc, string zipFileName)? GetOrQueryModZipMeta(string mod)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(mod)) return null;
+            if (_modsZipMetaCache.TryGetValue(mod, out var v)) return v;
+            var meta = _backupService.GetLatestZipMetaForModAsync(mod).GetAwaiter().GetResult();
+            if (meta.HasValue)
+            {
+                _modsZipMetaCache[mod] = meta.Value;
+                return meta.Value;
+            }
+            return null;
+        }
+        catch { return null; }
     }
 
     // Get size from cache, computing once if missing

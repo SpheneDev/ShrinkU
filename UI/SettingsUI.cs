@@ -259,6 +259,42 @@ public sealed class SettingsUI : Window
                 }
                 ImGui.PopStyleColor(4);
 
+                try
+                {
+                    var backupDir = _configService.Current.BackupFolderPath;
+                    if (!string.IsNullOrWhiteSpace(backupDir) && Directory.Exists(backupDir))
+                    {
+                        long zipBytes = 0;
+                        int zipCount = 0;
+                        long pmpBytes = 0;
+                        int pmpCount = 0;
+                        foreach (var file in Directory.EnumerateFiles(backupDir, "*", SearchOption.AllDirectories))
+                        {
+                            try
+                            {
+                                var name = Path.GetFileName(file) ?? string.Empty;
+                                var len = new FileInfo(file).Length;
+                                if (name.StartsWith("backup_", StringComparison.OrdinalIgnoreCase) && name.EndsWith(".zip", StringComparison.OrdinalIgnoreCase))
+                                {
+                                    zipCount++;
+                                    zipBytes += len;
+                                }
+                                else if (name.StartsWith("mod_backup_", StringComparison.OrdinalIgnoreCase) && name.EndsWith(".pmp", StringComparison.OrdinalIgnoreCase))
+                                {
+                                    pmpCount++;
+                                    pmpBytes += len;
+                                }
+                            }
+                            catch { }
+                        }
+                        ImGui.Spacing();
+                        ImGui.TextColored(ShrinkUColors.Accent, "Backup Summary");
+                        ImGui.Text($"ZIP Backups: {zipCount} ({FormatSize(zipBytes)})");
+                        ImGui.Text($"PMP Backups: {pmpCount} ({FormatSize(pmpBytes)})");
+                    }
+                }
+                catch { }
+
                 ImGui.EndTabItem();
             }
 
@@ -402,5 +438,19 @@ public sealed class SettingsUI : Window
         {
             _logger.LogError(ex, "Failed to open folder picker");
         }
+    }
+
+    private string FormatSize(long bytes)
+    {
+        if (bytes < 0) return "-";
+        string[] units = { "B", "KB", "MB", "GB", "TB" };
+        double size = bytes;
+        int unit = 0;
+        while (size >= 1024 && unit < units.Length - 1)
+        {
+            size /= 1024;
+            unit++;
+        }
+        return unit == 0 ? $"{bytes} {units[unit]}" : $"{size:0.##} {units[unit]}";
     }
 }

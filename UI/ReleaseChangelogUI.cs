@@ -70,10 +70,13 @@ public sealed class ReleaseChangelogUI : Window
         try
         {
             var list = await _changelogService.GetChangelogEntriesAsync().ConfigureAwait(false);
-            _entries = (list ?? new List<ReleaseChangelogViewEntry>())
+            var all = (list ?? new List<ReleaseChangelogViewEntry>())
                 .OrderByDescending(e => ParseVersionSafe(e.Version))
                 .ToList();
-            _defaultExpandedVersion = _entries.FirstOrDefault()?.Version ?? string.Empty;
+            var cur = ParseVersionSafe(_currentVersion);
+            _entries = all.Where(e => ParseVersionSafe(e.Version) <= cur).ToList();
+            var exact = _entries.FirstOrDefault(e => ParseVersionSafe(e.Version) == cur)?.Version;
+            _defaultExpandedVersion = !string.IsNullOrEmpty(exact) ? exact : _entries.FirstOrDefault()?.Version ?? string.Empty;
         }
         catch { }
         finally

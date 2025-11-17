@@ -6,7 +6,9 @@ using System.IO;
 using System.IO.Compression;
 using System.Linq;
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -146,6 +148,133 @@ public sealed class TextureBackupService
         }
     }
 
+    // Read mod author from meta.json; returns empty string if unavailable
+    private string? GetModAuthor(string modFolder)
+    {
+        try
+        {
+            var modAbs = GetModAbsolutePath(modFolder);
+            if (string.IsNullOrWhiteSpace(modAbs))
+                return string.Empty;
+            var metaPath = Path.Combine(modAbs!, "meta.json");
+            if (!File.Exists(metaPath))
+                return string.Empty;
+            using var s = File.OpenRead(metaPath);
+            using var doc = JsonDocument.Parse(s);
+            if (doc.RootElement.TryGetProperty("Author", out var author) && author.ValueKind == JsonValueKind.String)
+            {
+                var a = author.GetString();
+                return string.IsNullOrWhiteSpace(a) ? string.Empty : a;
+            }
+            return string.Empty;
+        }
+        catch
+        {
+            return string.Empty;
+        }
+    }
+
+    // Read version and author from a PMP archive's internal meta.json
+    private (string version, string author)? ReadMetaFromPmp(string pmpPath)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(pmpPath) || !File.Exists(pmpPath))
+                return null;
+            using var za = ZipFile.OpenRead(pmpPath);
+            try { _logger.LogDebug("Reading meta.json from PMP: {pmp} (entries={count})", pmpPath, za.Entries.Count); } catch { }
+            var entry = za.Entries.FirstOrDefault(e => string.Equals(System.IO.Path.GetFileName(e.FullName), "meta.json", StringComparison.OrdinalIgnoreCase));
+            if (entry == null)
+            {
+                try { _logger.LogDebug("meta.json not found in PMP: {pmp}", pmpPath); } catch { }
+                return null;
+            }
+            // Read bytes
+            using var ms = new MemoryStream();
+            using (var zs = entry.Open()) zs.CopyTo(ms);
+            var bytes = ms.ToArray();
+            string? content = null;
+            try
+            {
+                // Detect BOM
+                if (bytes.Length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF)
+                {
+                    content = Encoding.UTF8.GetString(bytes, 3, bytes.Length - 3);
+                }
+                else if (bytes.Length >= 2 && bytes[0] == 0xFF && bytes[1] == 0xFE)
+                {
+                    content = Encoding.Unicode.GetString(bytes, 2, bytes.Length - 2);
+                }
+                else if (bytes.Length >= 2 && bytes[0] == 0xFE && bytes[1] == 0xFF)
+                {
+                    content = Encoding.BigEndianUnicode.GetString(bytes, 2, bytes.Length - 2);
+                }
+                else if (bytes.Length >= 4 && bytes[0] == 0xFF && bytes[1] == 0xFE && bytes[2] == 0x00 && bytes[3] == 0x00)
+                {
+                    content = Encoding.UTF32.GetString(bytes, 4, bytes.Length - 4);
+                }
+                else if (bytes.Length >= 4 && bytes[0] == 0x00 && bytes[1] == 0x00 && bytes[2] == 0xFE && bytes[3] == 0xFF)
+                {
+                    content = Encoding.GetEncoding(12001).GetString(bytes, 4, bytes.Length - 4); // UTF-32 BE
+                }
+                else
+                {
+                    content = Encoding.UTF8.GetString(bytes);
+                }
+            }
+            catch { content = Encoding.UTF8.GetString(bytes); }
+
+            string version = string.Empty;
+            string author = string.Empty;
+            try
+            {
+                using var doc = JsonDocument.Parse(content);
+                foreach (var prop in doc.RootElement.EnumerateObject())
+                {
+                    var name = prop.Name;
+                    if (string.Equals(name, "Version", StringComparison.OrdinalIgnoreCase) && prop.Value.ValueKind == JsonValueKind.String)
+                        version = prop.Value.GetString() ?? version;
+                    else if (string.Equals(name, "FileVersion", StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (prop.Value.ValueKind == JsonValueKind.String)
+                            version = prop.Value.GetString() ?? version;
+                        else if (prop.Value.ValueKind == JsonValueKind.Number)
+                            version = prop.Value.ToString();
+                    }
+                    else if (string.Equals(name, "VersionString", StringComparison.OrdinalIgnoreCase) && prop.Value.ValueKind == JsonValueKind.String)
+                        version = prop.Value.GetString() ?? version;
+                    else if (string.Equals(name, "Author", StringComparison.OrdinalIgnoreCase) && prop.Value.ValueKind == JsonValueKind.String)
+                        author = prop.Value.GetString() ?? author;
+                }
+            }
+            catch
+            {
+                // Fallback: regex-based extraction to handle non-strict JSON (comments/trailing commas/odd encoding)
+                try
+                {
+                    var rxAuthor = new Regex(@"""Author""\s*:\s*""(?<a>.*?)""", RegexOptions.Singleline | RegexOptions.IgnoreCase);
+                    var rxVersionStr = new Regex(@"""Version""\s*:\s*""(?<v>.*?)""", RegexOptions.Singleline | RegexOptions.IgnoreCase);
+                    var rxVersionNum = new Regex(@"""FileVersion""\s*:\s*(?<n>[-]?[0-9]+(?:\.[0-9]+)?)", RegexOptions.Singleline | RegexOptions.IgnoreCase);
+                    var rxVersionAlt = new Regex(@"""VersionString""\s*:\s*""(?<v>.*?)""", RegexOptions.Singleline | RegexOptions.IgnoreCase);
+                    var mA = rxAuthor.Match(content ?? string.Empty);
+                    var mV = rxVersionStr.Match(content ?? string.Empty);
+                    var mVN = rxVersionNum.Match(content ?? string.Empty);
+                    var mVA = rxVersionAlt.Match(content ?? string.Empty);
+                    if (mA.Success) author = mA.Groups["a"].Value;
+                    if (mV.Success) version = mV.Groups["v"].Value;
+                    else if (mVN.Success) version = mVN.Groups["n"].Value;
+                    else if (mVA.Success) version = mVA.Groups["v"].Value;
+                }
+                catch { }
+            }
+
+            try { _logger.LogDebug("Parsed PMP meta for {pmp}: version={version}, author={author}", pmpPath, version, author); } catch { }
+
+            return (version ?? string.Empty, author ?? string.Empty);
+        }
+        catch (Exception ex) { try { _logger.LogDebug(ex, "Failed reading PMP meta for {pmp}", pmpPath); } catch { } return null; }
+    }
+
     private string BuildPrefixedPath(string absolutePath)
     {
         try
@@ -226,6 +355,32 @@ public sealed class TextureBackupService
         }
         catch { }
         return Task.FromResult(result);
+    }
+
+    public Task<(string version, string author, DateTime createdUtc, string pmpFileName)?> GetLatestPmpManifestForModAsync(string modFolderName)
+    {
+        try
+        {
+            var backupDirectory = _configService.Current.BackupFolderPath;
+            if (string.IsNullOrWhiteSpace(backupDirectory) || !Directory.Exists(backupDirectory))
+                return Task.FromResult<(string, string, DateTime, string)?>(null);
+            var modDir = Path.Combine(backupDirectory, modFolderName);
+            if (!Directory.Exists(modDir))
+                return Task.FromResult<(string, string, DateTime, string)?>(null);
+
+            var latestPmp = Directory.EnumerateFiles(modDir, "mod_backup_*.pmp").OrderByDescending(f => f).FirstOrDefault();
+            if (string.IsNullOrEmpty(latestPmp) || !File.Exists(latestPmp))
+                return Task.FromResult<(string, string, DateTime, string)?>(null);
+
+            var meta = ReadMetaFromPmp(latestPmp);
+            if (!meta.HasValue)
+                return Task.FromResult<(string, string, DateTime, string)?>(null);
+
+            var created = File.GetCreationTimeUtc(latestPmp);
+            var fileName = Path.GetFileName(latestPmp) ?? string.Empty;
+            return Task.FromResult<(string, string, DateTime, string)?>((meta.Value.version ?? string.Empty, meta.Value.author ?? string.Empty, created, fileName));
+        }
+        catch { return Task.FromResult<(string, string, DateTime, string)?>(null); }
     }
 
     // Check whether a mod has any full-mod PMP backup
@@ -630,10 +785,21 @@ public sealed class TextureBackupService
                         if (string.IsNullOrWhiteSpace(modAbs) || !Directory.Exists(modAbs))
                             continue;
                         var modBackupDir = Path.Combine(backupDirectory, mod);
-                        var hasExistingPmp = Directory.Exists(modBackupDir)
-                            && Directory.EnumerateFiles(modBackupDir, "mod_backup_*.pmp").Any();
-                        if (!hasExistingPmp)
+                        var currentVersion = GetModVersion(mod) ?? string.Empty;
+                        var latestPmp = Directory.Exists(modBackupDir) ? Directory.EnumerateFiles(modBackupDir, "mod_backup_*.pmp").OrderByDescending(f => f).FirstOrDefault() : null;
+                        if (string.IsNullOrEmpty(latestPmp))
+                        {
+                            try { _logger.LogDebug("No existing PMP for {mod}; scheduling creation", mod); } catch { }
                             pmpCount++;
+                        }
+                        else
+                        {
+                            var meta = ReadMetaFromPmp(latestPmp);
+                            var sameVersion = meta.HasValue && string.Equals(meta.Value.version ?? string.Empty, currentVersion ?? string.Empty, StringComparison.OrdinalIgnoreCase);
+                            try { _logger.LogDebug("PMP decision for {mod}: currentVersion={ver}, latestPmp={pmp}, metaVersion={mver}, sameVersion={same}", mod, currentVersion, latestPmp, meta.HasValue ? meta.Value.version : string.Empty, sameVersion); } catch { }
+                            if (!sameVersion)
+                                pmpCount++;
+                        }
                     }
                     catch { }
                 }
@@ -773,11 +939,28 @@ public sealed class TextureBackupService
 
                     // Write manifest into mod subdir of the session so it gets included in the ZIP
                     var modSessionSubdir = Path.Combine(sessionDir, mod);
-                    try
+                try
+                {
+                    File.WriteAllText(Path.Combine(modSessionSubdir, "manifest.json"), JsonSerializer.Serialize(modManifest));
+                }
+                catch { }
+
+                // Include mod's meta.json inside the ZIP so version/author can be read later
+                try
+                {
+                    var modAbsPath = GetModAbsolutePath(mod);
+                    if (!string.IsNullOrWhiteSpace(modAbsPath))
                     {
-                        File.WriteAllText(Path.Combine(modSessionSubdir, "manifest.json"), JsonSerializer.Serialize(modManifest));
+                        var metaPath = Path.Combine(modAbsPath!, "meta.json");
+                        if (File.Exists(metaPath))
+                        {
+                            var targetMetaPath = Path.Combine(modSessionSubdir, "meta.json");
+                            try { if (File.Exists(targetMetaPath)) File.Delete(targetMetaPath); } catch { }
+                            File.Copy(metaPath, targetMetaPath, overwrite: true);
+                        }
                     }
-                    catch { }
+                }
+                catch { }
 
                     var zipPath = Path.Combine(modBackupDir, $"backup_{timestamp:yyyyMMdd_HHmmss}.zip");
                     if (File.Exists(zipPath))
@@ -806,77 +989,209 @@ public sealed class TextureBackupService
         }
 
         // Optionally create full mod PMP archives for touched mods
-        if (_configService.Current.EnableFullModBackupBeforeConversion)
+            if (_configService.Current.EnableFullModBackupBeforeConversion)
+            {
+                foreach (var mod in modsTouchedAll)
+                {
+                    try
+                    {
+                        var modAbs = GetModAbsolutePath(mod);
+                        if (string.IsNullOrWhiteSpace(modAbs) || !Directory.Exists(modAbs))
+                            continue;
+
+                        var modBackupDir = Path.Combine(backupDirectory, mod);
+                        try { Directory.CreateDirectory(modBackupDir); } catch { }
+
+                        var currentVersion = GetModVersion(mod) ?? string.Empty;
+                        var currentAuthor = GetModAuthor(mod) ?? string.Empty;
+
+                        var existingPmp = Directory.EnumerateFiles(modBackupDir, "mod_backup_*.pmp").OrderByDescending(f => f).FirstOrDefault();
+                        bool sameVersion = false;
+                        if (!string.IsNullOrEmpty(existingPmp) && File.Exists(existingPmp))
+                        {
+                            var meta = ReadMetaFromPmp(existingPmp);
+                            sameVersion = meta.HasValue && string.Equals(meta.Value.version ?? string.Empty, currentVersion ?? string.Empty, StringComparison.OrdinalIgnoreCase);
+                            try { _logger.LogDebug("Existing PMP for {mod}: path={pmp}, metaVersion={mver}, author={mauth}, currentVersion={cver}, sameVersion={same}", mod, existingPmp, meta.HasValue ? meta.Value.version : string.Empty, meta.HasValue ? meta.Value.author : string.Empty, currentVersion, sameVersion); } catch { }
+                        }
+
+                        // If same version already backed up, skip; otherwise replace with latest
+                        if (sameVersion)
+                        {
+                            _logger.LogDebug("Skipping PMP creation for {mod}; existing backup matches current version {version}", mod, currentVersion);
+                            continue;
+                        }
+
+                        // Delete old PMP archives before creating a new one
+                        try
+                        {
+                            foreach (var p in Directory.EnumerateFiles(modBackupDir, "mod_backup_*.pmp"))
+                            {
+                                try { File.Delete(p); _logger.LogDebug("Deleted outdated PMP {pmp} for {mod}", p, mod); } catch { }
+                            }
+                        }
+                        catch { }
+
+                        var stamp = timestamp.ToString("yyyyMMdd_HHmmss");
+                        var pmpPath = Path.Combine(modBackupDir, $"mod_backup_{stamp}.pmp");
+                        if (File.Exists(pmpPath))
+                        {
+                            _logger.LogDebug("Skipping full mod PMP creation for {mod}; target path already exists: {pmp}", mod, pmpPath);
+                            continue;
+                        }
+
+                        await Task.Run(() =>
+                        {
+                            if (token.IsCancellationRequested) return;
+                            ZipFile.CreateFromDirectory(modAbs!, pmpPath);
+                        }, token).ConfigureAwait(false);
+                        _logger.LogDebug("Created full mod backup PMP {pmp}", pmpPath);
+                        try { progress?.Report((pmpPath, ++current, expectedTotal)); } catch { }
+
+                        // Write converted textures manifest (relative paths within the mod)
+                        try
+                        {
+                            var convertedRel = new List<string>();
+                            foreach (var kvp in textures)
+                            {
+                                var source = kvp.Key;
+                                var prefixed = BuildPrefixedPath(source);
+                                var owner = ExtractModFolderName(prefixed);
+                                if (!string.Equals(owner, mod, StringComparison.OrdinalIgnoreCase))
+                                    continue;
+                                var rel = Path.GetRelativePath(modAbs!, source).Replace('\\', '/');
+                                if (!string.IsNullOrWhiteSpace(rel) && !rel.StartsWith("..", StringComparison.Ordinal))
+                                    convertedRel.Add(rel);
+                            }
+                            var convertedManifestPath = Path.Combine(modBackupDir, "pmp_converted_manifest.json");
+                            try { if (File.Exists(convertedManifestPath)) File.Delete(convertedManifestPath); } catch { }
+                            File.WriteAllText(convertedManifestPath, JsonSerializer.Serialize(convertedRel));
+                        }
+                        catch { }
+
+                        // No external manifest is written; metadata is obtained from meta.json inside the PMP
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning("Failed to create full mod backup for {mod}: {error}", mod, ex.Message);
+                    }
+                    await Task.Yield();
+                }
+            }
+    }
+
+    // Read version and author from a ZIP archive's internal meta.json
+    private (string version, string author)? ReadMetaFromZip(string zipPath)
+    {
+        try
         {
-            foreach (var mod in modsTouchedAll)
+            if (string.IsNullOrWhiteSpace(zipPath) || !File.Exists(zipPath))
+                return null;
+            using var za = ZipFile.OpenRead(zipPath);
+            try { _logger.LogDebug("Reading meta.json from ZIP: {zip} (entries={count})", zipPath, za.Entries.Count); } catch { }
+            var entry = za.Entries.FirstOrDefault(e => string.Equals(Path.GetFileName(e.FullName), "meta.json", StringComparison.OrdinalIgnoreCase));
+            if (entry == null)
+            {
+                try { _logger.LogDebug("meta.json not found in ZIP: {zip}", zipPath); } catch { }
+                return null;
+            }
+            using var ms = new MemoryStream();
+            using (var zs = entry.Open()) zs.CopyTo(ms);
+            var bytes = ms.ToArray();
+            string content;
+            try
+            {
+                if (bytes.Length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF)
+                    content = Encoding.UTF8.GetString(bytes, 3, bytes.Length - 3);
+                else if (bytes.Length >= 2 && bytes[0] == 0xFF && bytes[1] == 0xFE)
+                    content = Encoding.Unicode.GetString(bytes, 2, bytes.Length - 2);
+                else if (bytes.Length >= 2 && bytes[0] == 0xFE && bytes[1] == 0xFF)
+                    content = Encoding.BigEndianUnicode.GetString(bytes, 2, bytes.Length - 2);
+                else if (bytes.Length >= 4 && bytes[0] == 0xFF && bytes[1] == 0xFE && bytes[2] == 0x00 && bytes[3] == 0x00)
+                    content = Encoding.UTF32.GetString(bytes, 4, bytes.Length - 4);
+                else if (bytes.Length >= 4 && bytes[0] == 0x00 && bytes[1] == 0x00 && bytes[2] == 0xFE && bytes[3] == 0xFF)
+                    content = Encoding.GetEncoding(12001).GetString(bytes, 4, bytes.Length - 4);
+                else
+                    content = Encoding.UTF8.GetString(bytes);
+            }
+            catch { content = Encoding.UTF8.GetString(bytes); }
+
+            string version = string.Empty;
+            string author = string.Empty;
+            try
+            {
+                using var doc = JsonDocument.Parse(content);
+                foreach (var prop in doc.RootElement.EnumerateObject())
+                {
+                    var name = prop.Name;
+                    if (string.Equals(name, "Version", StringComparison.OrdinalIgnoreCase) && prop.Value.ValueKind == JsonValueKind.String)
+                        version = prop.Value.GetString() ?? version;
+                    else if (string.Equals(name, "FileVersion", StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (prop.Value.ValueKind == JsonValueKind.String)
+                            version = prop.Value.GetString() ?? version;
+                        else if (prop.Value.ValueKind == JsonValueKind.Number)
+                            version = prop.Value.ToString();
+                    }
+                    else if (string.Equals(name, "VersionString", StringComparison.OrdinalIgnoreCase) && prop.Value.ValueKind == JsonValueKind.String)
+                        version = prop.Value.GetString() ?? version;
+                    else if (string.Equals(name, "Author", StringComparison.OrdinalIgnoreCase) && prop.Value.ValueKind == JsonValueKind.String)
+                        author = prop.Value.GetString() ?? author;
+                }
+            }
+            catch
             {
                 try
                 {
-                    var modAbs = GetModAbsolutePath(mod);
-                    if (string.IsNullOrWhiteSpace(modAbs) || !Directory.Exists(modAbs))
-                        continue;
-
-                    var modBackupDir = Path.Combine(backupDirectory, mod);
-                    try { Directory.CreateDirectory(modBackupDir); } catch { }
-
-                    // If any PMP exists already, skip creating a new one to preserve the oldest/original
-                    try
-                    {
-                        var existingPmp = Directory.EnumerateFiles(modBackupDir, "mod_backup_*.pmp").FirstOrDefault();
-                        if (!string.IsNullOrEmpty(existingPmp))
-                        {
-                            _logger.LogDebug("Skipping full mod PMP creation for {mod}; existing PMP found: {pmp}", mod, existingPmp);
-                            continue;
-                        }
-                    }
-                    catch { }
-
-                    var stamp = timestamp.ToString("yyyyMMdd_HHmmss");
-                    var pmpPath = Path.Combine(modBackupDir, $"mod_backup_{stamp}.pmp");
-                    // In the unlikely event the target path exists (timestamp collision), do not overwrite
-                    if (File.Exists(pmpPath))
-                    {
-                        _logger.LogDebug("Skipping full mod PMP creation for {mod}; target path already exists: {pmp}", mod, pmpPath);
-                        continue;
-                    }
-
-                    await Task.Run(() =>
-                    {
-                        if (token.IsCancellationRequested) return;
-                        ZipFile.CreateFromDirectory(modAbs!, pmpPath);
-                    }, token).ConfigureAwait(false);
-                    _logger.LogDebug("Created full mod backup PMP {pmp}", pmpPath);
-                    // Report PMP creation to progress so UI can show current step
-                    try { progress?.Report((pmpPath, ++current, expectedTotal)); } catch { }
-
-                    // Write converted textures manifest for this PMP so size calculations can focus on converted files only
-                    try
-                    {
-                        var convertedRel = new List<string>();
-                        foreach (var kvp in textures)
-                        {
-                            var source = kvp.Key;
-                            var prefixed = BuildPrefixedPath(source);
-                            var owner = ExtractModFolderName(prefixed);
-                            if (!string.Equals(owner, mod, StringComparison.OrdinalIgnoreCase))
-                                continue;
-                            var rel = Path.GetRelativePath(modAbs!, source).Replace('\\', '/');
-                            if (!string.IsNullOrWhiteSpace(rel) && !rel.StartsWith("..", StringComparison.Ordinal))
-                                convertedRel.Add(rel);
-                        }
-                        var manifestPath = Path.Combine(modBackupDir, "pmp_converted_manifest.json");
-                        try { if (File.Exists(manifestPath)) File.Delete(manifestPath); } catch { }
-                        File.WriteAllText(manifestPath, JsonSerializer.Serialize(convertedRel));
-                    }
-                    catch { }
+                    var rxAuthor = new Regex(@"""Author""\s*:\s*""(?<a>.*?)""", RegexOptions.Singleline | RegexOptions.IgnoreCase);
+                    var rxVersionStr = new Regex(@"""Version""\s*:\s*""(?<v>.*?)""", RegexOptions.Singleline | RegexOptions.IgnoreCase);
+                    var rxVersionNum = new Regex(@"""FileVersion""\s*:\s*(?<n>[-]?[0-9]+(?:\.[0-9]+)?)", RegexOptions.Singleline | RegexOptions.IgnoreCase);
+                    var rxVersionAlt = new Regex(@"""VersionString""\s*:\s*""(?<v>.*?)""", RegexOptions.Singleline | RegexOptions.IgnoreCase);
+                    var mA = rxAuthor.Match(content ?? string.Empty);
+                    var mV = rxVersionStr.Match(content ?? string.Empty);
+                    var mVN = rxVersionNum.Match(content ?? string.Empty);
+                    var mVA = rxVersionAlt.Match(content ?? string.Empty);
+                    if (mA.Success) author = mA.Groups["a"].Value;
+                    if (mV.Success) version = mV.Groups["v"].Value;
+                    else if (mVN.Success) version = mVN.Groups["n"].Value;
+                    else if (mVA.Success) version = mVA.Groups["v"].Value;
                 }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning("Failed to create full mod backup for {mod}: {error}", mod, ex.Message);
-                }
-                await Task.Yield();
+                catch { }
             }
+
+            try { _logger.LogDebug("Parsed ZIP meta for {zip}: version={version}, author={author}", zipPath, version, author); } catch { }
+            return (version ?? string.Empty, author ?? string.Empty);
         }
+        catch (Exception ex) { try { _logger.LogDebug(ex, "Failed reading ZIP meta for {zip}", zipPath); } catch { } return null; }
+    }
+
+    public Task<(string version, string author, DateTime createdUtc, string zipFileName)?> GetLatestZipMetaForModAsync(string modFolderName)
+    {
+        try
+        {
+            var backupDirectory = _configService.Current.BackupFolderPath;
+            if (!Directory.Exists(backupDirectory)) return Task.FromResult<(string, string, DateTime, string)?>(null);
+            var modDir = Path.Combine(backupDirectory, modFolderName);
+            if (!Directory.Exists(modDir)) return Task.FromResult<(string, string, DateTime, string)?>(null);
+            var latestZip = Directory.EnumerateFiles(modDir, "backup_*.zip").OrderByDescending(f => f).FirstOrDefault();
+            if (string.IsNullOrEmpty(latestZip)) return Task.FromResult<(string, string, DateTime, string)?>(null);
+            var meta = ReadMetaFromZip(latestZip);
+            if (!meta.HasValue) return Task.FromResult<(string, string, DateTime, string)?>(null);
+            var created = File.GetCreationTimeUtc(latestZip);
+            var name = Path.GetFileName(latestZip) ?? string.Empty;
+            return Task.FromResult<(string, string, DateTime, string)?>((meta.Value.version ?? string.Empty, meta.Value.author ?? string.Empty, created, name));
+        }
+        catch { return Task.FromResult<(string, string, DateTime, string)?>(null); }
+    }
+
+    public (string version, string author) GetLiveModMeta(string modFolderName)
+    {
+        try
+        {
+            var v = GetModVersion(modFolderName) ?? string.Empty;
+            var a = GetModAuthor(modFolderName) ?? string.Empty;
+            return (v, a);
+        }
+        catch { return (string.Empty, string.Empty); }
     }
 
     public async Task<List<BackupSessionInfo>> GetBackupOverviewAsync()
