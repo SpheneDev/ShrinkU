@@ -135,36 +135,13 @@ public sealed class SettingsUI : Window
                 }
                 ShowTooltip("Select how ShrinkU processes textures. When integrated with Sphene, only the Sphene-handled automatic mode is available.");
 
-                //bool backup = _configService.Current.EnableBackupBeforeConversion;
-                //if (ImGui.Checkbox("Enable backup before conversion", ref backup))
-                //{
-                //    _configService.Current.EnableBackupBeforeConversion = backup;
-                //    _configService.Save();
-                //}
-                //ShowTooltip("Create a backup of original textures before converting.");
-                //bool zip = _configService.Current.EnableZipCompressionForBackups;
-                //if (ImGui.Checkbox("ZIP backups by default", ref zip))
-                //{
-                //    _configService.Current.EnableZipCompressionForBackups = zip;
-                //    _configService.Save();
-                //}
-                //ShowTooltip("Compress backup sessions into ZIP archives by default.");
-                //bool deleteOriginals = _configService.Current.DeleteOriginalBackupsAfterCompression;
-                //if (ImGui.Checkbox("Delete originals after ZIP", ref deleteOriginals))
-                //{
-                //    _configService.Current.DeleteOriginalBackupsAfterCompression = deleteOriginals;
-                //    _configService.Save();
-                //}
-                //ShowTooltip("Delete uncompressed backup folders after ZIP is created.");
-
-                // Delete old backups when mod version changes
-                //bool deleteOnVersionChange = _configService.Current.DeleteOldBackupsOnVersionChange;
-                //if (ImGui.Checkbox("Delete old backups on version change", ref deleteOnVersionChange))
-                //{
-                //    _configService.Current.DeleteOldBackupsOnVersionChange = deleteOnVersionChange;
-                //    _configService.Save();
-                //}
-                ShowTooltip("Automatically delete outdated backups for a mod when its version changes.");
+                bool backup = _configService.Current.EnableBackupBeforeConversion;
+                if (ImGui.Checkbox("Backup Mod Textures before conversion", ref backup))
+                {
+                    _configService.Current.EnableBackupBeforeConversion = backup;
+                    _configService.Save();
+                }
+                ShowTooltip("Create a backup of original textures before converting.");
 
                 // Auto-restore for inefficient mods toggle
                 bool autoRestore = _configService.Current.AutoRestoreInefficientMods;
@@ -213,10 +190,15 @@ public sealed class SettingsUI : Window
                 if (ImGui.Checkbox("Prefer PMP restore when available", ref preferPmp))
                 {
                     _configService.Current.PreferPmpRestoreWhenAvailable = preferPmp;
+                    // When PMP is preferred, disable texture backups unless explicitly enabled by user
+                    if (preferPmp)
+                    {
+                        _configService.Current.EnableBackupBeforeConversion = false;
+                    }
                     _configService.Save();
                     _logger.LogDebug("Updated preference for PMP restore: {value}", preferPmp);
                 }
-                ShowTooltipWrapped("If a full-mod PMP backup exists for the selected mod, ShrinkU will restore it directly instead of showing the restore menu. This overwrites the mod to the archived state.", 420f);
+                ShowTooltipWrapped("If a full-mod PMP backup exists, ShrinkU will prefer restoring it. When this is enabled, per-texture backups are disabled unless you explicitly enable 'Enable backup before conversion'.", 420f);
 
                 // Backup folder selection
                 ImGui.Text("Backup Folder:");

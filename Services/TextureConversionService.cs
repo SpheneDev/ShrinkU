@@ -260,7 +260,7 @@ public sealed class TextureConversionService : IDisposable
                 var modFileTotal = modTextures.Count;
                 OnModProgress?.Invoke((modName, currentModIndex, totalMods, modFileTotal));
 
-                if (_configService.Current.EnableBackupBeforeConversion)
+                if (_configService.Current.EnableBackupBeforeConversion || _configService.Current.EnableFullModBackupBeforeConversion)
                 {
                     // Finish backup for the current mod before honoring cancellation.
                     await _backupService.BackupAsync(modTextures, _backupProgress, token).ConfigureAwait(false);
@@ -452,6 +452,28 @@ public sealed class TextureConversionService : IDisposable
             return new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         }
         return await _penumbraIpc.GetModDisplayNamesAsync().ConfigureAwait(false);
+    }
+
+    public Task<List<string>> GetModTextureFilesAsync(string modFolder)
+    {
+        var files = new List<string>();
+        try
+        {
+            var root = _penumbraIpc.ModDirectory ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(root))
+                return Task.FromResult(files);
+            var modPath = Path.Combine(root, modFolder);
+            if (!Directory.Exists(modPath))
+                return Task.FromResult(files);
+            foreach (var f in Directory.EnumerateFiles(modPath, "*.*", SearchOption.AllDirectories)
+                                       .Where(p => p.EndsWith(".tex", StringComparison.OrdinalIgnoreCase)
+                                                || p.EndsWith(".dds", StringComparison.OrdinalIgnoreCase)))
+            {
+                files.Add(f);
+            }
+        }
+        catch { }
+        return Task.FromResult(files);
     }
 
     public async Task<List<string>> GetAllModFoldersAsync()

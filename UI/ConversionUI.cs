@@ -128,7 +128,11 @@ public sealed class ConversionUI : Window, IDisposable
                 _ = _backupService.HasBackupForModAsync(mod).ContinueWith(bt =>
                 {
                     if (bt.Status == TaskStatus.RanToCompletion)
-                        _modsWithBackupCache[mod] = bt.Result;
+                    {
+                        bool any = bt.Result;
+                        try { any = any || _backupService.HasPmpBackupForModAsync(mod).GetAwaiter().GetResult(); } catch { }
+                        _modsWithBackupCache[mod] = any;
+                    }
                 });
                 _running = false;
                 if (resetConversionAfter) ResetConversionProgress();
@@ -226,7 +230,53 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
         _onConversionProgress = e => { _currentTexture = e.Item1; _convertedCount = e.Item2; };
         _conversionService.OnConversionProgress += _onConversionProgress;
 
-        _onBackupProgress = e => { _currentTexture = e.Item1; _backupIndex = e.Item2; _backupTotal = e.Item3; };
+        _onBackupProgress = e => 
+        { 
+            _currentTexture = e.Item1; 
+            _backupIndex = e.Item2; 
+            _backupTotal = e.Item3; 
+            try
+            {
+                var path = e.Item1;
+                if (!string.IsNullOrWhiteSpace(path))
+                {
+                    var ext = Path.GetExtension(path);
+                    if (string.Equals(ext, ".pmp", StringComparison.OrdinalIgnoreCase))
+                    {
+                        var modDir = Path.GetDirectoryName(path);
+                        var mod = !string.IsNullOrWhiteSpace(modDir) ? Path.GetFileName(modDir) : string.Empty;
+                        if (!string.IsNullOrWhiteSpace(mod))
+                        {
+                            _modsWithBackupCache[mod] = true;
+                            _modsWithPmpCache[mod] = true;
+                            RefreshModState(mod, "backup-progress-pmp");
+                            TriggerMetricsRefresh();
+                            _perModSavingsTask = _backupService.ComputePerModSavingsAsync();
+                            _perModSavingsTask.ContinueWith(ps =>
+                            {
+                                if (ps.Status == TaskStatus.RanToCompletion && ps.Result != null)
+                                {
+                                    _cachedPerModSavings = ps.Result;
+                                    _needsUIRefresh = true;
+                                }
+                            }, TaskScheduler.Default);
+                            // Warm original sizes cache for this mod from PMP so tooltips reflect immediately
+                            _perModOriginalSizesTasks[mod] = _backupService.GetLatestOriginalSizesForModAsync(mod);
+                            _perModOriginalSizesTasks[mod].ContinueWith(t =>
+                            {
+                                if (t.Status == TaskStatus.RanToCompletion && t.Result != null)
+                                {
+                                    _cachedPerModOriginalSizes[mod] = t.Result;
+                                    _needsUIRefresh = true;
+                                }
+                                _perModOriginalSizesTasks.Remove(mod);
+                            }, TaskScheduler.Default);
+                        }
+                    }
+                }
+            }
+            catch { }
+        };
         _conversionService.OnBackupProgress += _onBackupProgress;
 
         _onConversionCompleted = () =>
@@ -297,7 +347,11 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
                         _ = _backupService.HasBackupForModAsync(target).ContinueWith(bt =>
                         {
                             if (bt.Status == TaskStatus.RanToCompletion)
-                                _modsWithBackupCache[target] = bt.Result;
+                            {
+                                bool any = bt.Result;
+                                try { any = any || _backupService.HasPmpBackupForModAsync(target).GetAwaiter().GetResult(); } catch { }
+                                _modsWithBackupCache[target] = any;
+                            }
                         });
                         _running = false;
                         try { _restoreCancellationTokenSource?.Dispose(); } catch { }
@@ -332,7 +386,7 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
         };
         _conversionService.OnConversionCompleted += _onConversionCompleted;
 
-        _onModProgress = e => { _currentModName = e.modName; _currentModIndex = e.current; _totalMods = e.total; _currentModTotalFiles = e.fileTotal; };
+        _onModProgress = e => { _currentModName = e.modName; _currentModIndex = e.current; _totalMods = e.total; _currentModTotalFiles = e.fileTotal; RefreshModState(e.modName, "conversion-progress"); };
         _conversionService.OnModProgress += _onModProgress;
 
         // Generic ModsChanged only marks UI for refresh; heavy scan is driven by add/delete.
@@ -1527,7 +1581,8 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                         ImGui.TextUnformatted($"Uncompressed: {FormatSize(origBytesTip)}");
                         var compText = compBytesTip > 0 ? $"{FormatSize(compBytesTip)} ({reductionPctTip:0.00}% reduction)" : "-";
                         ImGui.TextUnformatted($"Compressed: {compText}");
-                        ImGui.TextUnformatted($"Backups: {(hasBackup ? "Textures" : "None")}{(hasPmp ? ", PMP" : string.Empty)}");
+                        var backupText = hasPmp ? "PMP" : (hasBackup ? "Textures" : "None");
+                        ImGui.TextUnformatted($"Backups: {backupText}");
                         var enabledState = _modEnabledStates.TryGetValue(mod, out var st) ? (st.Enabled ? "Enabled" : "Disabled") : "Unknown";
                         ImGui.TextUnformatted($"State: {enabledState}");
                         ImGui.EndTooltip();
@@ -1662,8 +1717,8 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                                                 .ContinueWith(t => {
                                                     var success = t.Status == TaskStatus.RanToCompletion && t.Result;
                                                     try { _backupService.RedrawPlayer(); } catch { }
-                                                    _logger.LogDebug("Heavy scan triggered: restore completed (mod button in folder view)");
-                                                    RefreshScanResults(true, "restore-folder-view");
+                                                    _logger.LogDebug("Restore completed (mod button in folder view)");
+                                                    RefreshModState(mod, "restore-folder-view");
                                                     TriggerMetricsRefresh();
                                                     // Recompute per-mod savings after restore to refresh Uncompressed/Compressed sizes
                                                     _perModSavingsTask = _backupService.ComputePerModSavingsAsync();
@@ -1678,7 +1733,11 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                                                     _ = _backupService.HasBackupForModAsync(mod).ContinueWith(bt =>
                                                     {
                                                         if (bt.Status == TaskStatus.RanToCompletion)
-                                                            _modsWithBackupCache[mod] = bt.Result;
+                                                        {
+                                                            bool any = bt.Result;
+                                                            try { any = any || _backupService.HasPmpBackupForModAsync(mod).GetAwaiter().GetResult(); } catch { }
+                                                            _modsWithBackupCache[mod] = any;
+                                                        }
                                                     });
                                                     _running = false;
                                                     // Clear restore progress after completion
@@ -1705,7 +1764,11 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                                     _ = _backupService.HasBackupForModAsync(mod).ContinueWith(bt =>
                                     {
                                         if (bt.Status == TaskStatus.RanToCompletion)
-                                            _modsWithBackupCache[mod] = bt.Result;
+                                        {
+                                            bool any = bt.Result;
+                                            try { any = any || _backupService.HasPmpBackupForModAsync(mod).GetAwaiter().GetResult(); } catch { }
+                                            _modsWithBackupCache[mod] = any;
+                                        }
                                     });
                                     _running = false;
                                 });
@@ -1779,7 +1842,7 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                                                 _statusMessageAt = DateTime.UtcNow;
                                                 _statusPersistent = false;
                                             });
-                                            RefreshScanResults(true, "restore-folder-view-context");
+                                            RefreshModState(mod, "restore-folder-view-context");
                                             TriggerMetricsRefresh();
                                             _perModSavingsTask = _backupService.ComputePerModSavingsAsync();
                                             _perModSavingsTask.ContinueWith(ps =>
@@ -1793,7 +1856,11 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                                             _ = _backupService.HasBackupForModAsync(mod).ContinueWith(bt =>
                                             {
                                                 if (bt.Status == TaskStatus.RanToCompletion)
-                                                    _modsWithBackupCache[mod] = bt.Result;
+                                                {
+                                                    bool any = bt.Result;
+                                                    try { any = any || _backupService.HasPmpBackupForModAsync(mod).GetAwaiter().GetResult(); } catch { }
+                                                    _modsWithBackupCache[mod] = any;
+                                                }
                                             });
                                             _running = false;
                                             ImGui.CloseCurrentPopup();
@@ -2709,7 +2776,8 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                     ImGui.TextUnformatted($"Uncompressed: {FormatSize(origBytesTip)}");
                     var compText = compBytesTip > 0 ? $"{FormatSize(compBytesTip)} ({reductionPctTip:0.00}% reduction)" : "-";
                     ImGui.TextUnformatted($"Compressed: {compText}");
-                    ImGui.TextUnformatted($"Backups: {(hasBackup ? "Textures" : "None")}{(hasPmp ? ", PMP" : string.Empty)}");
+                    var backupText2 = hasPmp ? "PMP" : (hasBackup ? "Textures" : "None");
+                    ImGui.TextUnformatted($"Backups: {backupText2}");
                     var enabledState = _modEnabledStates.TryGetValue(mod, out var st) ? (st.Enabled ? "Enabled" : "Disabled") : "Unknown";
                     ImGui.TextUnformatted($"State: {enabledState}");
                     ImGui.EndTooltip();
@@ -2831,8 +2899,8 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                                     .ContinueWith(t => {
                                         var success = t.Status == TaskStatus.RanToCompletion && t.Result;
                                         try { _backupService.RedrawPlayer(); } catch { }
-                                        _logger.LogDebug("Heavy scan triggered: restore completed (mod button in mod-only view, async)");
-                                        RefreshScanResults(true, "restore-mod-only-view-async");
+                                        _logger.LogDebug("Restore completed (mod button in mod-only view, async)");
+                                        RefreshModState(mod, "restore-mod-only-view-async");
                                         TriggerMetricsRefresh();
                                         // Recompute per-mod savings after restore to refresh Uncompressed/Compressed sizes
                                         _perModSavingsTask = _backupService.ComputePerModSavingsAsync();
@@ -2847,7 +2915,11 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                                         _ = _backupService.HasBackupForModAsync(mod).ContinueWith(bt =>
                                         {
                                             if (bt.Status == TaskStatus.RanToCompletion)
-                                                _modsWithBackupCache[mod] = bt.Result;
+                                            {
+                                                bool any = bt.Result;
+                                                try { any = any || _backupService.HasPmpBackupForModAsync(mod).GetAwaiter().GetResult(); } catch { }
+                                                _modsWithBackupCache[mod] = any;
+                                            }
                                         });
                                         _running = false;
                                     });
@@ -2943,7 +3015,7 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                                             _statusMessageAt = DateTime.UtcNow;
                                             _statusPersistent = false;
                                         });
-                                        RefreshScanResults(true, "restore-mod-only-view-context");
+                                        RefreshModState(mod, "restore-mod-only-view-context");
                                         TriggerMetricsRefresh();
                                         _perModSavingsTask = _backupService.ComputePerModSavingsAsync();
                                         _perModSavingsTask.ContinueWith(ps =>
@@ -2957,7 +3029,11 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                                         _ = _backupService.HasBackupForModAsync(mod).ContinueWith(bt =>
                                         {
                                             if (bt.Status == TaskStatus.RanToCompletion)
-                                                _modsWithBackupCache[mod] = bt.Result;
+                                            {
+                                                bool any = bt.Result;
+                                                try { any = any || _backupService.HasPmpBackupForModAsync(mod).GetAwaiter().GetResult(); } catch { }
+                                                _modsWithBackupCache[mod] = any;
+                                            }
                                         });
                                         _running = false;
                                         ImGui.CloseCurrentPopup();
@@ -2997,7 +3073,7 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                                             _statusMessageAt = DateTime.UtcNow;
                                             _statusPersistent = false;
                                         });
-                                        RefreshScanResults(true, "pmp-restore-mod-only-view-context-newest");
+                                        RefreshModState(mod, "pmp-restore-mod-only-view-context-newest");
                                         TriggerMetricsRefresh();
                                         _perModSavingsTask = _backupService.ComputePerModSavingsAsync();
                                         _perModSavingsTask.ContinueWith(ps =>
@@ -3011,7 +3087,11 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                                         _ = _backupService.HasBackupForModAsync(mod).ContinueWith(bt =>
                                         {
                                             if (bt.Status == TaskStatus.RanToCompletion)
-                                                _modsWithBackupCache[mod] = bt.Result;
+                                            {
+                                                bool any = bt.Result;
+                                                try { any = any || _backupService.HasPmpBackupForModAsync(mod).GetAwaiter().GetResult(); } catch { }
+                                                _modsWithBackupCache[mod] = any;
+                                            }
                                         });
                                         _running = false;
                                         ImGui.CloseCurrentPopup();
@@ -3392,15 +3472,36 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                         _currentRestoreMod = mod;
                         _currentRestoreModIndex = 0;
                         _currentRestoreModTotal = 0;
-                        await _backupService.RestoreLatestForModAsync(mod, progress, restoreToken);
+                        var preferPmp = _configService.Current.PreferPmpRestoreWhenAvailable;
+                        var hasPmp = false;
+                        try { hasPmp = _backupService.HasPmpBackupForModAsync(mod).GetAwaiter().GetResult(); } catch { }
+                        if (preferPmp && hasPmp)
+                        {
+                            var latestPmp = _backupService.GetPmpBackupsForModAsync(mod).GetAwaiter().GetResult().FirstOrDefault();
+                            if (!string.IsNullOrEmpty(latestPmp))
+                            {
+                                await _backupService.RestorePmpAsync(mod, latestPmp, progress, restoreToken);
+                            }
+                            else
+                            {
+                                await _backupService.RestoreLatestForModAsync(mod, progress, restoreToken);
+                            }
+                        }
+                        else
+                        {
+                            await _backupService.RestoreLatestForModAsync(mod, progress, restoreToken);
+                        }
                     }
                     catch { }
                 }
             }).ContinueWith(_ =>
             {
                 try { _backupService.RedrawPlayer(); } catch { }
-                _logger.LogDebug("Heavy scan triggered: restore completed (bulk action)");
-                RefreshScanResults(true, "restore-bulk");
+                _logger.LogDebug("Restore completed (bulk action)");
+                foreach (var m in restorableFiltered)
+                {
+                    try { RefreshModState(m, "restore-bulk"); } catch { }
+                }
                 TriggerMetricsRefresh();
                 // Recompute per-mod savings after bulk restore to refresh Uncompressed/Compressed sizes
                 _perModSavingsTask = _backupService.ComputePerModSavingsAsync();
@@ -3418,7 +3519,11 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                     _ = _backupService.HasBackupForModAsync(m).ContinueWith(bt =>
                     {
                         if (bt.Status == TaskStatus.RanToCompletion)
-                            _modsWithBackupCache[m] = bt.Result;
+                        {
+                            bool any = bt.Result;
+                            try { any = any || _backupService.HasPmpBackupForModAsync(m).GetAwaiter().GetResult(); } catch { }
+                            _modsWithBackupCache[m] = any;
+                        }
                     });
                 }
                 // Clear persistent external conversion markers for all restored mods
@@ -3618,7 +3723,9 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
         try
         {
             // Perform a synchronous check to avoid race conditions enabling conversion before backup status is known
-            var res = _backupService.HasBackupForModAsync(mod).GetAwaiter().GetResult();
+            var hasZipOrSession = _backupService.HasBackupForModAsync(mod).GetAwaiter().GetResult();
+            var hasPmp = _backupService.HasPmpBackupForModAsync(mod).GetAwaiter().GetResult();
+            var res = hasZipOrSession || hasPmp;
             _modsWithBackupCache[mod] = res;
             return res;
         }
@@ -3680,6 +3787,30 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
         if (_modDisplayNames.TryGetValue(folder, out var name) && !string.IsNullOrWhiteSpace(name))
             return name;
         return folder;
+    }
+
+    private void RefreshModState(string mod, string origin)
+    {
+        Task.Run(async () =>
+        {
+            try
+            {
+                var files = await _conversionService.GetModTextureFilesAsync(mod).ConfigureAwait(false);
+                var names = await _conversionService.GetModDisplayNamesAsync().ConfigureAwait(false);
+                var tags = await _conversionService.GetModTagsAsync().ConfigureAwait(false);
+                _uiThreadActions.Enqueue(() =>
+                {
+                    _logger.LogDebug("Mod scan refreshed: origin={origin} mod={mod} files={count}", origin, mod, files?.Count ?? 0);
+                    _scannedByMod[mod] = files ?? new List<string>();
+                    foreach (var f in _scannedByMod[mod])
+                        _texturesToConvert[f] = Array.Empty<string>();
+                    if (names != null) _modDisplayNames = names;
+                    if (tags != null) _modTags = tags.ToDictionary(kv => kv.Key, kv => (IReadOnlyList<string>)kv.Value, StringComparer.OrdinalIgnoreCase);
+                    _needsUIRefresh = true;
+                });
+            }
+            catch { }
+        });
     }
 
     private static string NormalizeTag(string tag)

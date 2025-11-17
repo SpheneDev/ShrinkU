@@ -358,6 +358,14 @@ public sealed class TextureBackupService
                             }
                         }
 
+                        try
+                        {
+                            var manifest = Path.Combine(modBackupDir, "pmp_converted_manifest.json");
+                            if (File.Exists(manifest))
+                                File.Delete(manifest);
+                        }
+                        catch { }
+
                         // Delete all PMP archives for this mod
                         foreach (var p in Directory.EnumerateFiles(modBackupDir, "mod_backup_*.pmp"))
                         {
@@ -549,7 +557,8 @@ public sealed class TextureBackupService
         try
         {
             Directory.CreateDirectory(backupDirectory);
-            Directory.CreateDirectory(sessionDir);
+            if (_configService.Current.EnableBackupBeforeConversion)
+                Directory.CreateDirectory(sessionDir);
         }
         catch
         {
@@ -561,6 +570,7 @@ public sealed class TextureBackupService
         // Build a list of textures that actually need backing up (skip already-backed ones)
         var toBackup = new List<(string source, string modName, string modVersion)>();
         var modsTouched = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var modsTouchedAll = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         try
         {
             foreach (var kvp in textures)
@@ -582,7 +592,22 @@ public sealed class TextureBackupService
 
                 toBackup.Add((source, modName, currentModVersion));
                 if (!string.IsNullOrWhiteSpace(modName))
+                {
                     modsTouched.Add(modName);
+                }
+            }
+        }
+        catch { }
+
+        // Always record all mods represented by the provided texture dictionary
+        try
+        {
+            foreach (var kvp in textures)
+            {
+                var prefixed = BuildPrefixedPath(kvp.Key);
+                var modNameForAll = ExtractModFolderName(prefixed);
+                if (!string.IsNullOrWhiteSpace(modNameForAll))
+                    modsTouchedAll.Add(modNameForAll);
             }
         }
         catch { }
@@ -591,13 +616,13 @@ public sealed class TextureBackupService
         int pmpCount = 0;
         try
         {
-            if (_configService.Current.EnableZipCompressionForBackups)
+            if (_configService.Current.EnableZipCompressionForBackups && _configService.Current.EnableBackupBeforeConversion)
             {
                 zipCount = modsTouched.Count;
             }
             if (_configService.Current.EnableFullModBackupBeforeConversion)
             {
-                foreach (var mod in modsTouched)
+                foreach (var mod in modsTouchedAll)
                 {
                     try
                     {
@@ -616,7 +641,8 @@ public sealed class TextureBackupService
         }
         catch { }
 
-        var expectedTotal = toBackup.Count + zipCount + pmpCount;
+        var expectedTotal = (_configService.Current.EnableBackupBeforeConversion ? (toBackup.Count + zipCount) : 0)
+            + (_configService.Current.EnableFullModBackupBeforeConversion ? pmpCount : 0);
         if (expectedTotal <= 0)
         {
             // Fallback to textures.Count for total when nothing is scheduled
@@ -624,7 +650,9 @@ public sealed class TextureBackupService
         }
         var manifest = new BackupManifest { Entries = new List<BackupManifestEntry>() };
         var entriesByMod = new Dictionary<string, List<BackupManifestEntry>>(StringComparer.OrdinalIgnoreCase);
-        // Perform backups for the computed list of textures to back up
+        // Perform backups for the computed list of textures to back up (only when enabled)
+        if (_configService.Current.EnableBackupBeforeConversion)
+        {
         foreach (var kvp in textures)
         {
             if (token.IsCancellationRequested) break;
@@ -708,17 +736,20 @@ public sealed class TextureBackupService
             }
             await Task.Yield();
         }
-
-        // Write manifest for the session
-        try
-        {
-            var manifestPath = Path.Combine(sessionDir, "manifest.json");
-            File.WriteAllText(manifestPath, JsonSerializer.Serialize(manifest));
         }
-        catch { }
+
+        if (_configService.Current.EnableBackupBeforeConversion)
+        {
+            try
+            {
+                var manifestPath = Path.Combine(sessionDir, "manifest.json");
+                File.WriteAllText(manifestPath, JsonSerializer.Serialize(manifest));
+            }
+            catch { }
+        }
 
         // Create per-mod ZIP archives if enabled
-        if (_configService.Current.EnableZipCompressionForBackups)
+        if (_configService.Current.EnableZipCompressionForBackups && _configService.Current.EnableBackupBeforeConversion)
         {
             foreach (var (mod, entries) in entriesByMod)
             {
@@ -777,7 +808,7 @@ public sealed class TextureBackupService
         // Optionally create full mod PMP archives for touched mods
         if (_configService.Current.EnableFullModBackupBeforeConversion)
         {
-            foreach (var (mod, _) in entriesByMod)
+            foreach (var mod in modsTouchedAll)
             {
                 try
                 {
@@ -800,7 +831,8 @@ public sealed class TextureBackupService
                     }
                     catch { }
 
-                    var pmpPath = Path.Combine(modBackupDir, $"mod_backup_{timestamp:yyyyMMdd_HHmmss}.pmp");
+                    var stamp = timestamp.ToString("yyyyMMdd_HHmmss");
+                    var pmpPath = Path.Combine(modBackupDir, $"mod_backup_{stamp}.pmp");
                     // In the unlikely event the target path exists (timestamp collision), do not overwrite
                     if (File.Exists(pmpPath))
                     {
@@ -816,6 +848,27 @@ public sealed class TextureBackupService
                     _logger.LogDebug("Created full mod backup PMP {pmp}", pmpPath);
                     // Report PMP creation to progress so UI can show current step
                     try { progress?.Report((pmpPath, ++current, expectedTotal)); } catch { }
+
+                    // Write converted textures manifest for this PMP so size calculations can focus on converted files only
+                    try
+                    {
+                        var convertedRel = new List<string>();
+                        foreach (var kvp in textures)
+                        {
+                            var source = kvp.Key;
+                            var prefixed = BuildPrefixedPath(source);
+                            var owner = ExtractModFolderName(prefixed);
+                            if (!string.Equals(owner, mod, StringComparison.OrdinalIgnoreCase))
+                                continue;
+                            var rel = Path.GetRelativePath(modAbs!, source).Replace('\\', '/');
+                            if (!string.IsNullOrWhiteSpace(rel) && !rel.StartsWith("..", StringComparison.Ordinal))
+                                convertedRel.Add(rel);
+                        }
+                        var manifestPath = Path.Combine(modBackupDir, "pmp_converted_manifest.json");
+                        try { if (File.Exists(manifestPath)) File.Delete(manifestPath); } catch { }
+                        File.WriteAllText(manifestPath, JsonSerializer.Serialize(convertedRel));
+                    }
+                    catch { }
                 }
                 catch (Exception ex)
                 {
@@ -925,8 +978,25 @@ public sealed class TextureBackupService
         try
         {
             var overview = await GetBackupOverviewAsync().ConfigureAwait(false);
-            if (overview.Count == 0)
-                return stats;
+            // When no ZIP/session entries exist, still include PMP totals below
+
+            // Prefer PMP over ZIP/session per mod: build set of mods that have a PMP
+            var modsWithPmp = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                var backupDirectory = _configService.Current.BackupFolderPath;
+                if (Directory.Exists(backupDirectory))
+                {
+                    foreach (var modDir in Directory.EnumerateDirectories(backupDirectory))
+                    {
+                        var modName = Path.GetFileName(modDir);
+                        var hasPmp = Directory.EnumerateFiles(modDir, "mod_backup_*.pmp").Any();
+                        if (hasPmp && !string.IsNullOrWhiteSpace(modName))
+                            modsWithPmp.Add(modName);
+                    }
+                }
+            }
+            catch { }
 
             // Prefer latest backup per original path to avoid double-counting
             var processed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -938,6 +1008,13 @@ public sealed class TextureBackupService
                     if (string.IsNullOrWhiteSpace(key))
                         continue;
                     if (!processed.Add(key))
+                        continue;
+
+                    // Determine mod and skip ZIP/session sizes for mods with PMP
+                    var modFolder = entry.ModFolderName;
+                    if (string.IsNullOrWhiteSpace(modFolder) && !string.IsNullOrWhiteSpace(entry.PrefixedOriginalPath))
+                        modFolder = ExtractModFolderName(entry.PrefixedOriginalPath);
+                    if (!string.IsNullOrWhiteSpace(modFolder) && modsWithPmp.Contains(modFolder))
                         continue;
 
                     // Determine current file path (Penumbra-resolved if prefixed)
@@ -1027,6 +1104,78 @@ public sealed class TextureBackupService
                     }
                 }
             }
+
+            // Add PMP totals for mods with PMP (only consider converted textures when a manifest exists)
+            try
+            {
+                var backupDirectory = _configService.Current.BackupFolderPath;
+                if (Directory.Exists(backupDirectory))
+                {
+                    foreach (var modName in modsWithPmp)
+                    {
+                        var modDir = Path.Combine(backupDirectory, modName);
+                        var latestPmp = Directory.EnumerateFiles(modDir, "mod_backup_*.pmp").OrderByDescending(f => f).FirstOrDefault();
+                        if (string.IsNullOrEmpty(latestPmp))
+                            continue;
+                        var stamp = Path.GetFileNameWithoutExtension(latestPmp).Replace("mod_backup_", string.Empty);
+                        var convertedManifestPath = Path.Combine(modDir, "pmp_converted_manifest.json");
+                        List<string>? convertedRel = null;
+                        try
+                        {
+                            if (File.Exists(convertedManifestPath))
+                                convertedRel = JsonSerializer.Deserialize<List<string>>(File.ReadAllText(convertedManifestPath));
+                        }
+                        catch { }
+                        long backupBytes = 0L;
+                        try
+                        {
+                            using var za = ZipFile.OpenRead(latestPmp);
+                            foreach (var e in za.Entries)
+                            {
+                                var name = e.FullName?.Replace('\\', '/');
+                                if (string.IsNullOrWhiteSpace(name))
+                                    continue;
+                                if (name.EndsWith("/", StringComparison.Ordinal))
+                                    continue;
+                                if (convertedRel != null && convertedRel.Count > 0 && !convertedRel.Contains(name, StringComparer.OrdinalIgnoreCase))
+                                    continue;
+                                backupBytes += e.Length;
+                            }
+                        }
+                        catch { }
+                        long currentBytes = 0L;
+                        try
+                        {
+                            var modAbs = GetModAbsolutePath(modName);
+                            if (!string.IsNullOrWhiteSpace(modAbs) && Directory.Exists(modAbs))
+                            {
+                                foreach (var file in Directory.EnumerateFiles(modAbs!, "*", SearchOption.AllDirectories))
+                                {
+                                    try
+                                    {
+                                        if (convertedRel != null && convertedRel.Count > 0)
+                                        {
+                                            var rel = Path.GetRelativePath(modAbs!, file).Replace('\\', '/');
+                                            if (!convertedRel.Contains(rel, StringComparer.OrdinalIgnoreCase))
+                                                continue;
+                                        }
+                                        var fi = new FileInfo(file); currentBytes += fi.Length;
+                                    }
+                                    catch { }
+                                }
+                            }
+                        }
+                        catch { }
+                        if (backupBytes > 0)
+                        {
+                            stats.OriginalTotalBytes += backupBytes;
+                            stats.CurrentTotalBytes += currentBytes;
+                            stats.ComparedFiles += 1;
+                        }
+                    }
+                }
+            }
+            catch { }
         }
         catch
         {
@@ -1042,8 +1191,25 @@ public sealed class TextureBackupService
         try
         {
             var overview = await GetBackupOverviewAsync().ConfigureAwait(false);
-            if (overview.Count == 0)
-                return result;
+            // Even when no ZIP/session entries exist, still compute PMP-based totals below
+
+            // Prefer PMP per mod: build set of mods that have PMP archives
+            var modsWithPmp = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                var backupDirectory = _configService.Current.BackupFolderPath;
+                if (Directory.Exists(backupDirectory))
+                {
+                    foreach (var modDir in Directory.EnumerateDirectories(backupDirectory))
+                    {
+                        var modName = Path.GetFileName(modDir);
+                        var hasPmp = Directory.EnumerateFiles(modDir, "mod_backup_*.pmp").Any();
+                        if (hasPmp && !string.IsNullOrWhiteSpace(modName))
+                            modsWithPmp.Add(modName);
+                    }
+                }
+            }
+            catch { }
 
             // Track processed keys to avoid double counting across sessions
             var processed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -1064,6 +1230,9 @@ public sealed class TextureBackupService
                         modFolder = ExtractModFolderName(entry.PrefixedOriginalPath);
                     if (string.IsNullOrWhiteSpace(modFolder))
                         continue; // skip entries we cannot attribute to a mod
+                    // Skip ZIP/session entries for mods that have PMP
+                    if (modsWithPmp.Contains(modFolder))
+                        continue;
 
                     long backupBytes = 0L;
                     try
@@ -1147,6 +1316,79 @@ public sealed class TextureBackupService
                     }
                 }
             }
+            // Include PMP-based per-mod totals (prefer PMP over ZIP/session and filter to converted textures when available)
+            try
+            {
+                var backupDirectory = _configService.Current.BackupFolderPath;
+                if (Directory.Exists(backupDirectory))
+                {
+                    foreach (var modName in modsWithPmp)
+                    {
+                        var modDir = Path.Combine(backupDirectory, modName);
+                        var latestPmp = Directory.EnumerateFiles(modDir, "mod_backup_*.pmp").OrderByDescending(f => f).FirstOrDefault();
+                        if (string.IsNullOrEmpty(latestPmp))
+                            continue;
+                        var stamp = Path.GetFileNameWithoutExtension(latestPmp).Replace("mod_backup_", string.Empty);
+                        var convertedManifestPath = Path.Combine(modDir, "pmp_converted_manifest.json");
+                        List<string>? convertedRel = null;
+                        try
+                        {
+                            if (File.Exists(convertedManifestPath))
+                                convertedRel = JsonSerializer.Deserialize<List<string>>(File.ReadAllText(convertedManifestPath));
+                        }
+                        catch { }
+                        long backupBytes = 0L;
+                        int entryCount = 0;
+                        try
+                        {
+                            using var za = ZipFile.OpenRead(latestPmp);
+                            foreach (var e in za.Entries)
+                            {
+                                var name = e.FullName?.Replace('\\', '/');
+                                if (string.IsNullOrWhiteSpace(name))
+                                    continue;
+                                if (name.EndsWith("/", StringComparison.Ordinal))
+                                    continue;
+                                if (convertedRel != null && convertedRel.Count > 0 && !convertedRel.Contains(name, StringComparer.OrdinalIgnoreCase))
+                                    continue;
+                                backupBytes += e.Length;
+                                entryCount++;
+                            }
+                        }
+                        catch { }
+                        long currentBytes = 0L;
+                        try
+                        {
+                            var modAbs = GetModAbsolutePath(modName);
+                            if (!string.IsNullOrWhiteSpace(modAbs) && Directory.Exists(modAbs))
+                            {
+                                foreach (var file in Directory.EnumerateFiles(modAbs!, "*", SearchOption.AllDirectories))
+                                {
+                                    try
+                                    {
+                                        if (convertedRel != null && convertedRel.Count > 0)
+                                        {
+                                            var rel = Path.GetRelativePath(modAbs!, file).Replace('\\', '/');
+                                            if (!convertedRel.Contains(rel, StringComparer.OrdinalIgnoreCase))
+                                                continue;
+                                        }
+                                        var fi = new FileInfo(file); currentBytes += fi.Length; 
+                                    }
+                                    catch { }
+                                }
+                            }
+                        }
+                        catch { }
+                        if (!result.TryGetValue(modName!, out var stats))
+                            stats = new ModSavingsStats();
+                        stats.OriginalBytes += backupBytes;
+                        stats.CurrentBytes += currentBytes;
+                        stats.ComparedFiles += Math.Max(1, entryCount);
+                        result[modName!] = stats;
+                    }
+                }
+            }
+            catch { }
         }
         catch
         {
@@ -1165,10 +1407,45 @@ public sealed class TextureBackupService
             var backupDirectory = _configService.Current.BackupFolderPath;
             if (!Directory.Exists(backupDirectory)) return result;
 
-            // Prefer latest per-mod zip
+            // Prefer PMP first
             var modDir = Path.Combine(backupDirectory, modFolderName);
             if (Directory.Exists(modDir))
             {
+                var latestPmp = Directory.EnumerateFiles(modDir, "mod_backup_*.pmp").OrderByDescending(f => f).FirstOrDefault();
+                if (!string.IsNullOrEmpty(latestPmp))
+                {
+                    try
+                    {
+                        var stamp = Path.GetFileNameWithoutExtension(latestPmp).Replace("mod_backup_", string.Empty);
+                        var manifestPath = Path.Combine(modDir, "pmp_converted_manifest.json");
+                        List<string>? convertedRel = null;
+                        try
+                        {
+                            if (File.Exists(manifestPath))
+                                convertedRel = JsonSerializer.Deserialize<List<string>>(File.ReadAllText(manifestPath));
+                        }
+                        catch { }
+                        using var za = ZipFile.OpenRead(latestPmp);
+                        foreach (var e in za.Entries)
+                        {
+                            if (string.IsNullOrWhiteSpace(e.FullName))
+                                continue;
+                            var key = e.FullName.Replace('/', '\\');
+                            if (key.EndsWith("/", StringComparison.Ordinal) || key.EndsWith("\\", StringComparison.Ordinal))
+                                continue;
+                            if (convertedRel != null && convertedRel.Count > 0)
+                            {
+                                var name = e.FullName.Replace('\\', '/');
+                                if (!convertedRel.Contains(name, StringComparer.OrdinalIgnoreCase))
+                                    continue;
+                            }
+                            result[key] = e.Length;
+                        }
+                    }
+                    catch { }
+                    return result;
+                }
+                // Prefer latest per-mod zip when no PMP is present
                 var latestZip = Directory.EnumerateFiles(modDir, "backup_*.zip").OrderByDescending(f => f).FirstOrDefault();
                 if (!string.IsNullOrEmpty(latestZip))
                 {
@@ -1249,6 +1526,8 @@ public sealed class TextureBackupService
                 // Use the latest session only
                 break;
             }
+
+            // No PMP and no ZIP; attempt session fallbacks above already performed
         }
         catch { }
         return result;
@@ -1298,6 +1577,9 @@ public sealed class TextureBackupService
             {
                 var hasZip = Directory.EnumerateFiles(modZipDir, "backup_*.zip").Any();
                 if (hasZip) return Task.FromResult(true);
+                // Prefer PMP: if PMP exists, consider backup present
+                var hasPmp = Directory.EnumerateFiles(modZipDir, "mod_backup_*.pmp").Any();
+                if (hasPmp) return Task.FromResult(true);
             }
 
             // Check session folders for mod subdir with manifest
