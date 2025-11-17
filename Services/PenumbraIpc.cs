@@ -30,6 +30,7 @@ public sealed class PenumbraIpc : IDisposable
     private readonly GetModList _penumbraGetModList;
     private readonly GetModPath _penumbraGetModPath;
     private readonly OpenMainWindow _penumbraOpenMainWindow;
+    private readonly Penumbra.Api.IpcSubscribers.AddMod _penumbraAddMod;
 
     // Event subscribers (disposed with plugin lifetime)
     private readonly IDisposable? _subModAdded;
@@ -66,6 +67,7 @@ public sealed class PenumbraIpc : IDisposable
         _penumbraGetModList = new GetModList(pi);
         _penumbraGetModPath = new GetModPath(pi);
         _penumbraOpenMainWindow = new OpenMainWindow(pi);
+        _penumbraAddMod = new Penumbra.Api.IpcSubscribers.AddMod(pi);
 
         APIAvailable = CheckApi();
 
@@ -712,6 +714,60 @@ public sealed class PenumbraIpc : IDisposable
         catch (Exception ex)
         {
             _logger.LogDebug(ex, "Failed to open Penumbra window for mod {modDirectory}", modDirectory);
+        }
+    }
+
+    public bool AddModDirectory(string modFolderName)
+    {
+        try
+        {
+            if (!APIAvailable)
+                return false;
+            if (string.IsNullOrWhiteSpace(modFolderName))
+                return false;
+            var result = _penumbraAddMod.Invoke(modFolderName);
+            try { _logger.LogDebug("Penumbra AddMod result for {mod}: {result}", modFolderName, result); } catch { }
+            return result == Penumbra.Api.Enums.PenumbraApiEc.Success;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    public void NudgeModDetection(string modFolderName)
+    {
+        try
+        {
+            if (!APIAvailable)
+                return;
+            var root = ModDirectory ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(root) || string.IsNullOrWhiteSpace(modFolderName))
+                return;
+            var modPath = System.IO.Path.Combine(root, modFolderName);
+            if (!Directory.Exists(modPath))
+                return;
+            var metaPath = System.IO.Path.Combine(modPath, "meta.json");
+            if (File.Exists(metaPath))
+            {
+                try
+                {
+                    var bytes = File.ReadAllBytes(metaPath);
+                    File.WriteAllBytes(metaPath, bytes);
+                    try { File.SetLastWriteTimeUtc(metaPath, DateTime.UtcNow); } catch { }
+                }
+                catch
+                {
+                }
+            }
+            
+            try { Directory.SetLastWriteTimeUtc(modPath, DateTime.UtcNow); } catch { }
+            try { _penumbraOpenMainWindow.Invoke(TabType.Mods, string.Empty, string.Empty); } catch { }
+            try { var _ = GetModPathsAsync(); } catch { }
+            try { ModsChanged?.Invoke(); } catch { }
+        }
+        catch
+        {
         }
     }
 

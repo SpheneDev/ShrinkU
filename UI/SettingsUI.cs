@@ -19,18 +19,27 @@ public sealed class SettingsUI : Window
     private readonly ILogger _logger;
     private readonly ShrinkUConfigService _configService;
     private readonly TextureConversionService _conversionService;
+    private readonly TextureBackupService _backupService;
     private readonly Action? _openReleaseNotes;
 
     // Tag filtering input state (persisted via config on Apply)
     private string _excludedTagsInput = string.Empty;
     private List<string> _excludedTagsEditable = new();
+    private volatile bool _reinstallInProgress = false;
+    private string _reinstallStatus = string.Empty;
+    private int _reinstallCurrent = 0;
+    private int _reinstallTotal = 0;
+    private string _reinstallModName = string.Empty;
+    private volatile bool _orphanScanInFlight = false;
+    private DateTime _lastOrphanScanUtc = DateTime.MinValue;
 
-    public SettingsUI(ILogger logger, ShrinkUConfigService configService, TextureConversionService conversionService, Action? openReleaseNotes = null)
-        : base("ShrinkU Settings###ShrinkUSettingsUI")
+    public SettingsUI(ILogger logger, ShrinkUConfigService configService, TextureConversionService conversionService, TextureBackupService backupService, Action? openReleaseNotes = null)
+    : base("ShrinkU Settings###ShrinkUSettingsUI")
     {
         _logger = logger;
         _configService = configService;
         _conversionService = conversionService;
+        _backupService = backupService;
         _openReleaseNotes = openReleaseNotes;
 
         SizeConstraints = new WindowSizeConstraints
@@ -47,6 +56,33 @@ public sealed class SettingsUI : Window
             .Where(s => s.Length > 0)
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
+
+        try
+        {
+            _conversionService.OnPenumbraModsChanged += () =>
+            {
+                if (_orphanScanInFlight)
+                    return;
+                _orphanScanInFlight = true;
+                System.Threading.Tasks.Task.Run(() =>
+                {
+                    try
+                    {
+                        var orphans = _backupService.FindOrphanedBackupsAsync().GetAwaiter().GetResult();
+                        _orphaned = orphans ?? new List<TextureBackupService.OrphanBackupInfo>();
+                        _lastOrphanScanUtc = DateTime.UtcNow;
+                    }
+                    catch
+                    {
+                    }
+                    finally
+                    {
+                        _orphanScanInFlight = false;
+                    }
+                });
+            };
+        }
+        catch { }
     }
 
     // Helper to show a tooltip when the last item is hovered (also when disabled)
@@ -291,6 +327,7 @@ public sealed class SettingsUI : Window
                         ImGui.TextColored(ShrinkUColors.Accent, "Backup Summary");
                         ImGui.Text($"ZIP Backups: {zipCount} ({FormatSize(zipBytes)})");
                         ImGui.Text($"PMP Backups: {pmpCount} ({FormatSize(pmpBytes)})");
+                        ImGui.Spacing();
                     }
                 }
                 catch { }
@@ -439,6 +476,8 @@ public sealed class SettingsUI : Window
             _logger.LogError(ex, "Failed to open folder picker");
         }
     }
+
+    private List<TextureBackupService.OrphanBackupInfo> _orphaned = new List<TextureBackupService.OrphanBackupInfo>();
 
     private string FormatSize(long bytes)
     {

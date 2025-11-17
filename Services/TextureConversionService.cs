@@ -454,6 +454,23 @@ public sealed class TextureConversionService : IDisposable
         return await _penumbraIpc.GetModDisplayNamesAsync().ConfigureAwait(false);
     }
 
+    public async Task StartAutomaticConversionForModWithDelayAsync(string modFolder, int delayMs)
+    {
+        if (_configService.Current.TextureProcessingMode != TextureProcessingMode.Automatic)
+            return;
+        await Task.Delay(Math.Max(0, delayMs)).ConfigureAwait(false);
+        var files = await GetModTextureFilesAsync(modFolder).ConfigureAwait(false);
+        if (files == null || files.Count == 0)
+            return;
+        var dict = new Dictionary<string, string[]>(StringComparer.Ordinal);
+        foreach (var f in files)
+        {
+            if (string.IsNullOrWhiteSpace(f)) continue;
+            dict[f] = Array.Empty<string>();
+        }
+        await StartConversionAsync(dict).ConfigureAwait(false);
+    }
+
     public Task<List<string>> GetModTextureFilesAsync(string modFolder)
     {
         var files = new List<string>();
@@ -520,6 +537,25 @@ public sealed class TextureConversionService : IDisposable
         catch (Exception ex)
         {
             _logger.LogDebug(ex, "Failed to open mod {modDirectory} in Penumbra", modDirectory);
+        }
+    }
+
+    public async Task RunAutomaticConversionOnceAsync(string reason)
+    {
+        if (_configService.Current.TextureProcessingMode != TextureProcessingMode.Automatic)
+            return;
+        if (_configService.Current.AutomaticHandledBySphene)
+            return;
+        try
+        {
+            var candidates = await GetAutomaticCandidateTexturesAsync().ConfigureAwait(false);
+            if (candidates == null || candidates.Count == 0)
+                return;
+            await _penumbraIpc.ConvertTextureFilesAsync(_logger, candidates, _conversionProgress, System.Threading.CancellationToken.None, true).ConfigureAwait(false);
+            try { OnConversionCompleted?.Invoke(); } catch { }
+        }
+        catch
+        {
         }
     }
 

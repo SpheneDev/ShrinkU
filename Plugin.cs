@@ -62,7 +62,7 @@ public sealed class Plugin : IDalamudPlugin
         _releaseChangelogUi = new ReleaseChangelogUI(_pluginInterface, _logger, _configService, _changelogService);
 
         // Create UI windows and register
-        _settingsUi = new SettingsUI(_logger, _configService, _conversionService, () => _releaseChangelogUi.IsOpen = true);
+        _settingsUi = new SettingsUI(_logger, _configService, _conversionService, _backupService, () => _releaseChangelogUi.IsOpen = true);
         _conversionUi = new ConversionUI(_logger, _configService, _conversionService, _backupService, () => _settingsUi.IsOpen = true);
         _firstRunUi = new FirstRunSetupUI(_logger, _configService)
         {
