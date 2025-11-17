@@ -40,7 +40,6 @@ public sealed class ShrinkUConfig : IPluginConfiguration
     public float ScannedFilesActionColWidth { get; set; } = 60f;
 
     // Conversion UI settings (persisted)
-    public bool UseFolderStructure { get; set; } = true;
     public bool FilterPenumbraUsedOnly { get; set; } = false;
     public bool FilterNonConvertibleMods { get; set; } = true;
     public string ScanSortKey { get; set; } = "ModName"; // "FileName" or "ModName"

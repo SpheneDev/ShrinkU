@@ -94,12 +94,12 @@ public sealed class SettingsUI : Window
                 }
                 ShowTooltip("Open recent changes and highlights for ShrinkU.");
                 ImGui.Spacing();
+                ImGui.TextColored(ShrinkUColors.Accent, "Processing");
+                ImGui.Spacing();
                 var mode = _configService.Current.TextureProcessingMode;
                 var controller = _configService.Current.AutomaticControllerName ?? string.Empty;
                 var spheneIntegrated = !string.IsNullOrWhiteSpace(controller) || _configService.Current.AutomaticHandledBySphene;
-                var modeDisplay = mode == TextureProcessingMode.Automatic && spheneIntegrated
-                    ? "Automatic (handled by Sphene)"
-                    : mode.ToString();
+                var modeDisplay = mode == TextureProcessingMode.Automatic && spheneIntegrated ? "Automatic (handled by Sphene)" : mode.ToString();
                 if (ImGui.BeginCombo("Mode", modeDisplay))
                 {
                     if (ImGui.Selectable("Manual", mode == TextureProcessingMode.Manual))
@@ -109,7 +109,6 @@ public sealed class SettingsUI : Window
                         _configService.Current.AutomaticControllerName = string.Empty;
                         _configService.Save();
                     }
-
                     if (spheneIntegrated)
                     {
                         var isAuto = mode == TextureProcessingMode.Automatic;
@@ -135,6 +134,16 @@ public sealed class SettingsUI : Window
                 }
                 ShowTooltip("Select how ShrinkU processes textures. When integrated with Sphene, only the Sphene-handled automatic mode is available.");
 
+                ImGui.Separator();
+                ImGui.TextColored(ShrinkUColors.Accent, "Backups");
+                ImGui.Spacing();
+                bool fullModBackup = _configService.Current.EnableFullModBackupBeforeConversion;
+                if (ImGui.Checkbox("Backup whole mod before conversion (.pmp)", ref fullModBackup))
+                {
+                    _configService.Current.EnableFullModBackupBeforeConversion = fullModBackup;
+                    _configService.Save();
+                }
+                ShowTooltipWrapped("Creates a full mod PMP archive that Penumbra can install. Experimental feature: enabling this may increase disk usage and conversion time, and restores will overwrite the mod to the archived state. Large mods or unusual layouts may fail or require manual cleanup. If anything unexpected happens, please enable and provide Debug logs to help diagnose issues.", 420f);
                 bool backup = _configService.Current.EnableBackupBeforeConversion;
                 if (ImGui.Checkbox("Backup Mod Textures before conversion", ref backup))
                 {
@@ -143,54 +152,13 @@ public sealed class SettingsUI : Window
                 }
                 ShowTooltip("Create a backup of original textures before converting.");
 
-                // Auto-restore for inefficient mods toggle
-                bool autoRestore = _configService.Current.AutoRestoreInefficientMods;
-                if (ImGui.Checkbox("Auto-restore backups for inefficient mods", ref autoRestore))
-                {
-                    _configService.Current.AutoRestoreInefficientMods = autoRestore;
-                    _configService.Save();
-                }
-                ShowTooltip("Automatically restore the latest backup when a mod becomes larger after conversion.");
-
-                // Overview table: show file rows toggle
-                bool showFiles = _configService.Current.ShowModFilesInOverview;
-                if (ImGui.Checkbox("Show file rows in overview", ref showFiles))
-                {
-                    _configService.Current.ShowModFilesInOverview = showFiles;
-                    _configService.Save();
-                }
-                ShowTooltip("Display individual files under each mod in the overview table.");
-
-                // Include hidden mod textures on convert (UI-only)
-                bool includeHiddenOnConvert = _configService.Current.IncludeHiddenModTexturesOnConvert;
-                if (ImGui.Checkbox("Include hidden mod textures on Convert (UI)", ref includeHiddenOnConvert))
-                {
-                    _configService.Current.IncludeHiddenModTexturesOnConvert = includeHiddenOnConvert;
-                    _configService.Save();
-                }
-                ShowTooltip("When converting via ShrinkU UI, include non-visible mod textures even if filters hide them. Sphene automatic behavior remains unchanged.");
-
-                // Full mod backup toggle
-                bool fullModBackup = _configService.Current.EnableFullModBackupBeforeConversion;
-                ImGui.PushFont(UiBuilder.IconFont);
-                ImGui.TextColored(ShrinkUColors.WarningLight, FontAwesomeIcon.ExclamationTriangle.ToIconString());
-                ImGui.PopFont();
-                ImGui.SameLine();
-                if (ImGui.Checkbox("Backup whole mod before conversion (.pmp)", ref fullModBackup))
-                {
-                    _configService.Current.EnableFullModBackupBeforeConversion = fullModBackup;
-                    _configService.Save();
-                }
-                ShowTooltipWrapped("Creates a full mod PMP archive that Penumbra can install. Experimental feature: enabling this may increase disk usage and conversion time, and restores will overwrite the mod to the archived state. Large mods or unusual layouts may fail or require manual cleanup. If anything unexpected happens, please enable and provide Debug logs to help diagnose issues.", 420f);
-                ImGui.SameLine();
-                ImGui.TextColored(ShrinkUColors.WarningLight, "[Experimental]");
-
-                // Prefer PMP restore when available
+                ImGui.Separator();
+                ImGui.TextColored(ShrinkUColors.Accent, "Restore");
+                ImGui.Spacing();
                 var preferPmp = _configService.Current.PreferPmpRestoreWhenAvailable;
                 if (ImGui.Checkbox("Prefer PMP restore when available", ref preferPmp))
                 {
                     _configService.Current.PreferPmpRestoreWhenAvailable = preferPmp;
-                    // When PMP is preferred, disable texture backups unless explicitly enabled by user
                     if (preferPmp)
                     {
                         _configService.Current.EnableBackupBeforeConversion = false;
@@ -199,8 +167,35 @@ public sealed class SettingsUI : Window
                     _logger.LogDebug("Updated preference for PMP restore: {value}", preferPmp);
                 }
                 ShowTooltipWrapped("If a full-mod PMP backup exists, ShrinkU will prefer restoring it. When this is enabled, per-texture backups are disabled unless you explicitly enable 'Enable backup before conversion'.", 420f);
+                bool autoRestore = _configService.Current.AutoRestoreInefficientMods;
+                if (ImGui.Checkbox("Auto-restore backups for inefficient mods", ref autoRestore))
+                {
+                    _configService.Current.AutoRestoreInefficientMods = autoRestore;
+                    _configService.Save();
+                }
+                ShowTooltip("Automatically restore the latest backup when a mod becomes larger after conversion.");
 
-                // Backup folder selection
+                ImGui.Separator();
+                ImGui.TextColored(ShrinkUColors.Accent, "Overview");
+                ImGui.Spacing();
+                bool showFiles = _configService.Current.ShowModFilesInOverview;
+                if (ImGui.Checkbox("Show file rows in overview", ref showFiles))
+                {
+                    _configService.Current.ShowModFilesInOverview = showFiles;
+                    _configService.Save();
+                }
+                ShowTooltip("Display individual files under each mod in the overview table.");
+                bool includeHiddenOnConvert = _configService.Current.IncludeHiddenModTexturesOnConvert;
+                if (ImGui.Checkbox("Include hidden mod textures on Convert (UI)", ref includeHiddenOnConvert))
+                {
+                    _configService.Current.IncludeHiddenModTexturesOnConvert = includeHiddenOnConvert;
+                    _configService.Save();
+                }
+                ShowTooltip("When converting via ShrinkU UI, include non-visible mod textures even if filters hide them. Sphene automatic behavior remains unchanged.");
+
+                ImGui.Separator();
+                ImGui.TextColored(ShrinkUColors.Accent, "Storage");
+                ImGui.Spacing();
                 ImGui.Text("Backup Folder:");
                 ImGui.SameLine();
                 ImGui.TextWrapped(_configService.Current.BackupFolderPath);
