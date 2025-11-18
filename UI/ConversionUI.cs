@@ -31,6 +31,7 @@ public sealed class ConversionUI : Window, IDisposable
     private bool _leftWidthInitialized = false;
     private bool _leftWidthDirty = false;
     private float _scannedFirstColWidth = 28f;
+    private float _scannedFileColWidth = 0f;
     private float _scannedSizeColWidth = 85f;
     private float _scannedCompressedColWidth = 85f;
     private float _scannedActionColWidth = 60f;
@@ -2781,10 +2782,11 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
         if (ImGui.BeginTable("ScannedFilesTable", 5, flags))
         {
             ImGui.TableSetupColumn("", ImGuiTableColumnFlags.WidthFixed, _scannedFirstColWidth);
-            ImGui.TableSetupColumn("File", ImGuiTableColumnFlags.WidthStretch);
+            ImGui.TableSetupColumn("Mod", ImGuiTableColumnFlags.WidthStretch);
             ImGui.TableSetupColumn("Compressed", ImGuiTableColumnFlags.WidthFixed, _scannedCompressedColWidth);
             ImGui.TableSetupColumn("Uncompressed", ImGuiTableColumnFlags.WidthFixed, _scannedSizeColWidth);
             ImGui.TableSetupColumn("Action", ImGuiTableColumnFlags.WidthFixed, _scannedActionColWidth);
+            ImGui.TableSetupScrollFreeze(0, 1);
             ImGui.TableHeadersRow();
             // Reset zebra row index at the start of table drawing
             _zebraRowIndex = 0;
@@ -2805,6 +2807,10 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                 _configService.Save();
                 _logger.LogDebug($"Saved first column width: {currentFirstWidth}px");
             }
+
+            ImGui.TableSetColumnIndex(1);
+            var currentFileWidth = ImGui.GetColumnWidth();
+            _scannedFileColWidth = currentFileWidth;
 
             // Track Compressed column width every frame (session only)
             ImGui.TableSetColumnIndex(2);
@@ -2959,7 +2965,7 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
             if (ImGui.BeginTable("ScannedFilesTotals", 5, footerFlags))
             {
                 ImGui.TableSetupColumn("", ImGuiTableColumnFlags.WidthFixed, _scannedFirstColWidth);
-                ImGui.TableSetupColumn("File", ImGuiTableColumnFlags.WidthStretch);
+                ImGui.TableSetupColumn("Mod", ImGuiTableColumnFlags.WidthFixed, _scannedFileColWidth);
                 ImGui.TableSetupColumn("Compressed", ImGuiTableColumnFlags.WidthFixed, _scannedCompressedColWidth);
                 ImGui.TableSetupColumn("Uncompressed", ImGuiTableColumnFlags.WidthFixed, _scannedSizeColWidth);
                 ImGui.TableSetupColumn("Action", ImGuiTableColumnFlags.WidthFixed, _scannedActionColWidth);
