@@ -43,6 +43,7 @@ public sealed class Plugin : IDalamudPlugin
         var modStateService = new ModStateService(_logger, _configService);
         _backupService = new TextureBackupService(_logger, _configService, _penumbraIpc, modStateService);
         _conversionService = new TextureConversionService(_logger, _penumbraIpc, _backupService, _configService, modStateService);
+        var cacheService = new ConversionCacheService(_logger, _configService, _backupService, modStateService);
         _shrinkuIpc = new ShrinkU.Interop.ShrinkUIpc(pluginInterface, _logger, _backupService, _penumbraIpc, _configService, _conversionService);
 
         // Ensure standalone ShrinkU is not marked as controlled by Sphene
@@ -64,7 +65,7 @@ public sealed class Plugin : IDalamudPlugin
 
         // Create UI windows and register
         _settingsUi = new SettingsUI(_logger, _configService, _conversionService, _backupService, () => _releaseChangelogUi.IsOpen = true);
-        _conversionUi = new ConversionUI(_logger, _configService, _conversionService, _backupService, () => _settingsUi.IsOpen = true, modStateService);
+        _conversionUi = new ConversionUI(_logger, _configService, _conversionService, _backupService, () => _settingsUi.IsOpen = true, modStateService, cacheService);
         _firstRunUi = new FirstRunSetupUI(_logger, _configService)
         {
             OnCompleted = () =>

@@ -33,21 +33,11 @@ public sealed class FirstRunSetupUI : Window
         _selectedFolder = _configService.Current.BackupFolderPath ?? string.Empty;
     }
 
-    // Helper to show a tooltip when the last item is hovered (also when disabled)
-    private static void ShowTooltip(string text)
-    {
-        if (ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
-            ImGui.SetTooltip(text);
-    }
+    
 
     public override void Draw()
     {
-        // Subtle accent header bar for branding
-        var headerStart = ImGui.GetCursorScreenPos();
-        var headerWidth = Math.Max(1f, ImGui.GetContentRegionAvail().X);
-        var headerEnd = new Vector2(headerStart.X + headerWidth, headerStart.Y + 2f);
-        ImGui.GetWindowDrawList().AddRectFilled(headerStart, headerEnd, ShrinkUColors.ToImGuiColor(ShrinkUColors.Accent));
-        ImGui.Dummy(new Vector2(0, 6f));
+        UiHeader.DrawAccentHeaderBar();
 
         ImGui.TextColored(ShrinkUColors.Accent, "Welcome to ShrinkU");
         ImGui.Separator();
@@ -74,7 +64,7 @@ public sealed class FirstRunSetupUI : Window
         ImGui.PushStyleColor(ImGuiCol.ButtonActive, ShrinkUColors.AccentActive);
         ImGui.PushStyleColor(ImGuiCol.Text, ShrinkUColors.ButtonTextOnAccent);
         var browseClicked = ImGui.Button("Browse...");
-        ShowTooltip("Choose the folder where backups will be stored.");
+        UiTooltip.Show("Choose the folder where backups will be stored.");
         if (browseClicked)
         {
             OpenFolderPicker();
@@ -84,7 +74,7 @@ public sealed class FirstRunSetupUI : Window
         if (!canOpen)
             ImGui.BeginDisabled();
         var openClicked = ImGui.Button("Open Folder");
-        ShowTooltip("Open the selected backup folder in Explorer.");
+        UiTooltip.Show("Open the selected backup folder in Explorer.");
         if (openClicked)
         {
             TryOpenFolder(_selectedFolder);
@@ -103,7 +93,7 @@ public sealed class FirstRunSetupUI : Window
         ImGui.PushStyleColor(ImGuiCol.ButtonActive, ShrinkUColors.AccentActive);
         ImGui.PushStyleColor(ImGuiCol.Text, ShrinkUColors.ButtonTextOnAccent);
         var completeClicked = ImGui.Button("Complete Setup");
-        ShowTooltip("Finish setup and enable the plugin.");
+        UiTooltip.Show("Finish setup and enable the plugin.");
         if (completeClicked)
         {
             try

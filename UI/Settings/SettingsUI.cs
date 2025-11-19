@@ -85,41 +85,11 @@ public sealed class SettingsUI : Window
         catch { }
     }
 
-    // Helper to show a tooltip when the last item is hovered (also when disabled)
-    private static void ShowTooltip(string text)
-    {
-        if (!ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
-            return;
-        ImGui.BeginTooltip();
-        ImGui.PushStyleColor(ImGuiCol.Text, ShrinkUColors.TooltipText);
-        ImGui.TextUnformatted(text);
-        ImGui.PopStyleColor();
-        ImGui.EndTooltip();
-    }
-
-    // Helper to show a width-constrained tooltip with wrapped text
-    private static void ShowTooltipWrapped(string text, float maxWidth)
-    {
-        if (!ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
-            return;
-
-        ImGui.BeginTooltip();
-        ImGui.PushStyleColor(ImGuiCol.Text, ShrinkUColors.TooltipText);
-        ImGui.PushTextWrapPos(ImGui.GetCursorPosX() + maxWidth);
-        ImGui.TextUnformatted(text);
-        ImGui.PopTextWrapPos();
-        ImGui.PopStyleColor();
-        ImGui.EndTooltip();
-    }
+    
 
     public override void Draw()
     {
-        // Subtle accent header bar for branding
-        var headerStart = ImGui.GetCursorScreenPos();
-        var headerWidth = Math.Max(1f, ImGui.GetContentRegionAvail().X);
-        var headerEnd = new Vector2(headerStart.X + headerWidth, headerStart.Y + 2f);
-        ImGui.GetWindowDrawList().AddRectFilled(headerStart, headerEnd, ShrinkUColors.ToImGuiColor(ShrinkUColors.Accent));
-        ImGui.Dummy(new Vector2(0, 6f));
+        UiHeader.DrawAccentHeaderBar();
 
         if (ImGui.BeginTabBar("SettingsTabs"))
         {
@@ -135,7 +105,7 @@ public sealed class SettingsUI : Window
                 {
                     try { _openReleaseNotes?.Invoke(); } catch { }
                 }
-                ShowTooltip("Open recent changes and highlights for ShrinkU.");
+                UiTooltip.Show("Open recent changes and highlights for ShrinkU.");
                 ImGui.Spacing();
                 ImGui.TextColored(ShrinkUColors.Accent, "Processing");
                 ImGui.Spacing();
@@ -173,7 +143,7 @@ public sealed class SettingsUI : Window
                     }
                     ImGui.EndCombo();
                 }
-                ShowTooltip("Select how ShrinkU processes textures. When integrated with Sphene, only the Sphene-handled automatic mode is available.");
+                UiTooltip.Show("Select how ShrinkU processes textures. When integrated with Sphene, only the Sphene-handled automatic mode is available.");
 
                 ImGui.Separator();
                 ImGui.TextColored(ShrinkUColors.Accent, "Backups");
@@ -219,7 +189,7 @@ public sealed class SettingsUI : Window
                     }
                     ImGui.EndCombo();
                 }
-                ShowTooltipWrapped("Backup Modes:\n- Texture: smaller storage; per-file restore\n- Full Mod: larger storage; safer full restore\n- Both: combines advantages; highest storage use", 420f);
+                UiTooltip.ShowWrapped("Backup Modes:\n- Texture: smaller storage; per-file restore\n- Full Mod: larger storage; safer full restore\n- Both: combines advantages; highest storage use", 420f);
 
                 ImGui.Separator();
                 ImGui.TextColored(ShrinkUColors.Accent, "Restore");
@@ -235,14 +205,14 @@ public sealed class SettingsUI : Window
                     _configService.Save();
                     _logger.LogDebug("Updated preference for PMP restore: {value}", preferPmp);
                 }
-                ShowTooltipWrapped("If a full-mod PMP backup exists, ShrinkU will prefer restoring it. When this is enabled, per-texture backups are disabled unless you explicitly enable 'Enable backup before conversion'.", 420f);
+                UiTooltip.ShowWrapped("If a full-mod PMP backup exists, ShrinkU will prefer restoring it. When this is enabled, per-texture backups are disabled unless you explicitly enable 'Enable backup before conversion'.", 420f);
                 bool autoRestore = _configService.Current.AutoRestoreInefficientMods;
                 if (ImGui.Checkbox("Auto-restore backups for inefficient mods", ref autoRestore))
                 {
                     _configService.Current.AutoRestoreInefficientMods = autoRestore;
                     _configService.Save();
                 }
-                ShowTooltip("Automatically restore the latest backup when a mod becomes larger after conversion.");
+                UiTooltip.Show("Automatically restore the latest backup when a mod becomes larger after conversion.");
 
                 ImGui.Separator();
                 ImGui.TextColored(ShrinkUColors.Accent, "Overview");
@@ -253,14 +223,14 @@ public sealed class SettingsUI : Window
                     _configService.Current.ShowModFilesInOverview = showFiles;
                     _configService.Save();
                 }
-                ShowTooltip("Display individual files under each mod in the overview table.");
+                UiTooltip.Show("Display individual files under each mod in the overview table.");
                 bool includeHiddenOnConvert = _configService.Current.IncludeHiddenModTexturesOnConvert;
                 if (ImGui.Checkbox("Include hidden mod textures on Convert (UI)", ref includeHiddenOnConvert))
                 {
                     _configService.Current.IncludeHiddenModTexturesOnConvert = includeHiddenOnConvert;
                     _configService.Save();
                 }
-                ShowTooltip("When converting via ShrinkU UI, include non-visible mod textures even if filters hide them. Sphene automatic behavior remains unchanged.");
+                UiTooltip.Show("When converting via ShrinkU UI, include non-visible mod textures even if filters hide them. Sphene automatic behavior remains unchanged.");
 
                 ImGui.Separator();
                 ImGui.TextColored(ShrinkUColors.Accent, "Storage");
@@ -273,14 +243,14 @@ public sealed class SettingsUI : Window
                 ImGui.PushStyleColor(ImGuiCol.ButtonActive, ShrinkUColors.AccentActive);
                 ImGui.PushStyleColor(ImGuiCol.Text, ShrinkUColors.ButtonTextOnAccent);
                 var browseClicked = ImGui.Button("Browse...");
-                ShowTooltip("Choose where ShrinkU stores its backup files.");
+                UiTooltip.Show("Choose where ShrinkU stores its backup files.");
                 if (browseClicked)
                 {
                     OpenFolderPicker();
                 }
                 ImGui.SameLine();
                 var openClicked = ImGui.Button("Open Folder");
-                ShowTooltip("Open the current backup folder in Explorer.");
+                UiTooltip.Show("Open the current backup folder in Explorer.");
                 if (openClicked)
                 {
                     try
@@ -351,7 +321,7 @@ public sealed class SettingsUI : Window
                 ImGui.SetNextItemWidth(220f);
                 // Add tag on Enter and show it below in the list
                 var enterAdd = ImGui.InputTextWithHint("##excludedTagsAdd", "type tag and press Enter", ref _excludedTagsInput, 128, ImGuiInputTextFlags.EnterReturnsTrue);
-                ShowTooltip("Type a tag and press Enter to add it.");
+                UiTooltip.Show("Type a tag and press Enter to add it.");
                 if (enterAdd)
                 {
                     var tag = NormalizeTag(_excludedTagsInput);
