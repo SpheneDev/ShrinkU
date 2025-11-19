@@ -477,7 +477,7 @@ public sealed class TextureBackupService
         }
     }
     // Restore a specific full-mod PMP backup by replacing the mod directory contents
-    public async Task<bool> RestorePmpAsync(string modFolderName, string pmpPath, IProgress<(string, int, int)>? progress, CancellationToken token, bool cleanupBackupsAfterRestore = true)
+    public async Task<bool> RestorePmpAsync(string modFolderName, string pmpPath, IProgress<(string, int, int)>? progress, CancellationToken token, bool cleanupBackupsAfterRestore = true, bool deregisterDuringRestore = false)
     {
         try
         {
@@ -517,54 +517,102 @@ public sealed class TextureBackupService
             }
 
             var backupOldDir = Path.Combine(parentDir, modFolderName + $".__restore_old__{DateTime.Now:yyyyMMdd_HHmmss}");
-
-            // Move current mod dir aside for rollback safety
             bool movedOld = false;
-            try
+            bool backupCreated = false;
+            if (deregisterDuringRestore)
             {
-                try { await Task.Delay(300, token).ConfigureAwait(false); } catch { }
-                try { _penumbraIpc.ClosePenumbraWindow(); } catch { }
-                try { _penumbraIpc.RemoveModDirectory(modFolderName); } catch { }
-                try { await _penumbraIpc.WaitForModDeletedAsync(modFolderName, 5000).ConfigureAwait(false); } catch { }
-                if (Directory.Exists(modAbs))
+                try
                 {
-                    Directory.Move(modAbs!, backupOldDir);
-                    movedOld = true;
+                    try { await Task.Delay(300, token).ConfigureAwait(false); } catch { }
+                    try { _penumbraIpc.ClosePenumbraWindow(); } catch { }
+                    try { _penumbraIpc.RemoveModDirectory(modFolderName); } catch { }
+                    try { await _penumbraIpc.WaitForModDeletedAsync(modFolderName, 5000).ConfigureAwait(false); } catch { }
+                    if (Directory.Exists(modAbs))
+                    {
+                        Directory.Move(modAbs!, backupOldDir);
+                        movedOld = true;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning("Failed to move existing mod dir {dir}: {error}", modAbs, ex.Message);
+                }
+
+                try { Directory.CreateDirectory(modAbs!); } catch { }
+
+                try
+                {
+                    await Task.Run(() =>
+                    {
+                        if (token.IsCancellationRequested) return;
+                        CopyDirectoryRecursive(tempDir, modAbs!);
+                    }, token).ConfigureAwait(false);
+                    progress?.Report(($"Restored {modFolderName}", 2, 2));
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError("Failed to restore PMP for {mod}: {error}", modFolderName, ex.Message);
+                    try { if (Directory.Exists(modAbs)) Directory.Delete(modAbs, true); } catch { }
+                    if (movedOld)
+                    {
+                        try { Directory.Move(backupOldDir, modAbs!); } catch { }
+                    }
+                    return false;
                 }
             }
-            catch (Exception ex)
+            else
             {
-                _logger.LogWarning("Failed to move existing mod dir {dir}: {error}", modAbs, ex.Message);
-            }
-
-            // Create fresh mod directory
-            try { Directory.CreateDirectory(modAbs!); } catch { }
-
-            // Step 2: copy extracted contents into mod directory
-            try
-            {
-                await Task.Run(() =>
+                try
                 {
-                    if (token.IsCancellationRequested) return;
-                    CopyDirectoryRecursive(tempDir, modAbs!);
-                }, token).ConfigureAwait(false);
-                progress?.Report(($"Restored {modFolderName}", 2, 2));
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError("Failed to restore PMP for {mod}: {error}", modFolderName, ex.Message);
-                // Rollback: delete new dir and move back old
-                try { if (Directory.Exists(modAbs)) Directory.Delete(modAbs, true); } catch { }
-                if (movedOld)
-                {
-                    try { Directory.Move(backupOldDir, modAbs!); } catch { }
+                    if (Directory.Exists(modAbs))
+                    {
+                        try { Directory.CreateDirectory(backupOldDir); } catch { }
+                        await Task.Run(() =>
+                        {
+                            if (token.IsCancellationRequested) return;
+                            CopyDirectoryRecursive(modAbs!, backupOldDir);
+                        }, token).ConfigureAwait(false);
+                        backupCreated = true;
+                    }
                 }
-                return false;
+                catch (Exception ex)
+                {
+                    _logger.LogWarning("Failed to backup existing mod dir {dir}: {error}", modAbs, ex.Message);
+                }
+
+                try
+                {
+                    try { Directory.CreateDirectory(modAbs!); } catch { }
+                    await Task.Run(() =>
+                    {
+                        if (token.IsCancellationRequested) return;
+                        ClearDirectory(modAbs!);
+                        CopyDirectoryRecursive(tempDir, modAbs!);
+                    }, token).ConfigureAwait(false);
+                    progress?.Report(($"Restored {modFolderName}", 2, 2));
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError("Failed to restore PMP for {mod}: {error}", modFolderName, ex.Message);
+                    if (backupCreated)
+                    {
+                        try
+                        {
+                            await Task.Run(() =>
+                            {
+                                ClearDirectory(modAbs!);
+                                CopyDirectoryRecursive(backupOldDir, modAbs!);
+                            }, token).ConfigureAwait(false);
+                        }
+                        catch { }
+                    }
+                    return false;
+                }
             }
 
             // Cleanup temp and old backup dir
             try { Directory.Delete(tempDir, true); } catch { }
-            if (movedOld)
+            if (movedOld || backupCreated)
             {
                 try { Directory.Delete(backupOldDir, true); } catch { }
             }
@@ -639,22 +687,28 @@ public sealed class TextureBackupService
                     _logger.LogWarning("Post-restore cleanup encountered an error for {mod}: {error}", modFolderName, ex.Message);
                 }
             }
-            try { _penumbraIpc.AddModDirectory(modFolderName); } catch { }
-            try { await _penumbraIpc.WaitForModAddedAsync(modFolderName, 5000).ConfigureAwait(false); } catch { }
-            try
+            if (deregisterDuringRestore)
             {
-                var desiredPath = originalPathInfo.FullPath;
-                if (!string.IsNullOrWhiteSpace(desiredPath))
+                try { _penumbraIpc.AddModDirectory(modFolderName); } catch { }
+                try { await _penumbraIpc.WaitForModAddedAsync(modFolderName, 5000).ConfigureAwait(false); } catch { }
+                try
                 {
-                    _penumbraIpc.SetModPath(modFolderName, desiredPath);
-                    await _penumbraIpc.WaitForModPathAsync(modFolderName, desiredPath, 5000).ConfigureAwait(false);
+                    var desiredPath = originalPathInfo.FullPath;
+                    if (!string.IsNullOrWhiteSpace(desiredPath))
+                    {
+                        _penumbraIpc.SetModPath(modFolderName, desiredPath);
+                        await _penumbraIpc.WaitForModPathAsync(modFolderName, desiredPath, 5000).ConfigureAwait(false);
+                    }
                 }
+                catch { }
             }
-            catch { }
             try { await Task.Delay(400, token).ConfigureAwait(false); } catch { }
             try { _penumbraIpc.NudgeModDetection(modFolderName); } catch { }
             try { await Task.Delay(800, token).ConfigureAwait(false); } catch { }
-            try { _penumbraIpc.OpenModInPenumbra(modFolderName, null); } catch { }
+            if (deregisterDuringRestore)
+            {
+                try { _penumbraIpc.OpenModInPenumbra(modFolderName, null); } catch { }
+            }
             try
             {
                 var hasTex = await HasBackupForModAsync(modFolderName).ConfigureAwait(false);
@@ -669,6 +723,19 @@ public sealed class TextureBackupService
         {
             _logger.LogWarning("RestorePmp failed for {mod}: unexpected error: {error}", modFolderName, ex.Message);
             return false;
+        }
+    }
+
+    private static void ClearDirectory(string dir)
+    {
+        if (!Directory.Exists(dir)) return;
+        foreach (var file in Directory.EnumerateFiles(dir, "*", SearchOption.TopDirectoryOnly))
+        {
+            try { File.Delete(file); } catch { }
+        }
+        foreach (var sub in Directory.EnumerateDirectories(dir, "*", SearchOption.TopDirectoryOnly))
+        {
+            try { Directory.Delete(sub, true); } catch { }
         }
     }
 
@@ -1388,7 +1455,7 @@ public sealed class TextureBackupService
             var latestPmp = Directory.EnumerateFiles(modDir, "mod_backup_*.pmp").OrderByDescending(f => f).FirstOrDefault();
             if (string.IsNullOrEmpty(latestPmp) || !File.Exists(latestPmp))
                 return Task.FromResult(false);
-            return RestorePmpAsync(modFolderName, latestPmp, progress, token, cleanupBackupsAfterRestore: false);
+            return RestorePmpAsync(modFolderName, latestPmp, progress, token, cleanupBackupsAfterRestore: false, deregisterDuringRestore: true);
         }
         catch { return Task.FromResult(false); }
     }
