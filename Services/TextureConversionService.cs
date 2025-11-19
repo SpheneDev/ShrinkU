@@ -262,10 +262,27 @@ public TextureConversionService(ILogger logger, PenumbraIpc penumbraIpc, Texture
                 var modFileTotal = modTextures.Count;
                 OnModProgress?.Invoke((modName, currentModIndex, totalMods, modFileTotal));
 
-                if (_configService.Current.EnableBackupBeforeConversion || _configService.Current.EnableFullModBackupBeforeConversion)
+                if (_configService.Current.EnableFullModBackupBeforeConversion)
                 {
-                    // Finish backup for the current mod before honoring cancellation.
-                    await _backupService.BackupAsync(modTextures, _backupProgress, token).ConfigureAwait(false);
+                    bool hasPmp = false;
+                    try { hasPmp = await _backupService.HasPmpBackupForModAsync(modName).ConfigureAwait(false); } catch { }
+                    if (!hasPmp)
+                    {
+                        await _backupService.CreateFullModBackupAsync(modName, _backupProgress, token).ConfigureAwait(false);
+                    }
+                }
+
+                var mustEnsureBackup = _configService.Current.AutomaticHandledBySphene
+                    || _configService.Current.EnableBackupBeforeConversion
+                    || _configService.Current.EnableFullModBackupBeforeConversion;
+                if (mustEnsureBackup)
+                {
+                    bool hasBackup = false;
+                    try { hasBackup = await _backupService.HasBackupForModAsync(modName).ConfigureAwait(false); } catch { }
+                    if (!hasBackup)
+                    {
+                        await _backupService.BackupAsync(modTextures, _backupProgress, token).ConfigureAwait(false);
+                    }
                 }
 
                 var isLastPlannedMod = currentModIndex == totalMods;

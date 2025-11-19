@@ -716,7 +716,10 @@ public sealed class TextureBackupService
                 _modStateService.UpdateBackupFlags(modFolderName, hasTex, hasPmp);
             }
             catch { }
-            try { _modStateService.UpdateInstalledButNotConverted(modFolderName, true); } catch { }
+            if (deregisterDuringRestore)
+            {
+                try { _modStateService.UpdateInstalledButNotConverted(modFolderName, true); } catch { }
+            }
             return true;
         }
         catch (Exception ex)
