@@ -75,16 +75,20 @@ public sealed class ConversionUI : Window, IDisposable
     private HashSet<string> _excludedTagsNormalized = new(StringComparer.OrdinalIgnoreCase);
     // Expanded state tracking for table view
     private HashSet<string> _expandedMods = new(StringComparer.OrdinalIgnoreCase);
+    private HashSet<string> _selectedEmptyMods = new(StringComparer.OrdinalIgnoreCase);
     
     private void TryStartPmpRestoreNewest(string mod, string refreshReason, bool removeCacheBefore, bool setCompletionStatus, bool resetConversionAfter, bool resetRestoreAfter, bool closePopup)
     {
+        if (_configService.Current.TextureProcessingMode == TextureProcessingMode.Automatic)
+        {
+            SetStatus("Automatic mode active: restoring is disabled.");
+            return;
+        }
         List<string>? pmpFiles = null;
         try { pmpFiles = _backupService.GetPmpBackupsForModAsync(mod).GetAwaiter().GetResult(); } catch { }
         if (pmpFiles == null || pmpFiles.Count == 0)
         {
-            _statusMessage = $"No .pmp backups found for {mod}";
-            _statusMessageAt = DateTime.UtcNow;
-            _statusPersistent = false;
+            SetStatus($"No .pmp backups found for {mod}");
             return;
         }
         var latest = pmpFiles.OrderByDescending(f => f).First();
@@ -96,12 +100,9 @@ public sealed class ConversionUI : Window, IDisposable
         }
 
         _running = true;
-        ResetConversionProgress();
-        ResetRestoreProgress();
+        ResetBothProgress();
         _currentRestoreMod = mod;
-        _statusMessage = $"PMP restore requested for {mod}: {display}";
-        _statusMessageAt = DateTime.UtcNow;
-        _statusPersistent = false;
+        SetStatus($"PMP restore requested for {mod}: {display}");
         var progress = new Progress<(string, int, int)>(e => { _currentTexture = e.Item1; _backupIndex = e.Item2; _backupTotal = e.Item3; _currentRestoreModIndex = e.Item2; _currentRestoreModTotal = e.Item3; });
         _ = _backupService.RestorePmpAsync(mod, latest, progress, CancellationToken.None)
             .ContinueWith(t =>
@@ -110,11 +111,7 @@ public sealed class ConversionUI : Window, IDisposable
                 try { _backupService.RedrawPlayer(); } catch { }
                 if (setCompletionStatus)
                 {
-                    _uiThreadActions.Enqueue(() => {
-                        _statusMessage = success ? $"PMP restore completed for {mod}: {display}" : $"PMP restore failed for {mod}: {display}";
-                        _statusMessageAt = DateTime.UtcNow;
-                        _statusPersistent = false;
-                    });
+                    _uiThreadActions.Enqueue(() => { SetStatus(success ? $"PMP restore completed for {mod}: {display}" : $"PMP restore failed for {mod}: {display}"); });
                 }
                 RefreshScanResults(true, refreshReason);
                 TriggerMetricsRefresh();
@@ -180,6 +177,54 @@ public sealed class ConversionUI : Window, IDisposable
         try { _cachedPerModSavings.Remove(mod); } catch { }
         try { _cachedPerModOriginalSizes.Remove(mod); } catch { }
     }
+
+    private void ClearAllCaches()
+    {
+        try { _modsWithBackupCache.Clear(); } catch { }
+        try { _modsWithTexBackupCache.Clear(); } catch { }
+        try { _modsWithPmpCache.Clear(); } catch { }
+        try { _modsPmpMetaCache.Clear(); } catch { }
+        try { _modsZipMetaCache.Clear(); } catch { }
+        try { _cachedPerModSavings.Clear(); } catch { }
+        try { _cachedPerModOriginalSizes.Clear(); } catch { }
+        _needsUIRefresh = true;
+
+        try
+        {
+            _perModSavingsTask = _backupService.ComputePerModSavingsAsync();
+            _perModSavingsTask.ContinueWith(ps =>
+            {
+                if (ps.Status == TaskStatus.RanToCompletion && ps.Result != null)
+                {
+                    _cachedPerModSavings = ps.Result;
+                    _needsUIRefresh = true;
+                }
+            }, TaskScheduler.Default);
+        }
+        catch { }
+    }
+
+    private void OnModeChanged()
+    {
+        _disableActionsUntilUtc = DateTime.UtcNow.AddSeconds(1);
+        _needsUIRefresh = true;
+        try
+        {
+            if (_perModSavingsTask == null || _perModSavingsTask.IsCompleted)
+            {
+                _perModSavingsTask = _backupService.ComputePerModSavingsAsync();
+                _perModSavingsTask.ContinueWith(ps =>
+                {
+                    if (ps.Status == TaskStatus.RanToCompletion && ps.Result != null)
+                    {
+                        _cachedPerModSavings = ps.Result;
+                        _needsUIRefresh = true;
+                    }
+                }, TaskScheduler.Default);
+            }
+        }
+        catch { }
+    }
     private bool ActionsDisabled()
     {
         return _running || _conversionService.IsConverting || DateTime.UtcNow < _disableActionsUntilUtc;
@@ -202,6 +247,7 @@ public sealed class ConversionUI : Window, IDisposable
     // Cache file sizes to avoid per-frame disk I/O in UI rendering
     private readonly ConcurrentDictionary<string, long> _fileSizeCache = new(StringComparer.OrdinalIgnoreCase);
     private Task? _fileSizeWarmupTask = null;
+    private readonly ModStateService _modStateService;
     // Queue for marshalling UI state updates onto the main thread during Draw
     private readonly ConcurrentQueue<Action> _uiThreadActions = new();
     // Cancellation for restore operations
@@ -245,11 +291,13 @@ public sealed class ConversionUI : Window, IDisposable
     private readonly Action<string> _onExternalTexturesChanged;
     private readonly Action _onExcludedTagsUpdated;
     private readonly Action _onPlayerResourcesChanged;
+    private bool _reinstallInProgress = false;
+    private string _reinstallMod = string.Empty;
     // Track last external conversion/restore notification to surface UI indicator
     private DateTime _lastExternalChangeAt = DateTime.MinValue;
     private string _lastExternalChangeReason = string.Empty;
 
-public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureConversionService conversionService, TextureBackupService backupService, Action? openSettings = null)
+public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureConversionService conversionService, TextureBackupService backupService, Action? openSettings = null, ModStateService? modStateService = null)
         : base("ShrinkU###ShrinkUConversionUI")
     {
         _logger = logger;
@@ -257,10 +305,11 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
         _conversionService = conversionService;
         _backupService = backupService;
         _openSettings = openSettings;
+        _modStateService = modStateService ?? new ModStateService(_logger, _configService);
 
         SizeConstraints = new WindowSizeConstraints
         {
-            MinimumSize = new Vector2(520, 300),
+            MinimumSize = new Vector2(820, 400),
             MaximumSize = new Vector2(1920, 1080),
         };
 
@@ -498,15 +547,49 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
                 }, TaskScheduler.Default);
             }
 
-            // Force a heavy scan to fully refresh candidate textures after mods changed
-            if (_scanInProgress)
+            lock (_modsChangedLock)
             {
-                _needsUIRefresh = true;
-                return;
+                try { _modsChangedDebounceCts?.Cancel(); } catch { }
+                try { _modsChangedDebounceCts?.Dispose(); } catch { }
+                _modsChangedDebounceCts = new CancellationTokenSource();
+                var token = _modsChangedDebounceCts.Token;
+                _modsChangedDebounceSeq++;
+                var mySeq = _modsChangedDebounceSeq;
+                Task.Run(async () =>
+                {
+                    try
+                    {
+                        await Task.Delay(1200, token).ConfigureAwait(false);
+                        if (token.IsCancellationRequested)
+                            return;
+                        lock (_modsChangedLock)
+                        {
+                            if (mySeq != _modsChangedDebounceSeq)
+                                return;
+                        }
+                        var currentFolders = await _conversionService.GetAllModFoldersAsync().ConfigureAwait(false);
+                        bool modsChanged;
+                        lock (_modsChangedLock)
+                        {
+                            var snapshot = _knownModFolders;
+                            modsChanged = currentFolders.Count != snapshot.Count
+                                || currentFolders.Any(f => !snapshot.Contains(f));
+                        }
+                        if (!modsChanged)
+                        {
+                            _uiThreadActions.Enqueue(() => { _needsUIRefresh = true; });
+                            return;
+                        }
+                        if (_scanInProgress)
+                            return;
+                        _scanInProgress = true;
+                        await Task.Delay(300, token).ConfigureAwait(false);
+                        RefreshScanResults(true, "penumbra-mods-changed");
+                    }
+                    catch (TaskCanceledException) { }
+                    catch { }
+                });
             }
-            _scanInProgress = true;
-            RefreshScanResults(true, "penumbra-mods-changed");
-            _needsUIRefresh = true;
         };
         _conversionService.OnPenumbraModsChanged += _onPenumbraModsChanged;
 
@@ -641,7 +724,7 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
         _conversionService.OnPlayerResourcesChanged += _onPlayerResourcesChanged;
 
         // Heavy refresh only on actual mod add/delete, coalesced with trailing edge
-        _onPenumbraModAdded = _ =>
+        _onPenumbraModAdded = dir =>
         {
             lock (_modsChangedLock)
             {
@@ -687,6 +770,7 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
                                 _modsPmpCheckInFlight.Clear();
                                 _logger.LogDebug("Suppressed heavy scan: mod folders unchanged after ModAdded");
                                 _needsUIRefresh = true;
+                                RefreshModState(dir, "mod-added-targeted");
                             });
                             return;
                         }
@@ -694,6 +778,7 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
                             return;
                         _scanInProgress = true;
                         _logger.LogDebug("Heavy scan triggered: ModAdded detected changes");
+                        await Task.Delay(500, token).ConfigureAwait(false);
                         RefreshScanResults(true, "mod-added");
                     }
                     catch (TaskCanceledException) { }
@@ -719,7 +804,7 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
                 {
                     try
                     {
-                        await Task.Delay(1000, token).ConfigureAwait(false);
+                        await Task.Delay(1200, token).ConfigureAwait(false);
                         if (token.IsCancellationRequested)
                             return;
                         // Ensure only the latest scheduled task runs (trailing edge)
@@ -749,6 +834,7 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
                                 _logger.LogDebug("Suppressed heavy scan: mod folders unchanged after ModDeleted");
                                 _needsUIRefresh = true;
                                 ClearModCaches(modDir);
+                                RefreshModState(modDir, "mod-deleted-targeted");
                             });
                             return;
                         }
@@ -756,6 +842,7 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
                             return;
                         _scanInProgress = true;
                         _logger.LogDebug("Heavy scan triggered: ModDeleted detected changes");
+                        await Task.Delay(500, token).ConfigureAwait(false);
                         RefreshScanResults(true, "mod-deleted");
                     }
                     catch (TaskCanceledException) { }
@@ -923,7 +1010,7 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
             : 85f;
         _scannedActionColWidth = _configService.Current.ScannedFilesActionColWidth > 0f
             ? _configService.Current.ScannedFilesActionColWidth
-            : 60f;
+            : 120f;
 
         // If Penumbra Used Only is enabled from config, preload used files on first open
         if (_filterPenumbraUsedOnly && _penumbraUsedFiles.Count == 0 && !_loadingPenumbraUsed)
@@ -949,8 +1036,13 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
     // Helper to show a tooltip when the last item is hovered (also when disabled)
     private static void ShowTooltip(string text)
     {
-        if (ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
-            ImGui.SetTooltip(text);
+        if (!ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
+            return;
+        ImGui.BeginTooltip();
+        ImGui.PushStyleColor(ImGuiCol.Text, ShrinkUColors.TooltipText);
+        ImGui.TextUnformatted(text);
+        ImGui.PopStyleColor();
+        ImGui.EndTooltip();
     }
 
     public override void Draw()
@@ -968,21 +1060,7 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
         {
             try { action(); } catch { }
         }
-        if (!string.IsNullOrEmpty(_statusMessage))
-        {
-            var recent = (DateTime.UtcNow - _statusMessageAt).TotalSeconds <= 10.0;
-            if (_statusPersistent || recent)
-            {
-                ImGui.TextWrapped(_statusMessage);
-                ImGui.Separator();
-            }
-            else
-            {
-                _statusMessage = string.Empty;
-                _statusPersistent = false;
-                _statusMessageAt = DateTime.MinValue;
-            }
-        }
+        // Status message will be rendered in the progress area instead of here
 
         // Check if UI needs refresh due to async data updates
         if (_needsUIRefresh)
@@ -1100,9 +1178,7 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
                         if (token.IsCancellationRequested)
                             break;
 
-                        if (!_filterPenumbraUsedOnly)
-                            continue;
-                        if (_loadingPenumbraUsed)
+                        if (!_filterPenumbraUsedOnly || _loadingPenumbraUsed)
                             continue;
 
                         _loadingPenumbraUsed = true;
@@ -1172,9 +1248,8 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
             if (ImGui.Selectable("Manual", mode == TextureProcessingMode.Manual))
             {
                 _configService.Current.TextureProcessingMode = TextureProcessingMode.Manual;
-                _configService.Current.AutomaticHandledBySphene = false;
-                _configService.Current.AutomaticControllerName = string.Empty;
                 _configService.Save();
+                try { OnModeChanged(); TriggerMetricsRefresh(); } catch { }
             }
 
             if (spheneIntegrated)
@@ -1186,6 +1261,7 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
                     _configService.Current.AutomaticHandledBySphene = true;
                     _configService.Current.AutomaticControllerName = string.IsNullOrWhiteSpace(controller) ? "Sphene" : controller;
                     _configService.Save();
+                    try { OnModeChanged(); TriggerMetricsRefresh(); } catch { }
                 }
             }
             else
@@ -1196,6 +1272,7 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
                     _configService.Current.AutomaticHandledBySphene = false;
                     _configService.Current.AutomaticControllerName = string.Empty;
                     _configService.Save();
+                    try { OnModeChanged(); TriggerMetricsRefresh(); } catch { }
                 }
             }
             ImGui.EndCombo();
@@ -1463,14 +1540,57 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
             ImGui.TableSetColumnIndex(0);
             var fullPath = string.IsNullOrEmpty(pathPrefix) ? name : $"{pathPrefix}/{name}";
             var folderFiles = CollectFilesRecursive(child, visibleByMod);
-            bool folderSelected = folderFiles.Count > 0 && folderFiles.All(f => _selectedTextures.Contains(f));
-            ImGui.BeginDisabled(folderFiles.Count == 0);
+            bool folderSelected = (folderFiles.Count > 0 && folderFiles.All(f => _selectedTextures.Contains(f)))
+                || (folderFiles.Count == 0 && child.Mods.Count > 0 && child.Mods.All(m => _selectedEmptyMods.Contains(m)));
+            ImGui.BeginDisabled(folderFiles.Count == 0 && child.Mods.Count == 0);
             if (ImGui.Checkbox($"##cat-sel-{fullPath}", ref folderSelected))
             {
                 if (folderSelected)
-                    foreach (var f in folderFiles) _selectedTextures.Add(f);
+                {
+                    var automaticMode = _configService.Current.TextureProcessingMode == TextureProcessingMode.Automatic;
+                    foreach (var mod in child.Mods)
+                    {
+                        if (!visibleByMod.TryGetValue(mod, out var files))
+                            continue;
+                        var isOrphan = _orphaned.Any(x => string.Equals(x.ModFolderName, mod, StringComparison.OrdinalIgnoreCase));
+                        var totalAll = _scannedByMod.TryGetValue(mod, out var allModFiles2) && allModFiles2 != null ? allModFiles2.Count : files.Count;
+                        var convertedAll = 0;
+                        var hasBackupM = GetOrQueryModBackup(mod);
+                        if (hasBackupM && totalAll > 0)
+                        {
+                            if (_modPaths.TryGetValue(mod, out var modRoot2) && !string.IsNullOrWhiteSpace(modRoot2))
+                            {
+                                if (_cachedPerModOriginalSizes.TryGetValue(mod, out var map2) && map2 != null && map2.Count > 0 && allModFiles2 != null)
+                                {
+                                    foreach (var f in allModFiles2)
+                                    {
+                                        try
+                                        {
+                                            var rel = Path.GetRelativePath(modRoot2, f).Replace('\\', '/');
+                                            if (map2.ContainsKey(rel)) convertedAll++;
+                                        }
+                                        catch { }
+                                    }
+                                }
+                            }
+                            if (convertedAll == 0 && _cachedPerModSavings.TryGetValue(mod, out var s2) && s2 != null && s2.ComparedFiles > 0)
+                                convertedAll = Math.Min(s2.ComparedFiles, totalAll);
+                        }
+                        var disableCheckbox = automaticMode && !isOrphan && (convertedAll >= totalAll);
+                        if (totalAll == 0)
+                        {
+                            _selectedEmptyMods.Add(mod);
+                            continue;
+                        }
+                        if (!disableCheckbox)
+                            foreach (var f in files) _selectedTextures.Add(f);
+                    }
+                }
                 else
+                {
                     foreach (var f in folderFiles) _selectedTextures.Remove(f);
+                    foreach (var mod in child.Mods) _selectedEmptyMods.Remove(mod);
+                }
             }
             ImGui.EndDisabled();
             if (folderFiles.Count == 0 && ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
@@ -1551,34 +1671,14 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
 
                     ImGui.TableNextRow();
                     ImGui.TableSetBgColor(ImGuiTableBgTarget.RowBg0, ImGui.GetColorU32((_zebraRowIndex++ % 2 == 0) ? _zebraEvenColor : _zebraOddColor));
-                    ImGui.TableSetColumnIndex(0);
                     var isOrphan = _orphaned.Any(x => string.Equals(x.ModFolderName, mod, StringComparison.OrdinalIgnoreCase));
                     var hasBackup = GetOrQueryModBackup(mod);
                     var excluded = (!hasBackup && !isOrphan && IsModExcludedByTags(mod));
                     var isNonConvertible = files.Count == 0;
-                    
-                    if (!isNonConvertible)
-                    {
-                        bool modSelected = files.All(f => _selectedTextures.Contains(f));
-                        ImGui.BeginDisabled(excluded);
-                        if (ImGui.Checkbox($"##modsel-{mod}", ref modSelected))
-                        {
-                            if (modSelected)
-                                foreach (var f in files) _selectedTextures.Add(f);
-                            else
-                                foreach (var f in files) _selectedTextures.Remove(f);
-
-                        }
-                        ImGui.EndDisabled();
-                        if (excluded && ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
-                            ImGui.SetTooltip("Mod excluded by tags");
-                        else
-                            ShowTooltip("Toggle selection for all files in this mod.");
-                    }
 
                     ImGui.TableSetColumnIndex(1);
                     ImGui.SetCursorPosX(ImGui.GetCursorPosX() + (depth + 1) * indentStep);
-                    var nodeFlags = ImGuiTreeNodeFlags.SpanFullWidth | ImGuiTreeNodeFlags.NoTreePushOnOpen;
+                    var nodeFlags = ImGuiTreeNodeFlags.SpanFullWidth | ImGuiTreeNodeFlags.NoTreePushOnOpen | ImGuiTreeNodeFlags.FramePadding;
                     if (!_configService.Current.ShowModFilesInOverview)
                         nodeFlags |= ImGuiTreeNodeFlags.Bullet | ImGuiTreeNodeFlags.Leaf;
                     long modVisibleSize = 0;
@@ -1616,7 +1716,8 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                     var header = hasBackup
                         ? $"{ResolveModDisplayName(mod)} ({convertedAll}/{totalAll})"
                         : $"{ResolveModDisplayName(mod)} ({totalAll})";
-                    bool open = ImGui.TreeNodeEx($"##mod-{mod}", nodeFlags);
+                    bool open = ImGui.TreeNodeEx($"{header}##mod-{mod}", nodeFlags);
+                    var headerHoveredTree = ImGui.IsItemHovered();
                     if (ImGui.BeginPopupContextItem($"modctx-{mod}"))
                     {
                         if (ImGui.MenuItem("Open in Penumbra"))
@@ -1624,9 +1725,50 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                             var display = ResolveModDisplayName(mod);
                             _conversionService.OpenModInPenumbra(mod, display);
                         }
+                        if (ImGui.MenuItem("Backup Mod (PMP)"))
+                        {
+                            _running = true;
+                            ResetBothProgress();
+                            SetStatus($"Creating full mod backup (PMP) for {mod}");
+                            var progress = new Progress<(string,int,int)>(e => { _currentTexture = e.Item1; _backupIndex = e.Item2; _backupTotal = e.Item3; });
+                            _ = _backupService.CreateFullModBackupAsync(mod, progress, CancellationToken.None)
+                                .ContinueWith(t =>
+                                {
+                                    var success = t.Status == TaskStatus.RanToCompletion && t.Result;
+                                    _uiThreadActions.Enqueue(() => { SetStatus(success ? $"Backup completed for {mod}" : $"Backup failed for {mod}"); });
+                                    try { RefreshModState(mod, "manual-pmp-backup"); } catch { }
+                                    TriggerMetricsRefresh();
+                                    _ = _backupService.HasBackupForModAsync(mod).ContinueWith(bt =>
+                                    {
+                                        if (bt.Status == TaskStatus.RanToCompletion)
+                                        {
+                                            bool any = bt.Result;
+                                            try { any = any || _backupService.HasPmpBackupForModAsync(mod).GetAwaiter().GetResult(); } catch { }
+                                            _modsWithBackupCache[mod] = any;
+                                            _modsWithPmpCache[mod] = true;
+                                        }
+                                    });
+                                    _uiThreadActions.Enqueue(() => { _running = false; ResetBothProgress(); });
+                                }, TaskScheduler.Default);
+                        }
+                        if (ImGui.MenuItem("Open Backup Folder"))
+                        {
+                            try
+                            {
+                                var path = _configService.Current.BackupFolderPath;
+                                if (!string.IsNullOrWhiteSpace(path))
+                                {
+                                    var modDir = Path.Combine(path, mod);
+                                    try { Directory.CreateDirectory(modDir); } catch { }
+                                    try { Process.Start(new ProcessStartInfo("explorer.exe", modDir) { UseShellExecute = true }); } catch { }
+                                }
+                            }
+                            catch { }
+                        }
                         ImGui.EndPopup();
                     }
                     ImGui.SameLine();
+                    ImGui.AlignTextToFramePadding();
                     ImGui.PushFont(UiBuilder.IconFont);
                     if (_modEnabledStates.TryGetValue(mod, out var stIcon))
                     {
@@ -1639,10 +1781,36 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                         ImGui.TextUnformatted(FontAwesomeIcon.Cube.ToIconString());
                     }
                     ImGui.PopFont();
-                    ImGui.SameLine();
-                    ImGui.TextUnformatted(header);
-                    // Rich mod tooltip with helpful information
-                    if (ImGui.IsItemHovered())
+
+                    // Draw checkbox after computing convertibility (auto-mode disables when fully converted or no files)
+                    ImGui.TableSetColumnIndex(0);
+                    bool modSelected = isNonConvertible
+                        ? _selectedEmptyMods.Contains(mod)
+                        : files.All(f => _selectedTextures.Contains(f));
+                    var automaticMode = _configService.Current.TextureProcessingMode == TextureProcessingMode.Automatic;
+                    var disableCheckbox = excluded || (automaticMode && !isOrphan && (convertedAll >= totalAll));
+                    ImGui.BeginDisabled(disableCheckbox);
+                    if (ImGui.Checkbox($"##modsel-{mod}", ref modSelected))
+                    {
+                        if (isNonConvertible)
+                        {
+                            if (modSelected) _selectedEmptyMods.Add(mod); else _selectedEmptyMods.Remove(mod);
+                        }
+                        else
+                        {
+                            if (modSelected)
+                                foreach (var f in files) _selectedTextures.Add(f);
+                            else
+                                foreach (var f in files) _selectedTextures.Remove(f);
+                        }
+                    }
+                    ImGui.EndDisabled();
+                    if (disableCheckbox && ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
+                        ImGui.SetTooltip(automaticMode ? "Automatic mode: mod cannot be selected for conversion." : "Mod excluded by tags");
+                    else
+                        ShowTooltip("Toggle selection for all files in this mod.");
+                    // Rich mod tooltip with helpful information (triggered when hovering header)
+                    if (headerHoveredTree)
                     {
                         bool hasPmp = GetOrQueryModPmp(mod);
                         long origBytesTip = GetOrQueryModOriginalTotal(mod);
@@ -1752,14 +1920,23 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                     // Uncompressed and Compressed columns for mod row in folder view
                     ImGui.TableSetColumnIndex(3);
                     _cachedPerModSavings.TryGetValue(mod, out var modStats);
-                    long modOriginalBytes = GetOrQueryModOriginalTotal(mod);
-                    DrawRightAlignedSize(modOriginalBytes);
+                    var stateSnap = _modStateService.Snapshot();
+                    stateSnap.TryGetValue(mod, out var modState);
+                    long modOriginalBytes = modState != null && modState.ComparedFiles > 0 ? modState.OriginalBytes : GetOrQueryModOriginalTotal(mod);
+                    var hideStatsForNoTextures = totalAll == 0;
+                    if (hideStatsForNoTextures)
+                        ImGui.TextUnformatted("");
+                    else
+                        DrawRightAlignedSize(modOriginalBytes);
 
                     ImGui.TableSetColumnIndex(2);
                     long modCurrentBytes = 0;
-                    if (!isOrphan && hasBackup && modStats != null && modStats.CurrentBytes > 0)
-                        modCurrentBytes = modStats.CurrentBytes;
-                    if (modCurrentBytes <= 0)
+                    var hideCompressed = modState != null && modState.InstalledButNotConverted;
+                    if (!isOrphan && hasBackup && modState != null && modState.CurrentBytes > 0 && !hideCompressed)
+                        modCurrentBytes = modState.CurrentBytes;
+                    if (hideStatsForNoTextures)
+                        ImGui.TextUnformatted("");
+                    else if (modCurrentBytes <= 0)
                         DrawRightAlignedTextColored("-", _compressedTextColor);
                     else
                     {
@@ -1772,33 +1949,47 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                     ImGui.BeginDisabled(ActionsDisabled());
                     if (hasBackup || files.Count > 0 || isOrphan)
                     {
-                        var manualMode = _configService.Current.TextureProcessingMode != TextureProcessingMode.Automatic;
                         var hasTexBackup = GetOrQueryModTextureBackup(mod);
+                        var hasPmpBackup = GetOrQueryModPmp(mod);
                         bool doInstall = isOrphan;
                         bool doRestore = false;
+                        bool doReinstall = false;
                         bool doConvert = false;
                         if (doInstall)
                         {
                             doRestore = false;
                             doConvert = false;
                         }
-                        else if (manualMode)
-                        {
-                            if (convertedAll > 0 && hasTexBackup)
-                                doRestore = true;
-                            else
-                                doConvert = true;
-                        }
                         else
                         {
-                            if (hasBackup)
-                                doRestore = true;
+                            var anyBackup = hasBackup || hasTexBackup || hasPmpBackup;
+                            if (isNonConvertible)
+                            {
+                                doConvert = false;
+                                if (hasPmpBackup && anyBackup)
+                                {
+                                    doReinstall = true;
+                                    doRestore = false;
+                                }
+                                else
+                                {
+                                    doRestore = anyBackup;
+                                }
+                            }
                             else
-                                doConvert = true;
+                            {
+                                doRestore = anyBackup;
+                                doConvert = !anyBackup;
+                                if (modState != null && modState.InstalledButNotConverted)
+                                {
+                                    doConvert = true;
+                                    doRestore = false;
+                                }
+                            }
                         }
                         var actionLabel = doInstall
                             ? $"Install##install-{mod}"
-                            : (doRestore ? $"Restore##restore-{mod}" : $"Convert##convert-{mod}");
+                            : (doReinstall ? $"Reinstall##reinstall-{mod}" : (doRestore ? $"Restore##restore-{mod}" : $"Convert##convert-{mod}"));
 
                         if (doInstall)
                         {
@@ -1814,6 +2005,13 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                             ImGui.PushStyleColor(ImGuiCol.ButtonActive, ShrinkUColors.RestoreButtonActive);
                             ImGui.PushStyleColor(ImGuiCol.Text, ShrinkUColors.ButtonTextOnAccent);
                         }
+                        else if (doReinstall)
+                        {
+                            ImGui.PushStyleColor(ImGuiCol.Button, ShrinkUColors.ReinstallButton);
+                            ImGui.PushStyleColor(ImGuiCol.ButtonHovered, ShrinkUColors.ReinstallButtonHovered);
+                            ImGui.PushStyleColor(ImGuiCol.ButtonActive, ShrinkUColors.ReinstallButtonActive);
+                            ImGui.PushStyleColor(ImGuiCol.Text, ShrinkUColors.ButtonTextOnAccent);
+                        }
                         else
                         {
                             ImGui.PushStyleColor(ImGuiCol.Button, ShrinkUColors.ConvertButton);
@@ -1822,10 +2020,10 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                             ImGui.PushStyleColor(ImGuiCol.Text, ShrinkUColors.ButtonTextOnAccent);
                         }
 
-                        var automaticMode = _configService.Current.TextureProcessingMode == TextureProcessingMode.Automatic;
+                        var autoMode = _configService.Current.TextureProcessingMode == TextureProcessingMode.Automatic;
                         bool modHasUsed = false;
                         try { modHasUsed = files.Any(f => _penumbraUsedFiles.Contains(f)); } catch { }
-                        var restoreDisabledByAuto = automaticMode && doRestore && modHasUsed;
+                        var restoreDisabledByAuto = autoMode && (doRestore || doReinstall);
                         bool canInstall = true;
                         if (doInstall)
                         {
@@ -1837,13 +2035,12 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                             catch { canInstall = false; }
                         }
                         ImGui.BeginDisabled(excluded || (!isOrphan && restoreDisabledByAuto) || (isOrphan && !canInstall) || ActionsDisabled());
-                        if (ImGui.Button(actionLabel))
+                        if (ImGui.Button(actionLabel, new Vector2(60, 0)))
                         {
                             if (doInstall)
                             {
                                 _running = true;
-                                ResetConversionProgress();
-                                ResetRestoreProgress();
+                                ResetBothProgress();
                                 var progress = new Progress<(string, int, int)>(e => { _currentTexture = e.Item1; _backupIndex = e.Item2; _backupTotal = e.Item3; });
                                 _ = _backupService.ReinstallModFromLatestPmpAsync(mod, progress, CancellationToken.None)
                                     .ContinueWith(t =>
@@ -1851,9 +2048,7 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                                         var success = t.Status == TaskStatus.RanToCompletion && t.Result;
                                         _uiThreadActions.Enqueue(() =>
                                         {
-                                            _statusMessage = success ? $"Install completed for {mod}" : $"Install failed for {mod}";
-                                            _statusMessageAt = DateTime.UtcNow;
-                                            _statusPersistent = false;
+                                            SetStatus(success ? $"Install completed for {mod}" : $"Install failed for {mod}");
                                             _disableActionsUntilUtc = DateTime.UtcNow.AddSeconds(2);
                                             _needsUIRefresh = true;
                                             ClearModCaches(mod);
@@ -1875,6 +2070,55 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                                         _needsUIRefresh = true;
                                     }, TaskScheduler.Default);
                             }
+                            else if (doReinstall)
+                            {
+                                _running = true;
+                                ResetBothProgress();
+                                _reinstallInProgress = true;
+                                _reinstallMod = mod;
+                                var progress = new Progress<(string, int, int)>(e => { _currentTexture = e.Item1; _backupIndex = e.Item2; _backupTotal = e.Item3; });
+                                _ = _backupService.ReinstallModFromLatestPmpAsync(mod, progress, CancellationToken.None)
+                                    .ContinueWith(t =>
+                                    {
+                                        var success = t.Status == TaskStatus.RanToCompletion && t.Result;
+                                        _uiThreadActions.Enqueue(() =>
+                                        {
+                                            SetStatus(success ? $"Reinstall completed for {mod}" : $"Reinstall failed for {mod}");
+                                            _disableActionsUntilUtc = DateTime.UtcNow.AddSeconds(2);
+                                            _needsUIRefresh = true;
+                                            ClearModCaches(mod);
+                                            RefreshModState(mod, "reinstall-completed");
+                                            Task.Run(async () =>
+                                            {
+                                                try
+                                                {
+                                                    await Task.Delay(1200).ConfigureAwait(false);
+                                                    _uiThreadActions.Enqueue(() =>
+                                                    {
+                                                        RefreshScanResults(true, "reinstall-completed");
+                                                    });
+                                                }
+                                                catch { }
+                                            });
+                                        });
+                                        
+                                        Task.Run(async () =>
+                                        {
+                                            try
+                                            {
+                                                await Task.Delay(1200).ConfigureAwait(false);
+                                                _conversionService.OpenModInPenumbra(mod, null);
+                                            }
+                                            catch { }
+                                        });
+                                        try { RefreshModState(mod, "reinstall-folder-view"); } catch { }
+                                        try { TriggerMetricsRefresh(); } catch { }
+                                        _reinstallInProgress = false;
+                                        _reinstallMod = string.Empty;
+                                        ResetBothProgress();
+                                        _running = false;
+                                    }, TaskScheduler.Default);
+                            }
                             else if (doRestore)
                             {
                                 // Prefer PMP restore when available if configured; otherwise show context menu
@@ -1892,8 +2136,7 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                                     _running = true;
                                     _modsWithBackupCache.TryRemove(mod, out _);
                                     // Reset progress state for restore and initialize current restore mod
-                                    ResetConversionProgress();
-                                    ResetRestoreProgress();
+                                    ResetBothProgress();
                                     _currentRestoreMod = mod;
                                     var progress = new Progress<(string, int, int)>(e => { _currentTexture = e.Item1; _backupIndex = e.Item2; _backupTotal = e.Item3; _currentRestoreModIndex = e.Item2; _currentRestoreModTotal = e.Item3; });
                                             _ = _backupService.RestoreLatestForModAsync(mod, progress, CancellationToken.None)
@@ -1957,18 +2200,20 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                                 });
                             }
                         }
-                        // Tooltip for action button (Convert/Restore)
+                        // Tooltip for action button (Install/Reinstall/Restore/Convert)
                         ImGui.PopStyleColor(1);
                         if (ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
                         {
                             if (excluded)
                                 ImGui.SetTooltip("Mod excluded by tags");
                             else if (restoreDisabledByAuto)
-                                ImGui.SetTooltip("Automatic mode active: restoring currently used textures is disabled.");
+                                ImGui.SetTooltip("Automatic mode active: restoring is disabled.");
                             else
                             {
                                 if (doInstall)
                                     ShowTooltip("Install mod from PMP backup.");
+                                else if (doReinstall)
+                                    ShowTooltip("Reinstall mod from PMP backup.");
                                 else if (doRestore)
                                     ShowTooltip("Restore backups for this mod.");
                                 else
@@ -1980,17 +2225,10 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                                 }
                             }
                         }
-                        // Enhance Restore button when PMP is available: accent stripe and context menu
+                        // Enhance Restore button when PMP is available: context menu
                         var hasPmp = GetOrQueryModPmp(mod);
-                        if (doRestore && hasPmp)
+                        if (doRestore && hasPmp && !automaticMode)
                         {
-                            // Draw a small accent stripe on the right side of the last button to suggest two-tone
-                            var min = ImGui.GetItemRectMin();
-                            var max = ImGui.GetItemRectMax();
-                            var stripeWidth = MathF.Min(12f, MathF.Max(6f, (max.X - min.X) * 0.12f));
-                            var dl = ImGui.GetWindowDrawList();
-                            dl.AddRectFilled(new Vector2(max.X - stripeWidth, min.Y), new Vector2(max.X, max.Y), ImGui.GetColorU32(ShrinkUColors.Accent));
-
                             // Right-click opens named popup; left-click also opens it above
                             if (ImGui.BeginPopupContextItem($"restorectx-{mod}"))
                             {
@@ -2000,6 +2238,8 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                             // Unified context menu popup
                             if (ImGui.BeginPopup($"restorectx-{mod}"))
                             {
+                                var hasTexBk = GetOrQueryModTextureBackup(mod);
+                                ImGui.BeginDisabled(!hasTexBk);
                                 if (ImGui.MenuItem("Restore textures"))
                                 {
                                     _running = true;
@@ -2007,9 +2247,7 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                                     ResetConversionProgress();
                                     ResetRestoreProgress();
                                     _currentRestoreMod = mod;
-                                    _statusMessage = $"Restore requested for {mod}";
-                                    _statusMessageAt = DateTime.UtcNow;
-                                    _statusPersistent = false;
+                                    SetStatus($"Restore requested for {mod}");
                                     var progress = new Progress<(string, int, int)>(e => { _currentTexture = e.Item1; _backupIndex = e.Item2; _backupTotal = e.Item3; _currentRestoreModIndex = e.Item2; _currentRestoreModTotal = e.Item3; });
                                     _logger.LogInformation("Restore requested for {mod}", mod);
                                     _ = _backupService.RestoreLatestForModAsync(mod, progress, CancellationToken.None)
@@ -2022,11 +2260,7 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                                             _logger.LogInformation(success
                                                 ? "Restore completed for {mod}"
                                                 : "Restore failed for {mod}", mod);
-                                            _uiThreadActions.Enqueue(() => {
-                                                _statusMessage = success ? $"Restore completed for {mod}" : $"Restore failed for {mod}";
-                                                _statusMessageAt = DateTime.UtcNow;
-                                                _statusPersistent = false;
-                                            });
+                                            _uiThreadActions.Enqueue(() => { SetStatus(success ? $"Restore completed for {mod}" : $"Restore failed for {mod}"); });
                                             RefreshModState(mod, "restore-folder-view-context");
                                             TriggerMetricsRefresh();
                                             _perModSavingsTask = _backupService.ComputePerModSavingsAsync();
@@ -2051,6 +2285,8 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                                             ImGui.CloseCurrentPopup();
                                         });
                                 }
+                                ImGui.EndDisabled();
+                                if (!hasTexBk) ShowTooltip("No texture backups available for this mod.");
                                 // restore PMP if available
                                 if (ImGui.MenuItem("Restore PMP"))
                                 {
@@ -2063,6 +2299,47 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                         }
                         ImGui.PopStyleColor(3);
                         ImGui.EndDisabled();
+
+                    }
+                    // Always show Backup button, even when mod has no convertible textures
+                    if (isNonConvertible && !hasBackup)
+                    {
+                        ImGui.PushStyleColor(ImGuiCol.Button, ShrinkUColors.Accent);
+                        ImGui.PushStyleColor(ImGuiCol.ButtonHovered, ShrinkUColors.AccentHovered);
+                        ImGui.PushStyleColor(ImGuiCol.ButtonActive, ShrinkUColors.AccentActive);
+                        ImGui.PushStyleColor(ImGuiCol.Text, ShrinkUColors.ButtonTextOnAccent);
+                        var backupLabel = $"Backup##backup-{mod}";
+                        ImGui.BeginDisabled(isOrphan || ActionsDisabled());
+                    if (ImGui.Button(backupLabel, new Vector2(60, 0)))
+                    {
+                        _running = true;
+                        ResetBothProgress();
+                        SetStatus($"Creating full mod backup (PMP) for {mod}");
+                        var progress = new Progress<(string,int,int)>(e => { _currentTexture = e.Item1; _backupIndex = e.Item2; _backupTotal = e.Item3; });
+                        _ = _backupService.CreateFullModBackupAsync(mod, progress, CancellationToken.None)
+                            .ContinueWith(t =>
+                            {
+                                var success = t.Status == TaskStatus.RanToCompletion && t.Result;
+                                _uiThreadActions.Enqueue(() => { SetStatus(success ? $"Backup completed for {mod}" : $"Backup failed for {mod}"); });
+                                try { RefreshModState(mod, "manual-pmp-backup-button"); } catch { }
+                                TriggerMetricsRefresh();
+                                _ = _backupService.HasBackupForModAsync(mod).ContinueWith(bt =>
+                                {
+                                    if (bt.Status == TaskStatus.RanToCompletion)
+                                    {
+                                        bool any = bt.Result;
+                                        try { any = any || _backupService.HasPmpBackupForModAsync(mod).GetAwaiter().GetResult(); } catch { }
+                                        _modsWithBackupCache[mod] = any;
+                                        _modsWithPmpCache[mod] = true;
+                                    }
+                                });
+                                _uiThreadActions.Enqueue(() => { _running = false; ResetBothProgress(); });
+                            }, TaskScheduler.Default);
+                    }
+                        ImGui.EndDisabled();
+                        if (ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
+                            ShowTooltip("Create a full mod backup (PMP).");
+                        ImGui.PopStyleColor(4);
                     }
                     ImGui.EndDisabled();
 
@@ -2449,10 +2726,44 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
 
     private void DrawProgress()
     {
+        // Expire old status messages and decide whether to show
+        if (!string.IsNullOrEmpty(_statusMessage))
+        {
+            var recent = (DateTime.UtcNow - _statusMessageAt).TotalSeconds <= 10.0;
+            if (!_statusPersistent && !recent)
+            {
+                _statusMessage = string.Empty;
+                _statusPersistent = false;
+                _statusMessageAt = DateTime.MinValue;
+            }
+        }
+        var showStatus = !string.IsNullOrEmpty(_statusMessage);
+        if (_reinstallInProgress)
+        {
+            var displayMod = _reinstallMod;
+            if (!string.IsNullOrEmpty(displayMod) && _modDisplayNames.TryGetValue(displayMod, out var dn))
+                displayMod = dn;
+            var avail0 = ImGui.GetContentRegionAvail();
+            var barSize0 = new Vector2(Math.Max(120f, avail0.X), 0);
+            ImGui.Text($"Reinstalling: {displayMod}");
+            ImGui.PushStyleColor(ImGuiCol.PlotHistogram, ShrinkUColors.Accent);
+            ImGui.PushStyleColor(ImGuiCol.FrameBg, ShrinkUColors.WithAlpha(ShrinkUColors.Accent, 0.15f));
+            ImGui.ProgressBar(_backupTotal > 0 ? (float)_backupIndex / _backupTotal : 0f, barSize0, _backupTotal > 0 ? $"{_backupIndex}/{_backupTotal}" : string.Empty);
+            ImGui.PopStyleColor(2);
+            ImGui.Text($"Current File: {_currentTexture}");
+            return;
+        }
         // Show progress whenever a conversion or restore is active, even if triggered externally
         if (!(_running || _conversionService.IsConverting || _backupTotal > 0 || _convertedCount > 0))
         {
-            ImGui.Text("Waiting...");
+            if (showStatus)
+            {
+                ImGui.TextWrapped(_statusMessage);
+            }
+            else
+            {
+                ImGui.Text("Waiting...");
+            }
             return;
         }
         var avail = ImGui.GetContentRegionAvail();
@@ -2462,6 +2773,11 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
         var isRestoring = !string.IsNullOrEmpty(_currentRestoreMod) || (_restoreCancellationTokenSource != null && _backupTotal > 0);
         if (isRestoring)
         {
+            if (showStatus)
+            {
+                ImGui.TextWrapped(_statusMessage);
+                ImGui.Dummy(new Vector2(0, 4f));
+            }
             var displayMod = _currentRestoreMod;
             if (!string.IsNullOrEmpty(displayMod) && _modDisplayNames.TryGetValue(displayMod, out var dn))
                 displayMod = dn;
@@ -2482,6 +2798,11 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
         }
 
         // Overall mods progress: completed mods plus fraction of current mod
+        if (showStatus)
+        {
+            ImGui.TextWrapped(_statusMessage);
+            ImGui.Dummy(new Vector2(0, 4f));
+        }
         if (_totalMods > 0)
         {
             var completedMods = Math.Max(_currentModIndex - 1, 0);
@@ -2535,6 +2856,19 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
         _backupTotal = 0;
     }
 
+    private void ResetBothProgress()
+    {
+        ResetConversionProgress();
+        ResetRestoreProgress();
+    }
+
+    private void SetStatus(string msg, bool persistent = false)
+    {
+        _statusMessage = msg;
+        _statusMessageAt = DateTime.UtcNow;
+        _statusPersistent = persistent;
+    }
+
     private void OpenFolderPicker()
     {
         try
@@ -2563,7 +2897,7 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
         ImGui.TextColored(ShrinkUColors.Accent, "Scanned Files Overview");
         ImGui.Dummy(new Vector2(0, 6f));
         ImGui.SetWindowFontScale(1.0f);
-        ImGui.SetNextItemWidth(180f);
+        ImGui.SetNextItemWidth(186f);
         ImGui.InputTextWithHint("##scanFilter", "Filter by file or mod", ref _scanFilter, 128);
         ShowTooltip("Filter results by file name or mod name.");
         
@@ -2571,8 +2905,30 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
         // Place sort controls below the search text field for better horizontal space
         
         ImGui.SameLine();
-        if (ImGui.Checkbox("Penumbra Used Only", ref _filterPenumbraUsedOnly))
+        var h = ImGui.GetFrameHeight();
+        var w = h + ImGui.GetStyle().ItemInnerSpacing.X * 2f;
+        ImGui.PushFont(UiBuilder.IconFont);
+        if (_filterPenumbraUsedOnly)
         {
+            ImGui.PushStyleColor(ImGuiCol.Button, ShrinkUColors.Accent);
+            ImGui.PushStyleColor(ImGuiCol.ButtonHovered, ShrinkUColors.AccentHovered);
+            ImGui.PushStyleColor(ImGuiCol.ButtonActive, ShrinkUColors.AccentActive);
+            ImGui.PushStyleColor(ImGuiCol.Text, ShrinkUColors.ButtonTextOnAccent);
+        }
+        ImGui.PushStyleVar(ImGuiStyleVar.ButtonTextAlign, new Vector2(0.9f, 0.5f));
+        var usedOnlyClicked = ImGui.Button(FontAwesomeIcon.Eye.ToIconString(), new Vector2(w, h));
+        ImGui.PopStyleVar();
+        if (_filterPenumbraUsedOnly)
+        {
+            ImGui.PopStyleColor();
+            ImGui.PopStyleColor();
+            ImGui.PopStyleColor();
+            ImGui.PopStyleColor();
+        }
+        ImGui.PopFont();
+        if (usedOnlyClicked)
+        {
+            _filterPenumbraUsedOnly = !_filterPenumbraUsedOnly;
             _configService.Current.FilterPenumbraUsedOnly = _filterPenumbraUsedOnly;
             _configService.Save();
             if (_filterPenumbraUsedOnly && _penumbraUsedFiles.Count == 0 && !_loadingPenumbraUsed)
@@ -2590,18 +2946,58 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
             }
         }
         ShowTooltip("Show only textures currently used by Penumbra.");
-        // Suppress transient loading text to avoid layout flicker near checkboxes
+
         ImGui.SameLine();
-        if (ImGui.Checkbox("Hide non-convertible mods", ref _filterNonConvertibleMods))
+        ImGui.PushFont(UiBuilder.IconFont);
+        if (_filterNonConvertibleMods)
         {
+            ImGui.PushStyleColor(ImGuiCol.Button, ShrinkUColors.Accent);
+            ImGui.PushStyleColor(ImGuiCol.ButtonHovered, ShrinkUColors.AccentHovered);
+            ImGui.PushStyleColor(ImGuiCol.ButtonActive, ShrinkUColors.AccentActive);
+            ImGui.PushStyleColor(ImGuiCol.Text, ShrinkUColors.ButtonTextOnAccent);
+        }
+        ImGui.PushStyleVar(ImGuiStyleVar.ButtonTextAlign, new Vector2(0.9f, 0.5f));
+        var hideNonConvertibleClicked = ImGui.Button(FontAwesomeIcon.Ban.ToIconString(), new Vector2(w, h));
+        ImGui.PopStyleVar();
+        if (_filterNonConvertibleMods)
+        {
+            ImGui.PopStyleColor();
+            ImGui.PopStyleColor();
+            ImGui.PopStyleColor();
+            ImGui.PopStyleColor();
+        }
+        ImGui.PopFont();
+        if (hideNonConvertibleClicked)
+        {
+            _filterNonConvertibleMods = !_filterNonConvertibleMods;
             _configService.Current.FilterNonConvertibleMods = _filterNonConvertibleMods;
             _configService.Save();
         }
         ShowTooltip("Hide mods without convertible textures.");
 
         ImGui.SameLine();
-        if (ImGui.Checkbox("Hide mods larger after conversion", ref _filterInefficientMods))
+        ImGui.PushFont(UiBuilder.IconFont);
+        if (_filterInefficientMods)
         {
+            ImGui.PushStyleColor(ImGuiCol.Button, ShrinkUColors.Accent);
+            ImGui.PushStyleColor(ImGuiCol.ButtonHovered, ShrinkUColors.AccentHovered);
+            ImGui.PushStyleColor(ImGuiCol.ButtonActive, ShrinkUColors.AccentActive);
+            ImGui.PushStyleColor(ImGuiCol.Text, ShrinkUColors.ButtonTextOnAccent);
+        }
+        ImGui.PushStyleVar(ImGuiStyleVar.ButtonTextAlign, new Vector2(0.9f, 0.5f));
+        var hideInefficientClicked = ImGui.Button(FontAwesomeIcon.ExclamationTriangle.ToIconString(), new Vector2(w, h));
+        ImGui.PopStyleVar();
+        if (_filterInefficientMods)
+        {
+            ImGui.PopStyleColor();
+            ImGui.PopStyleColor();
+            ImGui.PopStyleColor();
+            ImGui.PopStyleColor();
+        }
+        ImGui.PopFont();
+        if (hideInefficientClicked)
+        {
+            _filterInefficientMods = !_filterInefficientMods;
             _configService.Current.HideInefficientMods = _filterInefficientMods;
             _configService.Save();
         }
@@ -3015,10 +3411,41 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
         {
             _running = true;
             var toConvert = GetConvertableTextures();
-            // Reset progress state for a fresh conversion
-            ResetConversionProgress();
-            ResetRestoreProgress();
-            _ = _conversionService.StartConversionAsync(toConvert);
+            ResetBothProgress();
+            var progress = new Progress<(string,int,int)>(e => { _currentTexture = e.Item1; _backupIndex = e.Item2; _backupTotal = e.Item3; });
+            var selectedEmptyMods = _selectedEmptyMods.Where(m => !GetOrQueryModBackup(m)).ToList();
+            var backupTasks = new List<Task<bool>>();
+            foreach (var m in selectedEmptyMods)
+            {
+                try { backupTasks.Add(_backupService.CreateFullModBackupAsync(m, progress, CancellationToken.None)); } catch { }
+            }
+            if (toConvert.Count == 0 && backupTasks.Count == 0)
+            {
+                SetStatus("Nothing selected to backup or convert.");
+                _running = false;
+                ResetBothProgress();
+            }
+            else
+            {
+                if (backupTasks.Count > 0)
+                {
+                    var modsQueue = selectedEmptyMods.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+                    _ = Task.Run(async () =>
+                    {
+                        foreach (var m in modsQueue)
+                        {
+                            try { await _backupService.CreateFullModBackupAsync(m, progress, CancellationToken.None).ConfigureAwait(false); } catch { }
+                            await Task.Yield();
+                        }
+                        _uiThreadActions.Enqueue(() => { TriggerMetricsRefresh(); if (toConvert.Count == 0) { _running = false; ResetBothProgress(); } });
+                    });
+                }
+                if (toConvert.Count > 0)
+                {
+                    _ = _conversionService.StartConversionAsync(toConvert)
+                        .ContinueWith(_ => { _running = false; }, TaskScheduler.Default);
+                }
+        }
         }
         ImGui.EndDisabled();
         ImGui.PopStyleColor(4);
@@ -3052,8 +3479,7 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
         {
             _running = true;
             // Reset progress state before bulk restore
-            ResetConversionProgress();
-            ResetRestoreProgress();
+            ResetBothProgress();
             var progress = new Progress<(string, int, int)>(e =>
             {
                 _currentTexture = e.Item1;
@@ -3359,45 +3785,39 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
 
     private bool GetOrQueryModBackup(string mod)
     {
-        if (_modsWithBackupCache.TryGetValue(mod, out var has))
-            return has;
         try
         {
-            // Perform a synchronous check to avoid race conditions enabling conversion before backup status is known
-            var hasZipOrSession = _backupService.HasBackupForModAsync(mod).GetAwaiter().GetResult();
-            var hasPmp = _backupService.HasPmpBackupForModAsync(mod).GetAwaiter().GetResult();
-            var res = hasZipOrSession || hasPmp;
-            _modsWithBackupCache[mod] = res;
-            return res;
+            var snap = _modStateService.Snapshot();
+            if (snap.TryGetValue(mod, out var e))
+                return e.HasTextureBackup || e.HasPmpBackup;
         }
-        catch { return false; }
+        catch { }
+        return false;
     }
 
     private bool GetOrQueryModTextureBackup(string mod)
     {
-        if (_modsWithTexBackupCache.TryGetValue(mod, out var has))
-            return has;
         try
         {
-            var res = _backupService.HasBackupForModAsync(mod).GetAwaiter().GetResult();
-            _modsWithTexBackupCache[mod] = res;
-            return res;
+            var snap = _modStateService.Snapshot();
+            if (snap.TryGetValue(mod, out var e))
+                return e.HasTextureBackup;
         }
-        catch { return false; }
+        catch { }
+        return false;
     }
 
     // Query whether a mod has PMP backup, caching the result
     private bool GetOrQueryModPmp(string mod)
     {
-        if (_modsWithPmpCache.TryGetValue(mod, out var has))
-            return has;
         try
         {
-            var res = _backupService.HasPmpBackupForModAsync(mod).GetAwaiter().GetResult();
-            _modsWithPmpCache[mod] = res;
-            return res;
+            var snap = _modStateService.Snapshot();
+            if (snap.TryGetValue(mod, out var e))
+                return e.HasPmpBackup;
         }
-        catch { return false; }
+        catch { }
+        return false;
     }
 
     private void DrawSplitter(float totalWidth, ref float leftWidth)
@@ -3533,16 +3953,12 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
         var selectedMods = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var texture in _selectedTextures)
         {
-            // Find which mod this texture belongs to
             foreach (var (mod, files) in _scannedByMod)
             {
-                if (files.Contains(texture))
-                {
-                    selectedMods.Add(mod);
-                    break;
-                }
+                if (files.Contains(texture)) { selectedMods.Add(mod); break; }
             }
         }
+        foreach (var m in _selectedEmptyMods) selectedMods.Add(m);
         
         int convertableSelected = 0;
         int restorableSelected = 0;
@@ -3569,7 +3985,6 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
 
         foreach (var texture in _selectedTextures)
         {
-            // Find which mod this texture belongs to
             string? ownerMod = null;
             foreach (var (mod, files) in _scannedByMod)
             {
@@ -3635,5 +4050,17 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
             _backupStorageInfoTask = ComputeBackupStorageInfoAsync();
         if (_savingsInfoTask == null || _savingsInfoTask.IsCompleted)
             _savingsInfoTask = _backupService.ComputeSavingsAsync();
+        if (_perModSavingsTask == null || _perModSavingsTask.IsCompleted)
+        {
+            _perModSavingsTask = _backupService.ComputePerModSavingsAsync();
+            _perModSavingsTask.ContinueWith(ps =>
+            {
+                if (ps.Status == TaskStatus.RanToCompletion && ps.Result != null)
+                {
+                    _cachedPerModSavings = ps.Result;
+                    _needsUIRefresh = true;
+                }
+            }, TaskScheduler.Default);
+        }
     }
 }

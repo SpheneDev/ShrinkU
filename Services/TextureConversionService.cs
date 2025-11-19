@@ -16,6 +16,7 @@ public sealed class TextureConversionService : IDisposable
     private readonly PenumbraIpc _penumbraIpc;
     private readonly TextureBackupService _backupService;
     private readonly ShrinkUConfigService _configService;
+    private readonly ModStateService _modStateService;
 
     private readonly Progress<(string, int)> _conversionProgress = new();
     private readonly Progress<(string, int, int)> _backupProgress = new();
@@ -39,12 +40,13 @@ public sealed class TextureConversionService : IDisposable
     private CancellationTokenSource? _autoPollCts;
     private Task? _autoPollTask;
 
-    public TextureConversionService(ILogger logger, PenumbraIpc penumbraIpc, TextureBackupService backupService, ShrinkUConfigService configService)
-    {
-        _logger = logger;
-        _penumbraIpc = penumbraIpc;
-        _backupService = backupService;
-        _configService = configService;
+public TextureConversionService(ILogger logger, PenumbraIpc penumbraIpc, TextureBackupService backupService, ShrinkUConfigService configService, ModStateService modStateService)
+{
+    _logger = logger;
+    _penumbraIpc = penumbraIpc;
+    _backupService = backupService;
+    _configService = configService;
+    _modStateService = modStateService;
 
         _conversionProgress.ProgressChanged += (_, e) => OnConversionProgress?.Invoke(e);
         _backupProgress.ProgressChanged += (_, e) => OnBackupProgress?.Invoke(e);
@@ -280,9 +282,11 @@ public sealed class TextureConversionService : IDisposable
                 // After conversion: evaluate per-mod savings and auto-restore if conversion made it larger.
                 try
                 {
+                    try { _modStateService.UpdateInstalledButNotConverted(modName, false); } catch { }
                     var perMod = await _backupService.ComputePerModSavingsAsync().ConfigureAwait(false);
                     if (perMod.TryGetValue(modName, out var stats) && stats != null && stats.ComparedFiles > 0)
                     {
+                        try { _modStateService.UpdateSavings(modName, stats.OriginalBytes, stats.CurrentBytes, stats.ComparedFiles); } catch { }
                         if (stats.CurrentBytes > stats.OriginalBytes)
                         {
                             // Persist inefficient mod marker
@@ -387,32 +391,58 @@ public sealed class TextureConversionService : IDisposable
         }
         catch { }
 
+        var pmpConvertedRelByMod = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            var tasksPmp = modsToCheck
+                .Select(m => _backupService.GetPmpConvertedRelPathsForModAsync(m)
+                    .ContinueWith(t => (Mod: m, Rel: t.IsCompletedSuccessfully ? t.Result : new HashSet<string>(StringComparer.OrdinalIgnoreCase)), TaskScheduler.Default))
+                .ToArray();
+            await Task.WhenAll(tasksPmp).ConfigureAwait(false);
+            foreach (var t in tasksPmp)
+            {
+                var (mod, rel) = t.Result;
+                pmpConvertedRelByMod[mod] = rel ?? new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            }
+        }
+        catch { }
+
         var result = new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase);
         foreach (var kv in all)
         {
             var file = kv.Key;
-            if (!used.Contains(file))
-                continue;
-
             try
             {
                 var rel = !string.IsNullOrWhiteSpace(root) ? Path.GetRelativePath(root, file) : file;
                 var parts = rel.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
                 var modName = parts.Length > 1 ? parts[0] : string.Empty;
-                if (!string.IsNullOrWhiteSpace(modName))
-                {
-                    // Build a prefixed path like BackupService uses to match keys
-                    var prefixed = file;
-                    if (!string.IsNullOrWhiteSpace(root))
-                    {
-                        prefixed = prefixed.Replace(root, root.EndsWith('\\') ? "{penumbra}\\" : "{penumbra}", StringComparison.OrdinalIgnoreCase);
-                        while (prefixed.Contains("\\\\", StringComparison.Ordinal))
-                            prefixed = prefixed.Replace("\\\\", "\\", StringComparison.Ordinal);
-                    }
+                
+                if (string.IsNullOrWhiteSpace(modName) || !modsToCheck.Contains(modName))
+                    continue;
 
-                    if (backedKeysPerMod.TryGetValue(modName, out var keys) && keys != null && keys.Contains(prefixed))
-                        continue; // skip already-backed files
+                if (!string.IsNullOrWhiteSpace(_penumbraIpc.ModDirectory))
+                {
+                    try
+                    {
+                        var modRoot = Path.Combine(_penumbraIpc.ModDirectory!, modName);
+                        var relToMod = Path.GetRelativePath(modRoot, file).Replace('\\', '/');
+                        if (pmpConvertedRelByMod.TryGetValue(modName, out var relSet) && relSet != null && relSet.Contains(relToMod))
+                            continue;
+                    }
+                    catch { }
                 }
+
+                // Build a prefixed path like BackupService uses to match keys
+                var prefixed = file;
+                if (!string.IsNullOrWhiteSpace(root))
+                {
+                    prefixed = prefixed.Replace(root, root.EndsWith('\\') ? "{penumbra}\\" : "{penumbra}", StringComparison.OrdinalIgnoreCase);
+                    while (prefixed.Contains("\\\\", StringComparison.Ordinal))
+                        prefixed = prefixed.Replace("\\\\", "\\", StringComparison.Ordinal);
+                }
+
+                if (backedKeysPerMod.TryGetValue(modName, out var keys) && keys != null && keys.Contains(prefixed))
+                    continue; // skip already-backed files
             }
             catch { }
 

@@ -17,7 +17,11 @@ public static class ShrinkUColors
     public static readonly Vector4 ConvertButton = new(0.25f, 0.80f, 0.35f, 1f);
     public static readonly Vector4 ConvertButtonHovered = new(0.30f, 0.86f, 0.40f, 1f);
     public static readonly Vector4 ConvertButtonActive = new(0.20f, 0.72f, 0.30f, 1f);
+    public static readonly Vector4 ReinstallButton = new(0.25f, 0.65f, 0.90f, 1f);
+    public static readonly Vector4 ReinstallButtonHovered = new(0.30f, 0.72f, 0.95f, 1f);
+    public static readonly Vector4 ReinstallButtonActive = new(0.20f, 0.58f, 0.85f, 1f);
     public static readonly Vector4 ButtonTextOnAccent = new(0.10f, 0.10f, 0.15f, 1f);
+    public static readonly Vector4 TooltipText = new(1.00f, 1.00f, 1.00f, 1f);
 
     // Utility helpers
     public static uint ToImGuiColor(Vector4 color) => ImGui.ColorConvertFloat4ToU32(color);

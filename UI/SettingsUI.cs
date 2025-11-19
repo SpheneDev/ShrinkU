@@ -88,8 +88,13 @@ public sealed class SettingsUI : Window
     // Helper to show a tooltip when the last item is hovered (also when disabled)
     private static void ShowTooltip(string text)
     {
-        if (ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
-            ImGui.SetTooltip(text);
+        if (!ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
+            return;
+        ImGui.BeginTooltip();
+        ImGui.PushStyleColor(ImGuiCol.Text, ShrinkUColors.TooltipText);
+        ImGui.TextUnformatted(text);
+        ImGui.PopStyleColor();
+        ImGui.EndTooltip();
     }
 
     // Helper to show a width-constrained tooltip with wrapped text
@@ -99,9 +104,11 @@ public sealed class SettingsUI : Window
             return;
 
         ImGui.BeginTooltip();
+        ImGui.PushStyleColor(ImGuiCol.Text, ShrinkUColors.TooltipText);
         ImGui.PushTextWrapPos(ImGui.GetCursorPosX() + maxWidth);
         ImGui.TextUnformatted(text);
         ImGui.PopTextWrapPos();
+        ImGui.PopStyleColor();
         ImGui.EndTooltip();
     }
 
@@ -141,8 +148,6 @@ public sealed class SettingsUI : Window
                     if (ImGui.Selectable("Manual", mode == TextureProcessingMode.Manual))
                     {
                         _configService.Current.TextureProcessingMode = TextureProcessingMode.Manual;
-                        _configService.Current.AutomaticHandledBySphene = false;
-                        _configService.Current.AutomaticControllerName = string.Empty;
                         _configService.Save();
                     }
                     if (spheneIntegrated)

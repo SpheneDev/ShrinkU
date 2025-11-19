@@ -19,12 +19,15 @@ public sealed class TextureBackupService
     private readonly ILogger _logger;
     private readonly ShrinkUConfigService _configService;
     private readonly PenumbraIpc _penumbraIpc;
+    private readonly ModStateService _modStateService;
+    private static readonly SemaphoreSlim s_backupLock = new(1, 1);
 
-    public TextureBackupService(ILogger logger, ShrinkUConfigService configService, PenumbraIpc penumbraIpc)
+    public TextureBackupService(ILogger logger, ShrinkUConfigService configService, PenumbraIpc penumbraIpc, ModStateService modStateService)
     {
         _logger = logger;
         _configService = configService;
         _penumbraIpc = penumbraIpc;
+        _modStateService = modStateService;
     }
 
     // Verification result for restore operations
@@ -113,6 +116,16 @@ public sealed class TextureBackupService
             var root = _penumbraIpc.ModDirectory;
             if (string.IsNullOrWhiteSpace(root) || string.IsNullOrWhiteSpace(modFolder))
                 return null;
+            try
+            {
+                foreach (var dir in Directory.EnumerateDirectories(root, "*", SearchOption.AllDirectories))
+                {
+                    var name = Path.GetFileName(dir);
+                    if (!string.IsNullOrWhiteSpace(name) && string.Equals(name, modFolder, StringComparison.OrdinalIgnoreCase))
+                        return dir;
+                }
+            }
+            catch { }
             return Path.Combine(root, modFolder);
         }
         catch
@@ -409,6 +422,60 @@ public sealed class TextureBackupService
         catch { return Task.FromResult(false); }
     }
 
+    public async Task<bool> CreateFullModBackupAsync(string modFolderName, IProgress<(string,int,int)>? progress, CancellationToken token)
+    {
+        try
+        {
+            var backupDirectory = _configService.Current.BackupFolderPath;
+            var modAbs = GetModAbsolutePath(modFolderName);
+            if (string.IsNullOrWhiteSpace(backupDirectory) || string.IsNullOrWhiteSpace(modAbs) || !Directory.Exists(modAbs))
+            {
+                try { _logger.LogDebug("CreateFullModBackup aborted: invalid paths for {mod}", modFolderName); } catch { }
+                return false;
+            }
+
+            try { Directory.CreateDirectory(backupDirectory); } catch { }
+            var modBackupDir = Path.Combine(backupDirectory, modFolderName);
+            try { Directory.CreateDirectory(modBackupDir); } catch { }
+
+            // Clean old PMPs to keep latest only
+            try
+            {
+                foreach (var p in Directory.EnumerateFiles(modBackupDir, "mod_backup_*.pmp"))
+                {
+                    try { File.Delete(p); } catch { }
+                }
+            }
+            catch { }
+
+            var stamp = DateTime.UtcNow.ToString("yyyyMMdd_HHmmss");
+            var pmpPath = Path.Combine(modBackupDir, $"mod_backup_{stamp}.pmp");
+            await s_backupLock.WaitAsync(token).ConfigureAwait(false);
+            try
+            {
+                await Task.Run(() =>
+                {
+                    if (token.IsCancellationRequested) return;
+                    ZipFile.CreateFromDirectory(modAbs!, pmpPath, CompressionLevel.Fastest, false);
+                }, token).ConfigureAwait(false);
+            }
+            finally
+            {
+                try { s_backupLock.Release(); } catch { }
+            }
+
+            try { progress?.Report((pmpPath, 1, 1)); } catch { }
+            try { _logger.LogDebug("Created manual full mod PMP backup {pmp} for {mod}", pmpPath, modFolderName); } catch { }
+
+            try { _modStateService.UpdateBackupFlags(modFolderName, _modStateService.Get(modFolderName).HasTextureBackup, true); } catch { }
+            return true;
+        }
+        catch (Exception ex)
+        {
+            try { _logger.LogDebug(ex, "Failed to create manual full mod backup for {mod}", modFolderName); } catch { }
+            return false;
+        }
+    }
     // Restore a specific full-mod PMP backup by replacing the mod directory contents
     public async Task<bool> RestorePmpAsync(string modFolderName, string pmpPath, IProgress<(string, int, int)>? progress, CancellationToken token, bool cleanupBackupsAfterRestore = true)
     {
@@ -428,6 +495,7 @@ public sealed class TextureBackupService
             }
 
             var tempDir = Path.Combine(Path.GetTempPath(), "ShrinkU", "restore-pmp", Path.GetFileNameWithoutExtension(pmpPath));
+            var originalPathInfo = _penumbraIpc.GetModPath(modFolderName);
             try { if (Directory.Exists(tempDir)) Directory.Delete(tempDir, true); } catch { }
             Directory.CreateDirectory(tempDir);
 
@@ -454,6 +522,10 @@ public sealed class TextureBackupService
             bool movedOld = false;
             try
             {
+                try { await Task.Delay(300, token).ConfigureAwait(false); } catch { }
+                try { _penumbraIpc.ClosePenumbraWindow(); } catch { }
+                try { _penumbraIpc.RemoveModDirectory(modFolderName); } catch { }
+                try { await _penumbraIpc.WaitForModDeletedAsync(modFolderName, 5000).ConfigureAwait(false); } catch { }
                 if (Directory.Exists(modAbs))
                 {
                     Directory.Move(modAbs!, backupOldDir);
@@ -568,7 +640,29 @@ public sealed class TextureBackupService
                 }
             }
             try { _penumbraIpc.AddModDirectory(modFolderName); } catch { }
+            try { await _penumbraIpc.WaitForModAddedAsync(modFolderName, 5000).ConfigureAwait(false); } catch { }
+            try
+            {
+                var desiredPath = originalPathInfo.FullPath;
+                if (!string.IsNullOrWhiteSpace(desiredPath))
+                {
+                    _penumbraIpc.SetModPath(modFolderName, desiredPath);
+                    await _penumbraIpc.WaitForModPathAsync(modFolderName, desiredPath, 5000).ConfigureAwait(false);
+                }
+            }
+            catch { }
+            try { await Task.Delay(400, token).ConfigureAwait(false); } catch { }
             try { _penumbraIpc.NudgeModDetection(modFolderName); } catch { }
+            try { await Task.Delay(800, token).ConfigureAwait(false); } catch { }
+            try { _penumbraIpc.OpenModInPenumbra(modFolderName, null); } catch { }
+            try
+            {
+                var hasTex = await HasBackupForModAsync(modFolderName).ConfigureAwait(false);
+                var hasPmp = await HasPmpBackupForModAsync(modFolderName).ConfigureAwait(false);
+                _modStateService.UpdateBackupFlags(modFolderName, hasTex, hasPmp);
+            }
+            catch { }
+            try { _modStateService.UpdateInstalledButNotConverted(modFolderName, true); } catch { }
             return true;
         }
         catch (Exception ex)
@@ -916,6 +1010,17 @@ public sealed class TextureBackupService
             }
             await Task.Yield();
         }
+
+        try
+        {
+            foreach (var m in modsTouchedAll)
+            {
+                var hasTex = modsTouched.Contains(m);
+                var hasPmpNow = await HasPmpBackupForModAsync(m).ConfigureAwait(false);
+                _modStateService.UpdateBackupFlags(m, hasTex, hasPmpNow);
+            }
+        }
+        catch { }
         }
 
         if (_configService.Current.EnableBackupBeforeConversion)
@@ -1081,6 +1186,8 @@ public sealed class TextureBackupService
                             File.WriteAllText(convertedManifestPath, JsonSerializer.Serialize(convertedRel));
                         }
                         catch { }
+
+                        try { _modStateService.UpdateBackupFlags(mod, _modStateService.Get(mod).HasTextureBackup, true); } catch { }
 
                         // No external manifest is written; metadata is obtained from meta.json inside the PMP
                     }
@@ -1720,6 +1827,7 @@ public sealed class TextureBackupService
                         modStats.OriginalBytes += backupBytes;
                         modStats.CurrentBytes += currentBytes;
                         modStats.ComparedFiles += 1;
+                        try { _modStateService.UpdateSavings(modFolder, modStats.OriginalBytes, modStats.CurrentBytes, modStats.ComparedFiles); } catch { }
                     }
                 }
             }
@@ -1792,6 +1900,7 @@ public sealed class TextureBackupService
                         stats.CurrentBytes += currentBytes;
                         stats.ComparedFiles += Math.Max(1, entryCount);
                         result[modName!] = stats;
+                        try { _modStateService.UpdateSavings(modName!, stats.OriginalBytes, stats.CurrentBytes, stats.ComparedFiles); } catch { }
                     }
                 }
             }
@@ -1940,6 +2049,28 @@ public sealed class TextureBackupService
         return result;
     }
 
+    public Task<HashSet<string>> GetPmpConvertedRelPathsForModAsync(string modFolderName)
+    {
+        var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            var backupDirectory = _configService.Current.BackupFolderPath;
+            if (!Directory.Exists(backupDirectory)) return Task.FromResult(set);
+            var modDir = Path.Combine(backupDirectory, modFolderName);
+            if (!Directory.Exists(modDir)) return Task.FromResult(set);
+            var manifestPath = Path.Combine(modDir, "pmp_converted_manifest.json");
+            if (!File.Exists(manifestPath)) return Task.FromResult(set);
+            var list = JsonSerializer.Deserialize<List<string>>(File.ReadAllText(manifestPath)) ?? new List<string>();
+            foreach (var s in list)
+            {
+                if (string.IsNullOrWhiteSpace(s)) continue;
+                set.Add(s.Replace('\\', '/'));
+            }
+        }
+        catch { }
+        return Task.FromResult(set);
+    }
+
     // Return all backed keys for a mod across all sessions/zips (prefixed or original paths)
     public async Task<HashSet<string>> GetBackedKeysForModAsync(string modFolderName)
     {
@@ -2058,6 +2189,13 @@ public sealed class TextureBackupService
                             _logger.LogWarning("Failed to delete mod backup folder {dir}: {error}", modDir, ex.Message);
                         }
                     }
+                    try
+                    {
+                        var hasTex = await HasBackupForModAsync(modFolderName).ConfigureAwait(false);
+                        var hasPmp = await HasPmpBackupForModAsync(modFolderName).ConfigureAwait(false);
+                        _modStateService.UpdateBackupFlags(modFolderName, hasTex, hasPmp);
+                    }
+                    catch { }
                     return zipSuccess;
                 }
             }
@@ -2106,6 +2244,13 @@ public sealed class TextureBackupService
                     {
                         _logger.LogWarning("Failed to delete mod backup folder {dir}: {error}", modDir, ex.Message);
                     }
+                    try
+                    {
+                        var hasTex = await HasBackupForModAsync(modFolderName).ConfigureAwait(false);
+                        var hasPmp = await HasPmpBackupForModAsync(modFolderName).ConfigureAwait(false);
+                        _modStateService.UpdateBackupFlags(modFolderName, hasTex, hasPmp);
+                    }
+                    catch { }
                     return sessionSuccess;
                 }
             }

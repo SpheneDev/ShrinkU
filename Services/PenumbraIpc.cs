@@ -29,8 +29,11 @@ public sealed class PenumbraIpc : IDisposable
     private readonly GetAllModSettings _penumbraGetAllModSettings;
     private readonly GetModList _penumbraGetModList;
     private readonly GetModPath _penumbraGetModPath;
+    private readonly Penumbra.Api.IpcSubscribers.SetModPath? _penumbraSetModPath;
     private readonly OpenMainWindow _penumbraOpenMainWindow;
+    private readonly CloseMainWindow _penumbraCloseMainWindow;
     private readonly Penumbra.Api.IpcSubscribers.AddMod _penumbraAddMod;
+    private readonly object? _penumbraDeleteMod;
 
     // Event subscribers (disposed with plugin lifetime)
     private readonly IDisposable? _subModAdded;
@@ -67,7 +70,16 @@ public sealed class PenumbraIpc : IDisposable
         _penumbraGetModList = new GetModList(pi);
         _penumbraGetModPath = new GetModPath(pi);
         _penumbraOpenMainWindow = new OpenMainWindow(pi);
+        _penumbraCloseMainWindow = new CloseMainWindow(pi);
         _penumbraAddMod = new Penumbra.Api.IpcSubscribers.AddMod(pi);
+        try { _penumbraSetModPath = new Penumbra.Api.IpcSubscribers.SetModPath(pi); } catch { _penumbraSetModPath = null; }
+        try
+        {
+            var t = Type.GetType("Penumbra.Api.IpcSubscribers.DeleteMod, Penumbra.Api")
+                    ?? Type.GetType("Penumbra.Api.IpcSubscribers.RemoveMod, Penumbra.Api");
+            _penumbraDeleteMod = t != null ? Activator.CreateInstance(t, pi) : null;
+        }
+        catch { _penumbraDeleteMod = null; }
 
         APIAvailable = CheckApi();
 
@@ -498,6 +510,71 @@ public sealed class PenumbraIpc : IDisposable
         return Task.FromResult(map);
     }
 
+    public Dictionary<string, string> GetModList()
+    {
+        try
+        {
+            return _penumbraGetModList.Invoke();
+        }
+        catch
+        {
+            return new Dictionary<string, string>();
+        }
+    }
+
+    public bool ModExists(string modDirectory)
+    {
+        try
+        {
+            var list = _penumbraGetModList.Invoke();
+            return list.ContainsKey(modDirectory);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    public async Task<bool> WaitForModDeletedAsync(string modDirectory, int timeoutMs = 5000)
+    {
+        var stop = DateTime.UtcNow.AddMilliseconds(Math.Max(100, timeoutMs));
+        while (DateTime.UtcNow < stop)
+        {
+            if (!ModExists(modDirectory))
+                return true;
+            try { await Task.Delay(100).ConfigureAwait(false); } catch { }
+        }
+        return !ModExists(modDirectory);
+    }
+
+    public async Task<bool> WaitForModAddedAsync(string modDirectory, int timeoutMs = 5000)
+    {
+        var stop = DateTime.UtcNow.AddMilliseconds(Math.Max(100, timeoutMs));
+        while (DateTime.UtcNow < stop)
+        {
+            if (ModExists(modDirectory))
+                return true;
+            try { await Task.Delay(100).ConfigureAwait(false); } catch { }
+        }
+        return ModExists(modDirectory);
+    }
+
+    public async Task<bool> WaitForModPathAsync(string modDirectory, string desiredFullPath, int timeoutMs = 5000)
+    {
+        if (string.IsNullOrWhiteSpace(desiredFullPath))
+            return true;
+        var stop = DateTime.UtcNow.AddMilliseconds(Math.Max(100, timeoutMs));
+        while (DateTime.UtcNow < stop)
+        {
+            var (_, fullPath, _, _) = GetModPath(modDirectory);
+            if (string.Equals(fullPath ?? string.Empty, desiredFullPath ?? string.Empty, StringComparison.Ordinal))
+                return true;
+            try { await Task.Delay(100).ConfigureAwait(false); } catch { }
+        }
+        var (_, finalPath, _, _) = GetModPath(modDirectory);
+        return string.Equals(finalPath ?? string.Empty, desiredFullPath ?? string.Empty, StringComparison.Ordinal);
+    }
+
     // Retrieve Penumbra's hierarchical mod paths (category folders) for each mod directory.
     public Task<Dictionary<string, string>> GetModPathsAsync()
     {
@@ -717,6 +794,17 @@ public sealed class PenumbraIpc : IDisposable
         }
     }
 
+    public void ClosePenumbraWindow()
+    {
+        if (!APIAvailable)
+            return;
+        try
+        {
+            _penumbraCloseMainWindow.Invoke();
+        }
+        catch { }
+    }
+
     public bool AddModDirectory(string modFolderName)
     {
         try
@@ -728,6 +816,58 @@ public sealed class PenumbraIpc : IDisposable
             var result = _penumbraAddMod.Invoke(modFolderName);
             try { _logger.LogDebug("Penumbra AddMod result for {mod}: {result}", modFolderName, result); } catch { }
             return result == Penumbra.Api.Enums.PenumbraApiEc.Success;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    public bool RemoveModDirectory(string modFolderName)
+    {
+        try
+        {
+            if (!APIAvailable)
+                return false;
+            if (string.IsNullOrWhiteSpace(modFolderName))
+                return false;
+            if (_penumbraDeleteMod == null)
+                return false;
+            var t = _penumbraDeleteMod.GetType();
+            var m = t.GetMethod("Invoke");
+            if (m == null)
+                return false;
+            var result = m.Invoke(_penumbraDeleteMod, new object[] { modFolderName, string.Empty });
+            try { _logger.LogDebug("Penumbra DeleteMod result for {mod}: {result}", modFolderName, result); } catch { }
+            return result != null && result.ToString() == Penumbra.Api.Enums.PenumbraApiEc.Success.ToString();
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    public (Penumbra.Api.Enums.PenumbraApiEc, string FullPath, bool FullDefault, bool NameDefault) GetModPath(string modDirectory)
+    {
+        try
+        {
+            var tuple = _penumbraGetModPath.Invoke(modDirectory, "");
+            return tuple;
+        }
+        catch
+        {
+            return (Penumbra.Api.Enums.PenumbraApiEc.ModMissing, string.Empty, true, true);
+        }
+    }
+
+    public bool SetModPath(string modDirectory, string fullPath)
+    {
+        try
+        {
+            if (_penumbraSetModPath == null)
+                return false;
+            var ec = _penumbraSetModPath.Invoke(modDirectory, fullPath, "");
+            return ec == Penumbra.Api.Enums.PenumbraApiEc.Success;
         }
         catch
         {
@@ -762,7 +902,7 @@ public sealed class PenumbraIpc : IDisposable
             }
             
             try { Directory.SetLastWriteTimeUtc(modPath, DateTime.UtcNow); } catch { }
-            try { _penumbraOpenMainWindow.Invoke(TabType.Mods, string.Empty, string.Empty); } catch { }
+            
             try { var _ = GetModPathsAsync(); } catch { }
             try { ModsChanged?.Invoke(); } catch { }
         }
