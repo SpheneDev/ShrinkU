@@ -6,7 +6,7 @@ public sealed partial class ConversionUI
 {
     private void DrawProgress_ViewImpl()
     {
-        if (!_running)
+        if (!(_running || _conversionService.IsConverting))
             return;
 
         var displayMod = _currentRestoreMod;
@@ -17,19 +17,33 @@ public sealed partial class ConversionUI
         {
             ImGui.TextColored(new Vector4(0.90f, 0.77f, 0.35f, 1f), "Restoring");
             ImGui.Text($"Mod: {displayMod} ({_currentRestoreModIndex}/{_currentRestoreModTotal})");
+            var total = _currentRestoreModTotal > 0 ? _currentRestoreModTotal : _backupTotal;
+            var current = _currentRestoreModTotal > 0 ? _currentRestoreModIndex : _backupIndex;
+            float frac = (total > 0) ? (float)current / total : 0f;
+            var width = ImGui.GetContentRegionAvail().X;
+            ImGui.ProgressBar(frac, new Vector2(width, 0), "");
         }
-        else if (!string.IsNullOrEmpty(_currentModName))
+        else if (!string.IsNullOrEmpty(_currentModName) || _conversionService.IsConverting)
         {
-            var dn2 = _modDisplayNames.TryGetValue(_currentModName, out var nm) ? nm : _currentModName;
+            var modName = string.IsNullOrEmpty(_currentModName) ? string.Empty : _currentModName;
+            var dn2 = !string.IsNullOrEmpty(modName) && _modDisplayNames.TryGetValue(modName, out var nm) ? nm : modName;
             ImGui.TextColored(new Vector4(0.40f, 0.85f, 0.40f, 1f), "Converting");
-            ImGui.Text($"Mod: {dn2} ({_currentModIndex}/{_totalMods})");
-            ImGui.Text($"Converted: {_convertedCount}");
+            if (!string.IsNullOrEmpty(dn2))
+                ImGui.Text($"Mod: {dn2} ({_currentModIndex}/{_totalMods})");
+            float overall = (_totalMods > 0) ? (float)_currentModIndex / _totalMods : 0f;
+            var width = ImGui.GetContentRegionAvail().X;
+            ImGui.ProgressBar(overall, new Vector2(width, 0), "");
+            if (_currentModTotalFiles > 0)
+            {
+                float perMod = (float)_convertedCount / _currentModTotalFiles;
+                ImGui.ProgressBar(perMod, new Vector2(width, 0), "");
+            }
         }
 
         if (!string.IsNullOrEmpty(_currentTexture))
             ImGui.Text($"File: {_currentTexture}");
 
-        ImGui.BeginDisabled(!_running);
+        ImGui.BeginDisabled(!(_running || _conversionService.IsConverting));
         if (ImGui.Button("Cancel"))
         {
             _restoreAfterCancel = true;

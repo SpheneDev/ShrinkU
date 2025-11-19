@@ -1280,35 +1280,6 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
         }
         else
         {
-            // Show detailed per-mod restore progress while running
-            var displayMod = _currentRestoreMod;
-            if (!string.IsNullOrEmpty(displayMod) && _modDisplayNames.TryGetValue(displayMod, out var dn))
-                displayMod = dn;
-
-            if (!string.IsNullOrEmpty(displayMod))
-            {
-                ImGui.TextColored(new Vector4(0.90f, 0.77f, 0.35f, 1f), "Restoring");
-                ImGui.Text($"Mod: {displayMod} ({_currentRestoreModIndex}/{_currentRestoreModTotal})");
-            }
-            if (!string.IsNullOrEmpty(_currentTexture))
-            {
-                ImGui.Text($"File: {_currentTexture}");
-            }
-
-            // Disable cancel when conversion was initiated externally (Sphene automatic)
-            ImGui.BeginDisabled(!_running);
-            if (ImGui.Button("Cancel"))
-            {
-                // Mark that we want to restore the currently converting mod after cancellation completes
-                _restoreAfterCancel = true;
-                _cancelTargetMod = _currentModName;
-                _conversionService.Cancel();
-                // If a restore is already in flight, cancel it too
-                _restoreCancellationTokenSource?.Cancel();
-                _logger.LogDebug("Cancel pressed; will restore current mod {mod} after conversion stops", _cancelTargetMod);
-            }
-            ImGui.EndDisabled();
-            ShowTooltip("Cancel the current conversion or restore operation.");
         }
     }
 
