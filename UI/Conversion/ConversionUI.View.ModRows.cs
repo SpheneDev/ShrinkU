@@ -36,8 +36,7 @@ public sealed partial class ConversionUI
                 convertedAll = Math.Min(s2.ComparedFiles, totalAll);
             else
             {
-                var snap = _modStateService.Snapshot();
-                if (snap.TryGetValue(mod, out var ms) && ms != null && ms.ComparedFiles > 0)
+                if (_modStateSnapshot != null && _modStateSnapshot.TryGetValue(mod, out var ms) && ms != null && ms.ComparedFiles > 0)
                     convertedAll = Math.Min(ms.ComparedFiles, totalAll);
             }
         }
@@ -216,8 +215,9 @@ public sealed partial class ConversionUI
 
         ImGui.TableSetColumnIndex(3);
         _cachedPerModSavings.TryGetValue(mod, out var modStats);
-        var stateSnap = _modStateService.Snapshot();
-        stateSnap.TryGetValue(mod, out var modState);
+        ShrinkU.Services.ModStateEntry? modState = null;
+        if (_modStateSnapshot != null)
+            _modStateSnapshot.TryGetValue(mod, out modState);
         long modOriginalBytes = modState != null && modState.ComparedFiles > 0 ? modState.OriginalBytes : GetOrQueryModOriginalTotal(mod);
         var hideStatsForNoTextures = totalAll == 0;
         if (hideStatsForNoTextures)

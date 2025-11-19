@@ -270,42 +270,18 @@ public sealed class SettingsUI : Window
                 }
                 ImGui.PopStyleColor(4);
 
-                try
+                var backupDir = _configService.Current.BackupFolderPath;
+                if (!string.Equals(backupDir ?? string.Empty, _backupSummaryPath, StringComparison.Ordinal))
                 {
-                    var backupDir = _configService.Current.BackupFolderPath;
-                    if (!string.IsNullOrWhiteSpace(backupDir) && Directory.Exists(backupDir))
-                    {
-                        long zipBytes = 0;
-                        int zipCount = 0;
-                        long pmpBytes = 0;
-                        int pmpCount = 0;
-                        foreach (var file in Directory.EnumerateFiles(backupDir, "*", SearchOption.AllDirectories))
-                        {
-                            try
-                            {
-                                var name = Path.GetFileName(file) ?? string.Empty;
-                                var len = new FileInfo(file).Length;
-                                if (name.StartsWith("backup_", StringComparison.OrdinalIgnoreCase) && name.EndsWith(".zip", StringComparison.OrdinalIgnoreCase))
-                                {
-                                    zipCount++;
-                                    zipBytes += len;
-                                }
-                                else if (name.StartsWith("mod_backup_", StringComparison.OrdinalIgnoreCase) && name.EndsWith(".pmp", StringComparison.OrdinalIgnoreCase))
-                                {
-                                    pmpCount++;
-                                    pmpBytes += len;
-                                }
-                            }
-                            catch { }
-                        }
-                        ImGui.Spacing();
-                        ImGui.TextColored(ShrinkUColors.Accent, "Backup Summary");
-                        ImGui.Text($"ZIP Backups: {zipCount} ({FormatSize(zipBytes)})");
-                        ImGui.Text($"PMP Backups: {pmpCount} ({FormatSize(pmpBytes)})");
-                        ImGui.Spacing();
-                    }
+                    _backupSummaryPath = backupDir ?? string.Empty;
+                    _backupSummaryLastScanUtc = DateTime.MinValue;
                 }
-                catch { }
+                EnsureBackupSummary();
+                ImGui.Spacing();
+                ImGui.TextColored(ShrinkUColors.Accent, "Backup Summary");
+                ImGui.Text($"ZIP Backups: {_backupZipCount} ({FormatSize(_backupZipBytes)})");
+                ImGui.Text($"PMP Backups: {_backupPmpCount} ({FormatSize(_backupPmpBytes)})");
+                ImGui.Spacing();
 
                 ImGui.EndTabItem();
             }
@@ -453,6 +429,13 @@ public sealed class SettingsUI : Window
     }
 
     private List<TextureBackupService.OrphanBackupInfo> _orphaned = new List<TextureBackupService.OrphanBackupInfo>();
+    private string _backupSummaryPath = string.Empty;
+    private DateTime _backupSummaryLastScanUtc = DateTime.MinValue;
+    private volatile bool _backupSummaryScanInFlight = false;
+    private int _backupZipCount = 0;
+    private long _backupZipBytes = 0;
+    private int _backupPmpCount = 0;
+    private long _backupPmpBytes = 0;
 
     private string FormatSize(long bytes)
     {
@@ -466,5 +449,55 @@ public sealed class SettingsUI : Window
             unit++;
         }
         return unit == 0 ? $"{bytes} {units[unit]}" : $"{size:0.##} {units[unit]}";
+    }
+
+    private void EnsureBackupSummary()
+    {
+        try
+        {
+            if (_backupSummaryScanInFlight)
+                return;
+            var path = _backupSummaryPath;
+            if (string.IsNullOrWhiteSpace(path) || !Directory.Exists(path))
+                return;
+            var now = DateTime.UtcNow;
+            if ((now - _backupSummaryLastScanUtc).TotalSeconds < 10)
+                return;
+            _backupSummaryScanInFlight = true;
+            System.Threading.Tasks.Task.Run(() =>
+            {
+                int zipCount = 0;
+                long zipBytes = 0;
+                int pmpCount = 0;
+                long pmpBytes = 0;
+                try
+                {
+                    foreach (var file in Directory.EnumerateFiles(path, "*", SearchOption.AllDirectories))
+                    {
+                        var name = Path.GetFileName(file) ?? string.Empty;
+                        long len = 0;
+                        try { len = new FileInfo(file).Length; } catch { len = 0; }
+                        if (name.StartsWith("backup_", StringComparison.OrdinalIgnoreCase) && name.EndsWith(".zip", StringComparison.OrdinalIgnoreCase))
+                        {
+                            zipCount++;
+                            zipBytes += len;
+                        }
+                        else if (name.StartsWith("mod_backup_", StringComparison.OrdinalIgnoreCase) && name.EndsWith(".pmp", StringComparison.OrdinalIgnoreCase))
+                        {
+                            pmpCount++;
+                            pmpBytes += len;
+                        }
+                    }
+                }
+                catch { }
+                _backupZipCount = zipCount;
+                _backupZipBytes = zipBytes;
+                _backupPmpCount = pmpCount;
+                _backupPmpBytes = pmpBytes;
+                _backupSummaryLastScanUtc = DateTime.UtcNow;
+                _backupSummaryScanInFlight = false;
+            });
+        }
+        catch { }
     }
 }

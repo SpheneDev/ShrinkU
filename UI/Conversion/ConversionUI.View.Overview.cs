@@ -14,6 +14,10 @@ namespace ShrinkU.UI;
 
 public sealed partial class ConversionUI
 {
+    private IReadOnlyDictionary<string, ShrinkU.Services.ModStateEntry>? _modStateSnapshot;
+    private string _fileSizeWarmupSig = string.Empty;
+    private string _visibleByModSig = string.Empty;
+    private Dictionary<string, List<string>> _visibleByMod = new(StringComparer.OrdinalIgnoreCase);
     private void DrawOverview_ViewImpl()
     {
         ImGui.SetWindowFontScale(1.15f);
@@ -147,41 +151,58 @@ public sealed partial class ConversionUI
 
     private void DrawScannedFilesTable_ViewImpl()
     {
-        var visibleByMod = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
-        foreach (var (mod, files) in _scannedByMod)
+        var visibleSig = string.Concat(_scanFilter, "|", _filterPenumbraUsedOnly ? "1" : "0", "|", _filterNonConvertibleMods ? "1" : "0", "|", _filterInefficientMods ? "1" : "0", "|", _orphaned.Count.ToString(), "|", _scannedByMod.Count.ToString(), "|", _penumbraUsedFiles.Count.ToString());
+        if (!string.Equals(visibleSig, _visibleByModSig, StringComparison.Ordinal))
         {
-            if (IsModExcludedByTags(mod))
-                continue;
-            var displayName = ResolveModDisplayName(mod);
-            var filtered = string.IsNullOrEmpty(_scanFilter)
-                ? files
-                : files.Where(f => Path.GetFileName(f).IndexOf(_scanFilter, StringComparison.OrdinalIgnoreCase) >= 0
-                                || mod.IndexOf(_scanFilter, StringComparison.OrdinalIgnoreCase) >= 0
-                                || displayName.IndexOf(_scanFilter, StringComparison.OrdinalIgnoreCase) >= 0).ToList();
-            if (_filterPenumbraUsedOnly && _penumbraUsedFiles.Count > 0)
-                 filtered = filtered.Where(f => _penumbraUsedFiles.Contains(f)).ToList();
+            _visibleByMod.Clear();
+            foreach (var (mod, files) in _scannedByMod)
+            {
+                if (IsModExcludedByTags(mod))
+                    continue;
+                var displayName = ResolveModDisplayName(mod);
+                var filtered = string.IsNullOrEmpty(_scanFilter)
+                    ? files
+                    : files.Where(f => Path.GetFileName(f).IndexOf(_scanFilter, StringComparison.OrdinalIgnoreCase) >= 0
+                                    || mod.IndexOf(_scanFilter, StringComparison.OrdinalIgnoreCase) >= 0
+                                    || displayName.IndexOf(_scanFilter, StringComparison.OrdinalIgnoreCase) >= 0).ToList();
+                if (_filterPenumbraUsedOnly && _penumbraUsedFiles.Count > 0)
+                     filtered = filtered.Where(f => _penumbraUsedFiles.Contains(f)).ToList();
 
-            var isOrphan = _orphaned.Any(x => string.Equals(x.ModFolderName, mod, StringComparison.OrdinalIgnoreCase));
-            if (_filterNonConvertibleMods && files.Count == 0 && !isOrphan)
-                continue;
+                var isOrphan = _orphaned.Any(x => string.Equals(x.ModFolderName, mod, StringComparison.OrdinalIgnoreCase));
+                if (_filterNonConvertibleMods && files.Count == 0 && !isOrphan)
+                    continue;
 
-            if (_filterInefficientMods && IsModInefficient(mod))
-                continue;
+                if (_filterInefficientMods && IsModInefficient(mod))
+                    continue;
 
-            var modMatchesFilter = string.IsNullOrEmpty(_scanFilter)
-                                   || displayName.IndexOf(_scanFilter, StringComparison.OrdinalIgnoreCase) >= 0
-                                   || mod.IndexOf(_scanFilter, StringComparison.OrdinalIgnoreCase) >= 0;
-            var include = _filterPenumbraUsedOnly ? filtered.Count > 0 : (filtered.Count > 0 || modMatchesFilter);
-            if (include)
-                visibleByMod[mod] = filtered;
+                var modMatchesFilter = string.IsNullOrEmpty(_scanFilter)
+                                       || displayName.IndexOf(_scanFilter, StringComparison.OrdinalIgnoreCase) >= 0
+                                       || mod.IndexOf(_scanFilter, StringComparison.OrdinalIgnoreCase) >= 0;
+                var include = _filterPenumbraUsedOnly ? filtered.Count > 0 : (filtered.Count > 0 || modMatchesFilter);
+                if (include)
+                    _visibleByMod[mod] = filtered;
+            }
+            foreach (var o in _orphaned)
+            {
+                var name = o.ModFolderName;
+                if (!string.IsNullOrWhiteSpace(name) && !_visibleByMod.ContainsKey(name))
+                    _visibleByMod[name] = new List<string>();
+            }
+            _visibleByModSig = visibleSig;
+            _modStateSnapshot = _modStateService.Snapshot();
+            var warmSig = string.Concat(_visibleByModSig, "|", _visibleByMod.Count.ToString());
+            if (!string.Equals(warmSig, _fileSizeWarmupSig, StringComparison.Ordinal))
+            {
+                try
+                {
+                    var allFiles = _visibleByMod.Values.SelectMany(v => v).Take(2000).ToList();
+                    _cacheService.WarmupFileSizeCache(allFiles);
+                    _fileSizeWarmupSig = warmSig;
+                }
+                catch { }
+            }
         }
-
-        foreach (var o in _orphaned)
-        {
-            var name = o.ModFolderName;
-            if (!string.IsNullOrWhiteSpace(name) && !visibleByMod.ContainsKey(name))
-                visibleByMod[name] = new List<string>();
-        }
+        var visibleByMod = _visibleByMod;
 
         var mods = visibleByMod.Keys.ToList();
         if (_scanSortKind == ScanSortKind.ModName)
@@ -198,10 +219,6 @@ public sealed partial class ConversionUI
         }
 
         TableCatNode? root = null;
-        if (_modPaths.Count > 0)
-        {
-            root = BuildTableCategoryTree(mods);
-        }
 
         var selectAllClicked = ImGui.Button("Select All");
         if (selectAllClicked)
@@ -281,23 +298,22 @@ public sealed partial class ConversionUI
             ImGui.TableHeadersRow();
             _zebraRowIndex = 0;
 
-            int idx = 0;
-            if (root != null)
+            var sig = string.Concat(_expandedFolders.Count.ToString(), "|", _expandedMods.Count.ToString(), "|", visibleByMod.Count.ToString(), "|", (_configService.Current.ShowModFilesInOverview ? "1" : "0"), "|", _scanFilter, "|", _filterPenumbraUsedOnly ? "1" : "0", "|", _filterNonConvertibleMods ? "1" : "0", "|", _filterInefficientMods ? "1" : "0", "|", _modPathsSig);
+            if (!string.Equals(sig, _flatRowsSig, StringComparison.Ordinal))
             {
-                var sig = string.Concat(_expandedFolders.Count.ToString(), "|", _expandedMods.Count.ToString(), "|", visibleByMod.Count.ToString(), "|", (_configService.Current.ShowModFilesInOverview ? "1" : "0"), "|", _scanFilter, "|", _filterPenumbraUsedOnly ? "1" : "0", "|", _filterNonConvertibleMods ? "1" : "0", "|", _filterInefficientMods ? "1" : "0", "|", _modPathsSig);
-                if (!string.Equals(sig, _flatRowsSig, StringComparison.Ordinal))
-                {
-                    _flatRows.Clear();
-                    BuildFlatRows(root, visibleByMod, string.Empty, 0);
-                    _cachedTotalRows = _flatRows.Count;
-                    _flatRowsSig = sig;
-                    _folderSizeCache.Clear();
-                    _folderSizeCacheSig = _flatRowsSig;
-                    _folderCountsCache.Clear();
-                    _folderCountsCacheSig = _flatRowsSig;
-                    BuildFolderCountsCache(root, visibleByMod, string.Empty);
-                }
-                var clipper = ImGui.ImGuiListClipper();
+                if (_modPaths.Count > 0)
+                    root = BuildTableCategoryTree(mods);
+                _flatRows.Clear();
+                BuildFlatRows(root, visibleByMod, string.Empty, 0);
+                _cachedTotalRows = _flatRows.Count;
+                _flatRowsSig = sig;
+                _folderSizeCache.Clear();
+                _folderSizeCacheSig = _flatRowsSig;
+                _folderCountsCache.Clear();
+                _folderCountsCacheSig = _flatRowsSig;
+                BuildFolderCountsCache(root, visibleByMod, string.Empty);
+            }
+            var clipper = ImGui.ImGuiListClipper();
                 clipper.Begin(_cachedTotalRows);
                 while (clipper.Step())
                 {
@@ -321,8 +337,7 @@ public sealed partial class ConversionUI
                     }
                 }
                 clipper.End();
-            }
-
+            
             ImGui.TableSetColumnIndex(0);
             var currentFirstWidth = ImGui.GetColumnWidth();
             if (MathF.Abs(currentFirstWidth - _scannedFirstColWidth) > 0.5f && ImGui.IsMouseReleased(ImGuiMouseButton.Left))
