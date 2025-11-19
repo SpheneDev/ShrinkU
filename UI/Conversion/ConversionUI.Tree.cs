@@ -152,6 +152,7 @@ public sealed partial class ConversionUI
         {
             var fullPath = string.IsNullOrEmpty(pathPrefix) ? name : $"{pathPrefix}/{name}";
             int modsTotal = 0, modsConverted = 0, texturesTotal = 0, texturesConverted = 0;
+            long origBytes = 0, compBytes = 0;
             var stack = new Stack<TableCatNode>();
             stack.Push(child);
             while (stack.Count > 0)
@@ -172,11 +173,21 @@ public sealed partial class ConversionUI
                     }
                     if (GetOrQueryModBackup(m))
                         modsConverted++;
+
+                    var modOrig = GetOrQueryModOriginalTotal(m);
+                    if (modOrig > 0) origBytes += modOrig;
+                    var hasBackupM = GetOrQueryModBackup(m);
+                    if (hasBackupM)
+                    {
+                        if (_cachedPerModSavings.TryGetValue(m, out var stats) && stats != null && stats.CurrentBytes > 0)
+                            compBytes += stats.CurrentBytes;
+                    }
                 }
                 foreach (var ch in cur.Children.Values)
                     stack.Push(ch);
             }
             _folderCountsCache[fullPath] = (modsTotal, modsConverted, texturesTotal, Math.Min(texturesConverted, texturesTotal));
+            _folderSizeCache[fullPath] = (origBytes, compBytes);
             BuildFolderCountsCache(child, visibleByMod, fullPath);
         }
     }
@@ -274,5 +285,29 @@ public sealed partial class ConversionUI
             }
         }
         return files;
+    }
+
+    private bool IsFolderFullySelected(TableCatNode node, Dictionary<string, List<string>> visibleByMod)
+    {
+        foreach (var mod in node.Mods)
+        {
+            if (visibleByMod.TryGetValue(mod, out var files) && files != null && files.Count > 0)
+            {
+                var sc = _selectedCountByMod.TryGetValue(mod, out var c) ? c : 0;
+                if (sc < files.Count)
+                    return false;
+            }
+            else
+            {
+                if (!_selectedEmptyMods.Contains(mod))
+                    return false;
+            }
+        }
+        foreach (var child in node.Children.Values)
+        {
+            if (!IsFolderFullySelected(child, visibleByMod))
+                return false;
+        }
+        return true;
     }
 }

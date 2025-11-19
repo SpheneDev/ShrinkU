@@ -114,7 +114,7 @@ public sealed partial class ConversionUI
         ImGui.TableSetColumnIndex(0);
         bool modSelected = isNonConvertible
             ? _selectedEmptyMods.Contains(mod)
-            : files.All(f => _selectedTextures.Contains(f));
+            : ((_selectedCountByMod.TryGetValue(mod, out var sc) ? sc : 0) >= files.Count);
         var automaticMode = _configService.Current.TextureProcessingMode == TextureProcessingMode.Automatic;
         var disableCheckbox = excluded || (automaticMode && !isOrphan && (convertedAll >= totalAll));
         ImGui.BeginDisabled(disableCheckbox);
@@ -127,9 +127,15 @@ public sealed partial class ConversionUI
             else
             {
                 if (modSelected)
+                {
                     foreach (var f in files) _selectedTextures.Add(f);
+                    _selectedCountByMod[mod] = files.Count;
+                }
                 else
+                {
                     foreach (var f in files) _selectedTextures.Remove(f);
+                    _selectedCountByMod[mod] = 0;
+                }
             }
         }
         ImGui.EndDisabled();

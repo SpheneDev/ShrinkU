@@ -190,6 +190,17 @@ public sealed partial class ConversionUI
             }
             _visibleByModSig = visibleSig;
             _modStateSnapshot = _modStateService.Snapshot();
+            _selectedCountByMod.Clear();
+            foreach (var (mod, files) in _visibleByMod)
+            {
+                int c = 0;
+                if (files != null && files.Count > 0)
+                {
+                    for (int i = 0; i < files.Count; i++)
+                        if (_selectedTextures.Contains(files[i])) c++;
+                }
+                _selectedCountByMod[mod] = c;
+            }
             var warmSig = string.Concat(_visibleByModSig, "|", _visibleByMod.Count.ToString());
             if (!string.Equals(warmSig, _fileSizeWarmupSig, StringComparison.Ordinal))
             {
@@ -233,6 +244,7 @@ public sealed partial class ConversionUI
                     if (!excluded || hasBackup)
                         _selectedTextures.Add(f);
                 }
+                _selectedCountByMod[mod] = excluded && !hasBackup ? 0 : kv.Value.Count;
             }
         }
         ImGui.SameLine();
@@ -242,6 +254,8 @@ public sealed partial class ConversionUI
             foreach (var kv in visibleByMod)
                 foreach (var f in kv.Value)
                     _selectedTextures.Remove(f);
+            foreach (var mod in visibleByMod.Keys)
+                _selectedCountByMod[mod] = 0;
         }
 
         ImGui.SameLine();
@@ -250,10 +264,13 @@ public sealed partial class ConversionUI
         {
             foreach (var m in visibleByMod.Keys)
                 _expandedMods.Add(m);
-            if (root != null)
+            TableCatNode? rootExpand = root;
+            if (rootExpand == null && _modPaths.Count > 0)
+                rootExpand = BuildTableCategoryTree(mods);
+            if (rootExpand != null)
             {
                 var allFolders = new List<string>();
-                CollectFolderPaths(root, string.Empty, allFolders);
+                CollectFolderPaths(rootExpand, string.Empty, allFolders);
                 foreach (var fp in allFolders)
                     _expandedFolders.Add(fp);
             }

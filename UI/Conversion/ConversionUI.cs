@@ -77,6 +77,7 @@ public sealed partial class ConversionUI : Window, IDisposable
     // Expanded state tracking for table view
     private HashSet<string> _expandedMods = new(StringComparer.OrdinalIgnoreCase);
     private HashSet<string> _selectedEmptyMods = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, int> _selectedCountByMod = new(StringComparer.OrdinalIgnoreCase);
     private bool _footerTotalsDirty = true;
     private string _footerTotalsSignature = string.Empty;
     private long _footerTotalUncompressed = 0;
@@ -117,6 +118,7 @@ public sealed partial class ConversionUI : Window, IDisposable
     private readonly ConcurrentDictionary<string, bool> _modsWithBackupCache = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, bool> _modsWithTexBackupCache = new(StringComparer.OrdinalIgnoreCase);
     private DateTime _disableActionsUntilUtc = DateTime.MinValue;
+    private readonly Dictionary<string, string> _fileOwnerMod = new(StringComparer.OrdinalIgnoreCase);
     private void ClearModCaches(string mod)
     {
         _cacheService.ClearModCaches(mod);
@@ -1330,13 +1332,17 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                     _scannedByMod.Clear();
                     _selectedTextures.Clear();
                     _texturesToConvert.Clear();
+                    _fileOwnerMod.Clear();
                     if (grouped != null)
                     {
                         foreach (var mod in grouped)
                         {
                             _scannedByMod[mod.Key] = mod.Value;
                             foreach (var file in mod.Value)
+                            {
                                 _texturesToConvert[file] = Array.Empty<string>();
+                                _fileOwnerMod[file] = mod.Key;
+                            }
                         }
                     }
                     if (names != null)
@@ -1439,11 +1445,15 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                         _selectedTextures.Clear();
                         _texturesToConvert.Clear();
                         _fileSizeCache.Clear();
+                        _fileOwnerMod.Clear();
                         foreach (var mod in grouped)
                         {
                             _scannedByMod[mod.Key] = mod.Value;
                             foreach (var file in mod.Value)
+                            {
                                 _texturesToConvert[file] = Array.Empty<string>();
+                                _fileOwnerMod[file] = mod.Key;
+                            }
                         }
                     }
                     else
@@ -1842,37 +1852,25 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
     private List<string> GetRestorableModsForCurrentSelection()
     {
         var result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        // Always work with selected textures only
-        if (_selectedTextures.Count > 0)
+        foreach (var (mod, count) in _selectedCountByMod)
         {
-            foreach (var texture in _selectedTextures)
-            {
-                string? ownerMod = null;
-                foreach (var (mod, files) in _scannedByMod)
-                {
-                    if (files.Contains(texture))
-                    {
-                        ownerMod = mod;
-                        break;
-                    }
-                }
-                if (ownerMod != null && GetOrQueryModBackup(ownerMod))
-                    result.Add(ownerMod);
-            }
+            if (count > 0 && GetOrQueryModBackup(mod))
+                result.Add(mod);
+        }
+        foreach (var m in _selectedEmptyMods)
+        {
+            if (GetOrQueryModBackup(m))
+                result.Add(m);
         }
         return result.ToList();
     }
 
     private (int convertableMods, int restorableMods) GetSelectedModStates()
     {
-        // Always check only selected textures
         var selectedMods = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var texture in _selectedTextures)
+        foreach (var (mod, count) in _selectedCountByMod)
         {
-            foreach (var (mod, files) in _scannedByMod)
-            {
-                if (files.Contains(texture)) { selectedMods.Add(mod); break; }
-            }
+            if (count > 0) selectedMods.Add(mod);
         }
         foreach (var m in _selectedEmptyMods) selectedMods.Add(m);
         
@@ -1901,20 +1899,10 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
 
         foreach (var texture in _selectedTextures)
         {
-            string? ownerMod = null;
-            foreach (var (mod, files) in _scannedByMod)
+            if (_fileOwnerMod.TryGetValue(texture, out var ownerMod))
             {
-                if (files.Contains(texture))
-                {
-                    ownerMod = mod;
-                    break;
-                }
-            }
-
-            // Only include if the mod doesn't have a backup (is convertable) and not excluded by tags
-            if (ownerMod != null && !GetOrQueryModBackup(ownerMod) && !IsModExcludedByTags(ownerMod))
-            {
-                filteredTextures[texture] = Array.Empty<string>();
+                if (!GetOrQueryModBackup(ownerMod) && !IsModExcludedByTags(ownerMod))
+                    filteredTextures[texture] = Array.Empty<string>();
             }
         }
 

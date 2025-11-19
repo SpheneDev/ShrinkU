@@ -13,10 +13,9 @@ public sealed partial class ConversionUI
         ImGui.TableSetColumnIndex(0);
         var fullPath = row.FolderPath;
         var child = row.Node;
-        var folderFiles = CollectFilesRecursive(child, visibleByMod);
-        bool folderSelected = (folderFiles.Count > 0 && folderFiles.All(f => _selectedTextures.Contains(f)))
-            || (folderFiles.Count == 0 && child.Mods.Count > 0 && child.Mods.All(m => _selectedEmptyMods.Contains(m)));
-        ImGui.BeginDisabled(folderFiles.Count == 0 && child.Mods.Count == 0);
+        var hasSelectable = HasSelectableFiles(child, visibleByMod);
+        bool folderSelected = IsFolderFullySelected(child, visibleByMod);
+        ImGui.BeginDisabled(!hasSelectable && child.Mods.Count == 0);
         if (ImGui.Checkbox($"##cat-sel-{fullPath}", ref folderSelected))
         {
             if (folderSelected)
@@ -36,6 +35,7 @@ public sealed partial class ConversionUI
                     {
                         foreach (var f in files)
                             _selectedTextures.Add(f);
+                        _selectedCountByMod[mod] = files.Count;
                     }
                     else if (!isOrphan)
                     {
@@ -45,12 +45,17 @@ public sealed partial class ConversionUI
             }
             else
             {
+                var folderFiles = CollectFilesRecursive(child, visibleByMod);
                 foreach (var f in folderFiles) _selectedTextures.Remove(f);
                 foreach (var mod in child.Mods) _selectedEmptyMods.Remove(mod);
+                foreach (var mod in child.Mods)
+                {
+                    if (visibleByMod.ContainsKey(mod)) _selectedCountByMod[mod] = 0;
+                }
             }
         }
         ImGui.EndDisabled();
-        if (folderFiles.Count == 0 && ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
+        if (!hasSelectable && ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
             ImGui.SetTooltip("No selectable files in this folder (filtered or excluded).");
         else
             ShowTooltip("Select or deselect all files in this folder.");

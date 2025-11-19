@@ -36,17 +36,13 @@ public sealed partial class ConversionUI
             bool folderSelected = false;
             if (drawFolderRow)
             {
-                folderFiles = CollectFilesRecursive(child, visibleByMod);
-                var hasFiles = folderFiles != null && folderFiles.Count > 0;
-                folderSelected = (hasFiles && folderFiles.All(f => _selectedTextures.Contains(f)))
-                    || (!hasFiles && child.Mods.Count > 0 && child.Mods.All(m => _selectedEmptyMods.Contains(m)));
+                folderSelected = IsFolderFullySelected(child, visibleByMod);
             }
             if (drawFolderRow) ImGui.BeginDisabled(!hasSelectable && child.Mods.Count == 0);
             if (drawFolderRow && ImGui.Checkbox($"##cat-sel-{fullPath}", ref folderSelected))
             {
                 if (folderSelected)
                 {
-                    folderFiles = CollectFilesRecursive(child, visibleByMod);
                     var automaticMode = _configService.Current.TextureProcessingMode == TextureProcessingMode.Automatic;
                     foreach (var mod in child.Mods)
                     {
@@ -83,14 +79,21 @@ public sealed partial class ConversionUI
                             continue;
                         }
                         if (!disableCheckbox)
+                        {
                             foreach (var f in files) _selectedTextures.Add(f);
+                            _selectedCountByMod[mod] = files.Count;
+                        }
                     }
                 }
                 else
                 {
-                    folderFiles = CollectFilesRecursive(child, visibleByMod);
-                    foreach (var f in folderFiles) _selectedTextures.Remove(f);
+                    var folderFiles2 = CollectFilesRecursive(child, visibleByMod);
+                    foreach (var f in folderFiles2) _selectedTextures.Remove(f);
                     foreach (var mod in child.Mods) _selectedEmptyMods.Remove(mod);
+                    foreach (var mod in child.Mods)
+                    {
+                        if (visibleByMod.ContainsKey(mod)) _selectedCountByMod[mod] = 0;
+                    }
                 }
             }
             if (drawFolderRow) ImGui.EndDisabled();
@@ -120,36 +123,21 @@ public sealed partial class ConversionUI
                 ImGui.TextColored(folderColor, (catOpen ? FontAwesomeIcon.FolderOpen : FontAwesomeIcon.Folder).ToIconString());
                 ImGui.PopFont();
                 ImGui.SameLine();
-                var totalModsInFolder = CountModsRecursive(child);
-                var convertedModsInFolder = CountConvertedModsRecursive(child);
-                var totalTexturesInFolder = CountTexturesRecursive(child);
-                var convertedTexturesInFolder = CountConvertedTexturesRecursive(child);
-                ImGui.TextColored(folderColor, $"{name} (mods {convertedModsInFolder}/{totalModsInFolder}, textures {convertedTexturesInFolder}/{totalTexturesInFolder})");
+                if (!_folderCountsCache.TryGetValue(fullPath, out var cvals))
+                    cvals = (0, 0, 0, 0);
+                ImGui.TextColored(folderColor, $"{name} (mods {cvals.modsConverted}/{cvals.modsTotal}, textures {cvals.texturesConverted}/{cvals.texturesTotal})");
                 ImGui.TableSetColumnIndex(3);
-                long folderOriginalBytes = 0;
-                foreach (var m in child.Mods)
-                {
-                    var modOrig = GetOrQueryModOriginalTotal(m);
-                    if (modOrig > 0)
-                        folderOriginalBytes += modOrig;
-                }
-                if (folderOriginalBytes > 0)
-                    DrawRightAlignedSize(folderOriginalBytes);
+                if (!_folderSizeCache.TryGetValue(fullPath, out var sizePair))
+                    sizePair = (0, 0);
+                if (sizePair.orig > 0)
+                    DrawRightAlignedSize(sizePair.orig);
                 else
                     ImGui.TextUnformatted("");
                 ImGui.TableSetColumnIndex(2);
-                long folderCompressedBytes = 0;
-                foreach (var m in child.Mods)
+                if (sizePair.comp > 0)
                 {
-                    var hasBackupM = GetOrQueryModBackup(m);
-                    if (!hasBackupM) continue;
-                    if (_cachedPerModSavings.TryGetValue(m, out var stats) && stats != null && stats.CurrentBytes > 0)
-                        folderCompressedBytes += stats.CurrentBytes;
-                }
-                if (folderCompressedBytes > 0)
-                {
-                    var color = folderCompressedBytes > folderOriginalBytes ? ShrinkUColors.WarningLight : _compressedTextColor;
-                    DrawRightAlignedSizeColored(folderCompressedBytes, color);
+                    var color = sizePair.comp > sizePair.orig ? ShrinkUColors.WarningLight : _compressedTextColor;
+                    DrawRightAlignedSizeColored(sizePair.comp, color);
                 }
                 else
                 {
@@ -295,7 +283,7 @@ public sealed partial class ConversionUI
                     if (drawModRow) ImGui.TableSetColumnIndex(0);
                     bool modSelected = isNonConvertible
                         ? _selectedEmptyMods.Contains(mod)
-                        : files.All(f => _selectedTextures.Contains(f));
+                        : ((_selectedCountByMod.TryGetValue(mod, out var sc) ? sc : 0) >= files.Count);
                     var automaticMode = _configService.Current.TextureProcessingMode == TextureProcessingMode.Automatic;
                     var disableCheckbox = false;
                     if (drawModRow)
@@ -310,9 +298,15 @@ public sealed partial class ConversionUI
                         else
                         {
                             if (modSelected)
+                            {
                                 foreach (var f in files) _selectedTextures.Add(f);
+                                _selectedCountByMod[mod] = files.Count;
+                            }
                             else
+                            {
                                 foreach (var f in files) _selectedTextures.Remove(f);
+                                _selectedCountByMod[mod] = 0;
+                            }
                         }
                     }
                     if (drawModRow) ImGui.EndDisabled();
