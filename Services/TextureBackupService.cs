@@ -422,6 +422,54 @@ public sealed class TextureBackupService
         catch { return Task.FromResult(false); }
     }
 
+    public async Task RefreshAllBackupStateAsync()
+    {
+        try
+        {
+            var mods = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                foreach (var kv in _modStateService.Snapshot())
+                    mods.Add(kv.Key);
+            }
+            catch { }
+
+            try
+            {
+                var backupDirectory = _configService.Current.BackupFolderPath;
+                if (!string.IsNullOrWhiteSpace(backupDirectory) && Directory.Exists(backupDirectory))
+                {
+                    foreach (var dir in Directory.EnumerateDirectories(backupDirectory, "*", SearchOption.TopDirectoryOnly))
+                    {
+                        var name = Path.GetFileName(dir);
+                        if (!string.IsNullOrWhiteSpace(name)) mods.Add(name);
+                    }
+                    foreach (var session in Directory.EnumerateDirectories(backupDirectory, "session_*", SearchOption.TopDirectoryOnly))
+                    {
+                        foreach (var modSub in Directory.EnumerateDirectories(session, "*", SearchOption.TopDirectoryOnly))
+                        {
+                            var name = Path.GetFileName(modSub);
+                            if (!string.IsNullOrWhiteSpace(name)) mods.Add(name);
+                        }
+                    }
+                }
+            }
+            catch { }
+
+            foreach (var mod in mods)
+            {
+                try
+                {
+                    var hasTex = await HasBackupForModAsync(mod).ConfigureAwait(false);
+                    var hasPmp = await HasPmpBackupForModAsync(mod).ConfigureAwait(false);
+                    _modStateService.UpdateBackupFlags(mod, hasTex, hasPmp);
+                }
+                catch { }
+            }
+        }
+        catch { }
+    }
+
     public async Task<bool> CreateFullModBackupAsync(string modFolderName, IProgress<(string,int,int)>? progress, CancellationToken token)
     {
         try
@@ -1098,7 +1146,7 @@ public sealed class TextureBackupService
             try
             {
                 var manifestPath = Path.Combine(sessionDir, "manifest.json");
-                File.WriteAllText(manifestPath, JsonSerializer.Serialize(manifest));
+                    File.WriteAllText(manifestPath, JsonSerializer.Serialize(manifest, new JsonSerializerOptions { WriteIndented = true }));
             }
             catch { }
         }
@@ -1130,7 +1178,7 @@ public sealed class TextureBackupService
                     var modSessionSubdir = Path.Combine(sessionDir, mod);
                 try
                 {
-                    File.WriteAllText(Path.Combine(modSessionSubdir, "manifest.json"), JsonSerializer.Serialize(modManifest));
+                    File.WriteAllText(Path.Combine(modSessionSubdir, "manifest.json"), JsonSerializer.Serialize(modManifest, new JsonSerializerOptions { WriteIndented = true }));
                 }
                 catch { }
 
@@ -1253,7 +1301,7 @@ public sealed class TextureBackupService
                             }
                             var convertedManifestPath = Path.Combine(modBackupDir, "pmp_converted_manifest.json");
                             try { if (File.Exists(convertedManifestPath)) File.Delete(convertedManifestPath); } catch { }
-                            File.WriteAllText(convertedManifestPath, JsonSerializer.Serialize(convertedRel));
+                            File.WriteAllText(convertedManifestPath, JsonSerializer.Serialize(convertedRel, new JsonSerializerOptions { WriteIndented = true }));
                         }
                         catch { }
 

@@ -101,7 +101,7 @@ public sealed class ModStateService
         {
             var path = GetPath();
             var tmp = path + ".tmp";
-            var json = JsonSerializer.Serialize(_state);
+            var json = JsonSerializer.Serialize(_state, new JsonSerializerOptions { WriteIndented = true });
             File.WriteAllText(tmp, json);
             if (File.Exists(path)) File.Delete(path);
             File.Move(tmp, path);
