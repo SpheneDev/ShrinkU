@@ -1550,7 +1550,7 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
 
                 _uiThreadActions.Enqueue(() =>
                 {
-                    if (grouped != null)
+                    if (grouped != null && grouped.Count > 0)
                     {
                         _scannedByMod.Clear();
                         _selectedTextures.Clear();
@@ -1575,10 +1575,10 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                     }
                     else
                     {
-                        _logger.LogDebug("UI state updated (DIAG-v3): origin={origin} heavy scan skipped; preserving previous results", origin);
+                        _logger.LogDebug("UI state updated (DIAG-v3): origin={origin} heavy scan skipped or empty; preserving previous/persisted results", origin);
                     }
 
-                    if (grouped != null)
+                    if (grouped != null && grouped.Count > 0)
                         _logger.LogDebug("Refreshed scan (DIAG-v3): origin={origin} mods={mods} textures={files}", origin, _scannedByMod.Count, _texturesToConvert.Count);
 
                     if (names != null)
