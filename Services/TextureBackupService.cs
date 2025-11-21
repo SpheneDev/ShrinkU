@@ -414,13 +414,10 @@ public sealed class TextureBackupService
             try
             {
                 var list = _penumbraIpc.GetModList();
-                foreach (var key in list.Keys)
+                foreach (var dir in list.Keys)
                 {
-                    var leaf = key.Replace('/', System.IO.Path.DirectorySeparatorChar).Replace('\\', System.IO.Path.DirectorySeparatorChar);
-                    leaf = leaf.TrimEnd(System.IO.Path.DirectorySeparatorChar);
-                    var segs = leaf.Split(System.IO.Path.DirectorySeparatorChar);
-                    if (segs.Length > 0)
-                        mods.Add(segs[^1]);
+                    if (!string.IsNullOrWhiteSpace(dir))
+                        mods.Add(dir);
                 }
             }
             catch { }
