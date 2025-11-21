@@ -1431,8 +1431,14 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                     {
                         foreach (var folder in folders)
                         {
-                            if (!_scannedByMod.ContainsKey(folder))
-                                _scannedByMod[folder] = new List<string>();
+                            var leaf = TextureConversionService.NormalizeLeafKey(folder);
+                            var files = _modStateService.ReadDetailTextures(leaf);
+                            _scannedByMod[leaf] = files ?? new List<string>();
+                            foreach (var file in files)
+                            {
+                                _texturesToConvert[file] = Array.Empty<string>();
+                                _fileOwnerMod[file] = leaf;
+                            }
                         }
                         _knownModFolders = new HashSet<string>(folders, StringComparer.OrdinalIgnoreCase);
                     }
@@ -1500,6 +1506,46 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                     grouped = await _conversionService.GetGroupedCandidateTexturesAsync().ConfigureAwait(false);
                     _lastHeavyScanAt = DateTime.UtcNow;
                     _logger.LogDebug("Heavy scan executed: origin={origin} groupedMods={mods}", origin, grouped?.Count ?? 0);
+
+                    try
+                    {
+                        _modStateService.BeginBatch();
+                        foreach (var kv in grouped)
+                        {
+                            var prev = _modStateService.ReadDetailTextures(kv.Key);
+                            bool sameCount = prev.Count == kv.Value.Count;
+                            if (sameCount)
+                            {
+                                var prevSet = new HashSet<string>(prev, StringComparer.OrdinalIgnoreCase);
+                                var newSet = new HashSet<string>(kv.Value, StringComparer.OrdinalIgnoreCase);
+                                if (prevSet.SetEquals(newSet))
+                                    continue;
+                            }
+                            _modStateService.UpdateTextureFiles(kv.Key, kv.Value);
+                        }
+                        _modStateService.EndBatch();
+                    }
+                    catch { }
+                }
+                else
+                {
+                    try
+                    {
+                        if (folders != null)
+                        {
+                            var persisted = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+                            foreach (var folder in folders)
+                            {
+                                var leaf = TextureConversionService.NormalizeLeafKey(folder);
+                                var list = _modStateService.ReadDetailTextures(leaf);
+                                if (list != null && list.Count > 0)
+                                    persisted[leaf] = list;
+                            }
+                            if (persisted.Count > 0)
+                                grouped = persisted;
+                        }
+                    }
+                    catch { }
                 }
 
                 _uiThreadActions.Enqueue(() =>
@@ -1582,10 +1628,10 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                     {
                         foreach (var folder in folders)
                         {
-                            if (!_scannedByMod.ContainsKey(folder))
-                                _scannedByMod[folder] = new List<string>();
+                            var leaf = TextureConversionService.NormalizeLeafKey(folder);
+                            if (!_scannedByMod.ContainsKey(leaf))
+                                _scannedByMod[leaf] = new List<string>();
                         }
-                        // Update known mod folders snapshot
                         _knownModFolders = new HashSet<string>(folders, StringComparer.OrdinalIgnoreCase);
                     }
                     _needsUIRefresh = true;
@@ -2110,6 +2156,11 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
         _startupRefreshInProgress = value;
         if (value) _startupRefreshStartedAt = DateTime.UtcNow;
         else _startupRefreshStartedAt = DateTime.MinValue;
+    }
+
+    public void TriggerStartupRescan()
+    {
+        RefreshScanResults(true, "startup");
     }
 
     public void SetStartupDependencyErrors(System.Collections.Generic.IEnumerable<string> errors)

@@ -180,6 +180,7 @@ public sealed class Plugin : IDalamudPlugin
                             
                             try { _modStateService.Save(); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to save mod state"); }
                             try { _startupProgressUi.MarkSaveDone(); } catch { }
+                            try { _conversionUi.TriggerStartupRescan(); } catch { }
                         }
                         catch (Exception ex) { _logger.LogError(ex, "Initial refresh failed"); }
                         finally
