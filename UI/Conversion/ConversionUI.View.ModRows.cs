@@ -39,7 +39,11 @@ public sealed partial class ConversionUI
             else if (_modStateSnapshot != null && _modStateSnapshot.TryGetValue(mod, out var ms) && ms != null && ms.ComparedFiles > 0)
                 convertedAll = Math.Min(ms.ComparedFiles, totalAll);
         }
-        var header = ShrinkU.Helpers.ConversionUiHelpers.FormatHeader(ResolveModDisplayName(mod), convertedAll, totalAll);
+        string header;
+        if (hasBackup)
+            header = ShrinkU.Helpers.ConversionUiHelpers.FormatHeader(ResolveModDisplayName(mod), convertedAll, totalAll);
+        else
+            header = string.Concat(ResolveModDisplayName(mod), " (", totalAll.ToString(), ")");
         var open = _expandedMods.Contains(mod);
         ImGui.SetNextItemOpen(open, ImGuiCond.Always);
         ImGui.PushFont(UiBuilder.IconFont);
@@ -270,7 +274,7 @@ public sealed partial class ConversionUI
                 ImGui.PushStyleColor(ImGuiCol.ButtonHovered, ShrinkUColors.ConvertButtonHovered);
                 ImGui.PushStyleColor(ImGuiCol.ButtonActive, ShrinkUColors.ConvertButtonActive);
                 ImGui.PushStyleColor(ImGuiCol.Text, ShrinkUColors.ButtonTextOnAccent);
-                var convertDisabled = excluded || (convertedAll >= totalAll);
+                var convertDisabled = excluded || (hasBackup && (convertedAll >= totalAll));
                 ImGui.BeginDisabled(convertDisabled);
                 if (ImGui.Button($"Convert##convert-{mod}", new Vector2(60, 0)))
                 {
@@ -304,6 +308,13 @@ public sealed partial class ConversionUI
                     ShowTooltip(convertedAll >= totalAll ? "All textures already converted." : (excluded ? "Mod excluded by tags." : "Processing in progress."));
                 ImGui.PopStyleColor(4);
                 ImGui.EndDisabled();
+                if (!convertDisabled)
+                {
+                    var msg = _configService.Current.IncludeHiddenModTexturesOnConvert
+                        ? "Convert all textures for this mod."
+                        : "Convert all visible textures for this mod.";
+                    ShowTooltip(msg);
+                }
             }
             else
             {
@@ -359,10 +370,12 @@ public sealed partial class ConversionUI
                             });
                     }
                 }
-                if (restoreDisabledByAuto && ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
-                    ShowTooltip("Automatic mode: restore disabled for installed mods.");
+                if ((excluded || restoreDisabledByAuto) && ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
+                    ShowTooltip(excluded ? "Mod excluded by tags." : "Automatic mode: restore disabled for installed mods.");
                 ImGui.PopStyleColor(4);
                 ImGui.EndDisabled();
+                if (!(excluded || restoreDisabledByAuto))
+                    ShowTooltip("Restore backups for this mod.");
             }
         }
 

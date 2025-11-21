@@ -3342,15 +3342,17 @@ public sealed class TextureBackupService
                             }
                             var list = grouped.TryGetValue(mod, out var files) && files != null ? files : new List<string>();
                             long current = 0L;
-                            int compared = 0;
-                            foreach (var f in list)
+                            int totalTextures = list.Count;
+                            for (int i = 0; i < list.Count; i++)
                             {
-                                try { var fi = new FileInfo(f); current += fi.Length; compared++; }
+                                var f = list[i];
+                                try { var fi = new FileInfo(f); current += fi.Length; }
                                 catch { }
                             }
                             long original = current;
-                            try { _modStateService.UpdateSavings(mod, original, current, compared); } catch { }
-                            try { _logger.LogDebug("[ShrinkU] PopulateMissingOriginalBytes: stats mod={mod} original={orig} current={cur} comparedFiles={cmp}", mod, original, current, compared); } catch { }
+                            try { _modStateService.UpdateTextureCount(mod, totalTextures); } catch { }
+                            try { _modStateService.UpdateSavings(mod, original, current, 0); } catch { }
+                            try { _logger.LogDebug("[ShrinkU] PopulateMissingOriginalBytes: stats mod={mod} original={orig} current={cur} comparedFiles={cmp}", mod, original, current, 0); } catch { }
                             System.Threading.Interlocked.Increment(ref updated);
                             try { var elapsed = DateTime.UtcNow - start; var remaining = Math.Max(0, candidates.Count - updated); var eta = updated > 0 ? (int)Math.Round(elapsed.TotalSeconds / updated * remaining) : 0; OnPopulateOriginalBytesProgress?.Invoke((updated, candidates.Count, eta)); } catch { }
                         }
