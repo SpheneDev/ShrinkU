@@ -172,20 +172,13 @@ public sealed class TextureBackupService
             try
             {
                 var (ec, fullPath, _, _) = _penumbraIpc.GetModPath(modFolder);
-                if (ec == Penumbra.Api.Enums.PenumbraApiEc.Success && !string.IsNullOrWhiteSpace(fullPath))
-                    return fullPath.Replace('\\', '/');
+                var p = (fullPath ?? string.Empty).Replace('\\', '/');
+                try { _logger.LogDebug("PenumbraRelativePath IPC: mod={mod} ec={ec} path={path}", modFolder, ec, p); } catch { }
+                if (ec == Penumbra.Api.Enums.PenumbraApiEc.Success && !string.IsNullOrWhiteSpace(p))
+                    return p;
             }
             catch { }
-
-            // Fallback: compute from absolute filesystem path
-            var root = _penumbraIpc.ModDirectory ?? string.Empty;
-            var abs = TryFindModDirectory(modFolder) ?? string.Empty;
-            if (string.IsNullOrWhiteSpace(root) || string.IsNullOrWhiteSpace(abs))
-                return string.Empty;
-            var rel = Path.GetRelativePath(root, abs).Replace('\\', '/');
-            if (string.IsNullOrWhiteSpace(rel) || rel.StartsWith("..", StringComparison.Ordinal))
-                return string.Empty;
-            return rel;
+            return string.Empty;
         }
         catch { return string.Empty; }
     }
@@ -379,7 +372,28 @@ public sealed class TextureBackupService
             var trace = PerfTrace.Step(_logger, "RefreshAllBackupState total");
             _modStateService.BeginBatch();
             Dictionary<string, string> modPaths = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            try { modPaths = await _penumbraIpc.GetModPathsAsync().ConfigureAwait(false); } catch { }
+            try
+            {
+                modPaths = await _penumbraIpc.GetModPathsAsync().ConfigureAwait(false);
+                if ((modPaths == null || modPaths.Count == 0) && _penumbraIpc.APIAvailable)
+                {
+                    for (var i = 0; i < 5 && (modPaths == null || modPaths.Count == 0); i++)
+                    {
+                        await Task.Delay(200).ConfigureAwait(false);
+                        try { modPaths = await _penumbraIpc.GetModPathsAsync().ConfigureAwait(false); } catch { }
+                    }
+                }
+                try
+                {
+                    foreach (var kv in modPaths)
+                    {
+                        var rp = (kv.Value ?? string.Empty).Replace('\\', '/').TrimEnd('/');
+                        _logger.LogDebug("PenumbraModPath mapping: {dir} -> {path}", kv.Key, rp);
+                    }
+                }
+                catch { }
+            }
+            catch { }
             Dictionary<string, string> displayByMod = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             try
             {
@@ -571,7 +585,7 @@ public sealed class TextureBackupService
                         }
                         catch { abs = GetModAbsolutePath(mod) ?? string.Empty; }
                         var rel = string.Empty;
-                        try { rel = modPaths.TryGetValue(mod, out var rp) ? (rp ?? string.Empty).Replace('\\', '/').TrimEnd('/') : mod; } catch { rel = mod; }
+                        try { rel = GetModPenumbraRelativePath(mod); } catch { rel = string.Empty; }
                         var ver = versionByMod.TryGetValue(mod, out var vv) ? vv : string.Empty;
                         var auth = authorByMod.TryGetValue(mod, out var aa) ? aa : string.Empty;
                         _modStateService.UpdateCurrentModInfo(mod, abs, rel, ver, auth);

@@ -976,7 +976,15 @@ public sealed class PenumbraIpc : IDisposable
     {
         try
         {
-            var tuple = _penumbraGetModPath.Invoke(modDirectory, "");
+            var modName = string.Empty;
+            try
+            {
+                var list = _penumbraGetModList.Invoke();
+                if (list != null && list.TryGetValue(modDirectory, out var name))
+                    modName = name ?? string.Empty;
+            }
+            catch { }
+            var tuple = _penumbraGetModPath.Invoke(modDirectory, modName);
             return tuple;
         }
         catch
