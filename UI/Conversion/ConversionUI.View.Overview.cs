@@ -560,14 +560,15 @@ public sealed partial class ConversionUI
         foreach (var m in selectedEmptyModsBtn) selectedModsAll.Add(m);
         var convertibleSelectedMods = new List<string>();
         var nonConvertibleSelectedMods = new List<string>();
+        var snapGating = _modStateService.Snapshot();
         foreach (var m in selectedModsAll)
         {
-            List<string> list = null;
-            if (_scannedByMod.TryGetValue(m, out var all) && all != null)
-                list = all;
-            else
-                list = _modStateService.ReadDetailTextures(m);
-            if (list != null && list.Count > 0) convertibleSelectedMods.Add(m); else nonConvertibleSelectedMods.Add(m);
+            var hasAny = false;
+            if (snapGating.TryGetValue(m, out var ms) && ms != null && ms.TotalTextures > 0)
+                hasAny = true;
+            else if (_scannedByMod.TryGetValue(m, out var all) && all != null && all.Count > 0)
+                hasAny = true;
+            if (hasAny) convertibleSelectedMods.Add(m); else nonConvertibleSelectedMods.Add(m);
         }
 
         ImGui.PushStyleColor(ImGuiCol.Button, ShrinkUColors.Accent);
