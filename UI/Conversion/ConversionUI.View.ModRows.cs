@@ -565,6 +565,18 @@ public sealed partial class ConversionUI
                         catch (Exception ex) { _logger.LogError(ex, "Update ExternalConvertedMods after install failed for {mod}", mod); }
                         try { RefreshModState(mod, "orphan-install-flat"); }
                         catch (Exception ex) { _logger.LogError(ex, "RefreshModState after install failed for {mod}", mod); }
+                        try
+                        {
+                            var orphans = _backupService.FindOrphanedBackupsAsync().GetAwaiter().GetResult();
+                            _uiThreadActions.Enqueue(() =>
+                            {
+                                _orphaned = orphans ?? new List<ShrinkU.Services.TextureBackupService.OrphanBackupInfo>();
+                                _orphanRevision++;
+                                _needsUIRefresh = true;
+                                RequestUiRefresh("orphan-refresh-after-install");
+                            });
+                        }
+                        catch (Exception ex) { _logger.LogError(ex, "FindOrphanedBackupsAsync after install failed for {mod}", mod); }
                         _ = _backupService.ComputeSavingsForModAsync(mod).ContinueWith(ps =>
                         {
                             if (ps.Status == TaskStatus.RanToCompletion)

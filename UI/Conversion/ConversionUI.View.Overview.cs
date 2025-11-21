@@ -445,7 +445,7 @@ public sealed partial class ConversionUI
 
             var expandedFoldersSig = string.Join(",", _expandedFolders.OrderBy(s => s, StringComparer.Ordinal));
             var expandedModsSig = string.Join(",", _expandedMods.OrderBy(s => s, StringComparer.OrdinalIgnoreCase));
-            var sig = string.Concat(expandedFoldersSig, "|", expandedModsSig, "|", visibleByMod.Count.ToString(), "|", (_configService.Current.ShowModFilesInOverview ? "1" : "0"), "|", _scanFilter, "|", _filterPenumbraUsedOnly ? "1" : "0", "|", _filterNonConvertibleMods ? "1" : "0", "|", _filterInefficientMods ? "1" : "0", "|", _modPathsSig);
+            var sig = string.Concat(expandedFoldersSig, "|", expandedModsSig, "|", visibleByMod.Count.ToString(), "|", (_configService.Current.ShowModFilesInOverview ? "1" : "0"), "|", _scanFilter, "|", _filterPenumbraUsedOnly ? "1" : "0", "|", _filterNonConvertibleMods ? "1" : "0", "|", _filterInefficientMods ? "1" : "0", "|", _modPathsSig, "|", _orphanRevision.ToString());
             if (!string.Equals(sig, _flatRowsSig, StringComparison.Ordinal))
             {
                 root = BuildTableCategoryTree(mods);

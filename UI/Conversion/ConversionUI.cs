@@ -238,6 +238,7 @@ public sealed partial class ConversionUI : Window, IDisposable
     private volatile bool _orphanScanInFlight = false;
     private DateTime _lastOrphanScanUtc = DateTime.MinValue;
     private List<TextureBackupService.OrphanBackupInfo> _orphaned = new();
+    private int _orphanRevision = 0;
     private int _currentRestoreModTotal = 0;
     private bool _restoreAfterCancel = false;
     private string _cancelTargetMod = string.Empty;
@@ -599,6 +600,7 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
                         _uiThreadActions.Enqueue(() =>
                         {
                             _orphaned = orphans ?? new List<TextureBackupService.OrphanBackupInfo>();
+                            _orphanRevision++;
                             _lastOrphanScanUtc = DateTime.UtcNow;
                             RequestUiRefresh("orphaned-backups-refreshed");
                         });
@@ -843,6 +845,7 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
                             _uiThreadActions.Enqueue(() =>
                             {
                                 _orphaned = orphans ?? new List<TextureBackupService.OrphanBackupInfo>();
+                                _orphanRevision++;
                                 _lastOrphanScanUtc = DateTime.UtcNow;
                                 _needsUIRefresh = true;
                                 RequestUiRefresh("mod-deleted-orphan-refresh");
