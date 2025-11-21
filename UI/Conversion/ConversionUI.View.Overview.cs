@@ -187,11 +187,9 @@ public sealed partial class ConversionUI
                 : snap.Keys.ToList();
             foreach (var mod in sourceKeys)
             {
-                List<string> files = null;
-                if (_scannedByMod.TryGetValue(mod, out var list) && list != null)
-                    files = list;
-                else
-                    files = _modStateService.ReadDetailTextures(mod);
+                var files = (_scannedByMod.TryGetValue(mod, out var list) && list != null)
+                    ? list
+                    : (_modStateService.ReadDetailTextures(mod) ?? new List<string>());
                 if (IsModExcludedByTags(mod))
                     continue;
                 var displayName = ResolveModDisplayName(mod);
@@ -209,12 +207,10 @@ public sealed partial class ConversionUI
                     }
                     else
                     {
-                        List<string> usedList = null;
-                        if (snap.TryGetValue(mod, out var eUsed) && eUsed != null && eUsed.UsedTextureFiles != null)
-                            usedList = eUsed.UsedTextureFiles;
-                        else
-                            usedList = _modStateService.ReadDetailUsed(mod);
-                        var usedByMod = new HashSet<string>((usedList ?? new List<string>()).Select(p => (p ?? string.Empty).Replace('/', '\\')), StringComparer.OrdinalIgnoreCase);
+                        var usedList = (snap.TryGetValue(mod, out var eUsed) && eUsed != null && eUsed.UsedTextureFiles != null)
+                            ? eUsed.UsedTextureFiles
+                            : (_modStateService.ReadDetailUsed(mod) ?? new List<string>());
+                        var usedByMod = new HashSet<string>(usedList.Select(p => (p ?? string.Empty).Replace('/', System.IO.Path.DirectorySeparatorChar)), StringComparer.OrdinalIgnoreCase);
                         if (usedByMod.Count > 0)
                             filtered = filtered.Where(f => usedByMod.Contains((f ?? string.Empty).Replace('/', '\\'))).ToList();
                         else
@@ -223,11 +219,7 @@ public sealed partial class ConversionUI
                 }
 
                 var isOrphan = _orphaned.Any(x => string.Equals(x.ModFolderName, mod, StringComparison.OrdinalIgnoreCase));
-                var totalTexturesForMod = 0;
-                if (snap.TryGetValue(mod, out var msCount) && msCount != null)
-                    totalTexturesForMod = Math.Max(0, msCount.TotalTextures);
-                else
-                    totalTexturesForMod = files?.Count ?? 0;
+                var totalTexturesForMod = GetTotalTexturesForMod(mod, files);
                 if (_filterNonConvertibleMods && totalTexturesForMod == 0 && !isOrphan)
                     continue;
 
@@ -237,7 +229,7 @@ public sealed partial class ConversionUI
                 var modMatchesFilter = string.IsNullOrEmpty(_scanFilter)
                                        || displayName.IndexOf(_scanFilter, StringComparison.OrdinalIgnoreCase) >= 0
                                        || mod.IndexOf(_scanFilter, StringComparison.OrdinalIgnoreCase) >= 0;
-                var include = _filterPenumbraUsedOnly ? filtered.Count > 0 : (filtered.Count > 0 || modMatchesFilter);
+                var include = _filterPenumbraUsedOnly ? filtered.Count > 0 : ((files?.Count ?? 0) > 0 || modMatchesFilter || totalTexturesForMod > 0);
                 if (include)
                     _visibleByMod[mod] = filtered;
             }
@@ -261,13 +253,17 @@ public sealed partial class ConversionUI
                 StringComparer.OrdinalIgnoreCase);
             _modDisplayNames = snap.ToDictionary(kv => kv.Key, kv => kv.Value?.DisplayName ?? string.Empty, StringComparer.OrdinalIgnoreCase);
             _selectedCountByMod.Clear();
-            foreach (var (mod, files) in _visibleByMod)
+            var sourceKeysCount = _scannedByMod.Count > 0
+                ? _scannedByMod.Keys.Union(_visibleByMod.Keys, StringComparer.OrdinalIgnoreCase).ToList()
+                : _visibleByMod.Keys.ToList();
+            foreach (var mod in sourceKeysCount)
             {
+                var allFiles = GetAllFilesForModDisplay(mod, _visibleByMod.TryGetValue(mod, out var vis) ? vis : null);
                 int c = 0;
-                if (files != null && files.Count > 0)
+                if (allFiles != null && allFiles.Count > 0)
                 {
-                    for (int i = 0; i < files.Count; i++)
-                        if (_selectedTextures.Contains(files[i])) c++;
+                    for (int i = 0; i < allFiles.Count; i++)
+                        if (_selectedTextures.Contains(allFiles[i])) c++;
                 }
                 _selectedCountByMod[mod] = c;
             }
@@ -311,20 +307,29 @@ public sealed partial class ConversionUI
         {
             _selectedTextures.Clear();
             _selectedEmptyMods.Clear();
-            foreach (var kv in visibleByMod)
+            var snapAll = _modStateService.Snapshot();
+            var sourceKeysAll = _scannedByMod.Count > 0
+                ? _scannedByMod.Keys.Union(snapAll.Keys, StringComparer.OrdinalIgnoreCase).ToList()
+                : snapAll.Keys.ToList();
+            foreach (var mod in sourceKeysAll)
             {
-                var mod = kv.Key;
-                var files = kv.Value ?? new List<string>();
+                var files = visibleByMod.TryGetValue(mod, out var v) && v != null ? v : new List<string>();
                 var capsAll = EvaluateModCapabilities(mod);
-                if (!capsAll.Excluded && !capsAll.HasAnyBackup)
+                if (!capsAll.Excluded)
                 {
                     if (capsAll.CanConvert)
                     {
-                        if (files.Count > 0)
+                        List<string>? allFilesForMod = null;
+                        if (_scannedByMod.TryGetValue(mod, out var all) && all != null && all.Count > 0)
+                            allFilesForMod = all;
+                        else
+                            allFilesForMod = files;
+                        var totalAll = allFilesForMod.Count;
+                        if (totalAll > 0)
                         {
-                            for (int i = 0; i < files.Count; i++)
-                                _selectedTextures.Add(files[i]);
-                            _selectedCountByMod[mod] = files.Count;
+                            for (int i = 0; i < totalAll; i++)
+                                _selectedTextures.Add(allFilesForMod[i]);
+                            _selectedCountByMod[mod] = totalAll;
                         }
                         else
                         {
@@ -354,9 +359,11 @@ public sealed partial class ConversionUI
             if (ImGui.MenuItem("Mods that can be converted"))
             {
                 var snapPopup = _modStateService.Snapshot();
-                foreach (var kv in visibleByMod)
+                var sourceKeys = _scannedByMod.Count > 0
+                    ? _scannedByMod.Keys.Union(snapPopup.Keys, StringComparer.OrdinalIgnoreCase).ToList()
+                    : snapPopup.Keys.ToList();
+                foreach (var mod in sourceKeys)
                 {
-                    var mod = kv.Key;
                     if (IsModExcludedByTags(mod)) continue;
                     var canConvert = false;
                     if (snapPopup.TryGetValue(mod, out var ms) && ms != null && ms.TotalTextures > 0)
@@ -364,11 +371,17 @@ public sealed partial class ConversionUI
                     else if (_scannedByMod.TryGetValue(mod, out var all) && all != null && all.Count > 0)
                         canConvert = true;
                     if (!canConvert) continue;
-                    var files = kv.Value ?? new List<string>();
-                    if (files.Count > 0)
+                    var files = visibleByMod.TryGetValue(mod, out var v) && v != null ? v : new List<string>();
+                    List<string>? allFilesForMod = null;
+                    if (_scannedByMod.TryGetValue(mod, out var allFiles) && allFiles != null && allFiles.Count > 0)
+                        allFilesForMod = allFiles;
+                    else
+                        allFilesForMod = files;
+                    var totalAll = allFilesForMod.Count;
+                    if (totalAll > 0)
                     {
-                        for (int i = 0; i < files.Count; i++) _selectedTextures.Add(files[i]);
-                        _selectedCountByMod[mod] = files.Count;
+                        for (int i = 0; i < totalAll; i++) _selectedTextures.Add(allFilesForMod[i]);
+                        _selectedCountByMod[mod] = totalAll;
                         _selectedEmptyMods.Remove(mod);
                     }
                     else
@@ -381,9 +394,11 @@ public sealed partial class ConversionUI
             if (ImGui.MenuItem("Mods without textures (backup)"))
             {
                 var snapPopup2 = _modStateService.Snapshot();
-                foreach (var kv in visibleByMod)
+                var sourceKeys2 = _scannedByMod.Count > 0
+                    ? _scannedByMod.Keys.Union(snapPopup2.Keys, StringComparer.OrdinalIgnoreCase).ToList()
+                    : snapPopup2.Keys.ToList();
+                foreach (var mod in sourceKeys2)
                 {
-                    var mod = kv.Key;
                     if (IsModExcludedByTags(mod)) continue;
                     var noTextures = false;
                     if (snapPopup2.TryGetValue(mod, out var ms) && ms != null)

@@ -22,9 +22,7 @@ public sealed partial class ConversionUI
         var isOrphan = _orphaned.Any(x => string.Equals(x.ModFolderName, mod, StringComparison.OrdinalIgnoreCase));
         var hasBackup = GetOrQueryModBackup(mod);
         var excluded = (!hasBackup && !isOrphan && IsModExcludedByTags(mod));
-        int totalAll = files.Count;
-        if (_modStateSnapshot != null && _modStateSnapshot.TryGetValue(mod, out var msTotal) && msTotal != null && msTotal.TotalTextures > 0)
-            totalAll = msTotal.TotalTextures;
+        int totalAll = GetTotalTexturesForMod(mod, files);
         int convertedAll = 0;
         if (totalAll > 0)
         {
@@ -56,6 +54,12 @@ public sealed partial class ConversionUI
         ImGui.SameLine();
         ImGui.AlignTextToFramePadding();
         open = ImGui.TreeNodeEx($"{header}##mod-{mod}", nodeFlags);
+        var modToggled = ImGui.IsItemToggledOpen();
+        if (modToggled)
+        {
+            if (open) _expandedMods.Add(mod);
+            else _expandedMods.Remove(mod);
+        }
         var headerHoveredTree = ImGui.IsItemHovered();
         if (ImGui.BeginPopupContextItem($"modctx-{mod}"))
         {
@@ -318,7 +322,7 @@ public sealed partial class ConversionUI
                             }
                             catch (Exception ex) { _logger.LogError(ex, "GetModTextureFilesAsync failed for {mod}", mod); }
                         }
-                        var toConvert = BuildToConvert(all);
+                        var toConvert = BuildToConvert(all ?? new List<string>());
                         await _conversionService.StartConversionAsync(toConvert).ConfigureAwait(false);
                     });
                 }
@@ -408,8 +412,7 @@ public sealed partial class ConversionUI
                     {
                         _running = true;
                         ResetBothProgress();
-                        _reinstallInProgress = true;
-                        _reinstallMod = mod;
+                        
                         var progress = new Progress<(string, int, int)>(e => { _currentTexture = e.Item1; _backupIndex = e.Item2; _backupTotal = e.Item3; });
                         _ = _backupService.ReinstallModFromLatestPmpAsync(mod, progress, CancellationToken.None)
                             .ContinueWith(t =>
@@ -423,8 +426,7 @@ public sealed partial class ConversionUI
                                     ClearModCaches(mod);
                                     RefreshModState(mod, "reinstall-completed-flat");
                                 });
-                                _reinstallInProgress = false;
-                                _reinstallMod = string.Empty;
+                                
                                 ResetBothProgress();
                                 _uiThreadActions.Enqueue(() => { _running = false; });
                             }, TaskScheduler.Default);

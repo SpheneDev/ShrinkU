@@ -125,7 +125,11 @@ public sealed partial class ConversionUI
             _flatRows.Add(new FlatRow { Kind = FlatRowKind.Mod, Node = node, Mod = mod, Depth = depth });
             if (_configService.Current.ShowModFilesInOverview && _expandedMods.Contains(mod))
             {
-                var files = visibleByMod[mod];
+                List<string>? files = null;
+                if (_scannedByMod.TryGetValue(mod, out var all) && all != null && all.Count > 0)
+                    files = all;
+                else if (visibleByMod.TryGetValue(mod, out var vis) && vis != null)
+                    files = vis;
                 if (files != null)
                 {
                     for (int i = 0; i < files.Count; i++)
@@ -258,10 +262,15 @@ public sealed partial class ConversionUI
         var files = new List<string>();
         foreach (var mod in node.Mods)
         {
-            if (visibleByMod.TryGetValue(mod, out var modFiles) && modFiles != null && modFiles.Count > 0)
+            List<string>? src = null;
+            if (_scannedByMod.TryGetValue(mod, out var all) && all != null && all.Count > 0)
+                src = all;
+            else if (visibleByMod.TryGetValue(mod, out var modFiles) && modFiles != null && modFiles.Count > 0)
+                src = modFiles;
+            if (src != null)
             {
-                for (int i = 0; i < modFiles.Count; i++)
-                    files.Add(modFiles[i]);
+                for (int i = 0; i < src.Count; i++)
+                    files.Add(src[i]);
             }
         }
         foreach (var child in node.Children.Values)
@@ -280,10 +289,12 @@ public sealed partial class ConversionUI
     {
         foreach (var mod in node.Mods)
         {
-            if (visibleByMod.TryGetValue(mod, out var files) && files != null && files.Count > 0)
+            var filesGuess = visibleByMod.TryGetValue(mod, out var files) ? files : null;
+            int totalAll = GetTotalTexturesForMod(mod, filesGuess);
+            var sc = _selectedCountByMod.TryGetValue(mod, out var c) ? c : 0;
+            if (totalAll > 0)
             {
-                var sc = _selectedCountByMod.TryGetValue(mod, out var c) ? c : 0;
-                if (sc < files.Count)
+                if (sc < totalAll)
                     return false;
             }
             else

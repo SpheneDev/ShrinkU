@@ -27,11 +27,6 @@ public sealed class SettingsUI : Window
     // Tag filtering input state (persisted via config on Apply)
     private string _excludedTagsInput = string.Empty;
     private List<string> _excludedTagsEditable = new();
-    private volatile bool _reinstallInProgress = false;
-    private string _reinstallStatus = string.Empty;
-    private int _reinstallCurrent = 0;
-    private int _reinstallTotal = 0;
-    private string _reinstallModName = string.Empty;
     private volatile bool _orphanScanInFlight = false;
     private DateTime _lastOrphanScanUtc = DateTime.MinValue;
 

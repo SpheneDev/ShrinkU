@@ -82,7 +82,7 @@ public TextureConversionService(ILogger logger, PenumbraIpc penumbraIpc, Texture
         {
             try
             {
-                _ = Task.Run(async () =>
+                _ = Task.Run(() =>
                 {
                     try
                     {
@@ -318,7 +318,7 @@ public TextureConversionService(ILogger logger, PenumbraIpc penumbraIpc, Texture
             foreach (var mod in ordered)
             {
                 await sem.WaitAsync(token).ConfigureAwait(false);
-                tasks.Add(Task.Run(async () =>
+                tasks.Add(Task.Run(() =>
                 {
                     try
                     {

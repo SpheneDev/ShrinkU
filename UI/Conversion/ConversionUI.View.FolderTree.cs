@@ -27,7 +27,6 @@ public sealed partial class ConversionUI
                 ImGui.TableSetColumnIndex(0);
             }
             var fullPath = string.IsNullOrEmpty(pathPrefix) ? name : $"{pathPrefix}/{name}";
-            List<string>? folderFiles = null;
             bool hasSelectable = false;
             if (drawFolderRow)
             {
@@ -187,7 +186,7 @@ public sealed partial class ConversionUI
                     string header;
                     if (drawModRow)
                     {
-                        totalAll = _scannedByMod.TryGetValue(mod, out var allModFiles2) && allModFiles2 != null ? allModFiles2.Count : files.Count;
+                        totalAll = GetTotalTexturesForMod(mod, files);
                         if (hasBackup && totalAll > 0)
                         {
                             if (_cachedPerModSavings.TryGetValue(mod, out var s2) && s2 != null && s2.ComparedFiles > 0)
@@ -220,10 +219,14 @@ public sealed partial class ConversionUI
                         ImGui.SameLine();
                     ImGui.AlignTextToFramePadding();
                     open = ImGui.TreeNodeEx($"{header}##mod-{mod}", nodeFlags);
+                    var modToggled = ImGui.IsItemToggledOpen();
+                    if (modToggled)
+                    {
+                        if (open) _expandedMods.Add(mod);
+                        else _expandedMods.Remove(mod);
+                    }
                     }
                     var headerHoveredTree = ImGui.IsItemHovered();
-                    
-                    var headerHoveredText = ImGui.IsItemHovered();
 
                     if (drawModRow) ImGui.TableSetColumnIndex(0);
                     bool modSelected = (files.Count == 0)

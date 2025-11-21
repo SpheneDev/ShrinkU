@@ -145,7 +145,7 @@ public sealed class FirstRunSetupUI : Window
     private static bool DirectoryExistsSafe(string path)
     {
         try { return !string.IsNullOrWhiteSpace(path) && Directory.Exists(path); }
-        catch (Exception ex) { return false; }
+        catch (Exception) { return false; }
     }
 
     private static void TryOpenFolder(string path)
@@ -155,11 +155,11 @@ public sealed class FirstRunSetupUI : Window
             if (!string.IsNullOrWhiteSpace(path))
             {
                 try { Directory.CreateDirectory(path); }
-                catch (Exception ex) { }
+                catch (Exception) { }
                 try { Process.Start(new ProcessStartInfo("explorer.exe", path) { UseShellExecute = true }); }
-                catch (Exception ex) { }
+                catch (Exception) { }
             }
         }
-        catch (Exception ex) { }
+        catch (Exception) { }
     }
 }

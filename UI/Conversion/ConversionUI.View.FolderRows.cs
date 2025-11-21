@@ -29,13 +29,18 @@ public sealed partial class ConversionUI
                     var hasBackup = GetOrQueryModBackup(mod);
                     var excluded = (!hasBackup && !isOrphan && IsModExcludedByTags(mod));
                     var convertedAll = 0;
-                    var totalAll = files.Count;
+                    List<string>? allFilesForMod = null;
+                    if (_scannedByMod.TryGetValue(mod, out var all) && all != null && all.Count > 0)
+                        allFilesForMod = all;
+                    else
+                        allFilesForMod = files;
+                    var totalAll = allFilesForMod.Count;
                     var disableCheckbox = excluded || (automaticMode && !isOrphan && (convertedAll >= totalAll));
                     if (!disableCheckbox)
                     {
-                        foreach (var f in files)
+                        foreach (var f in allFilesForMod)
                             _selectedTextures.Add(f);
-                        _selectedCountByMod[mod] = files.Count;
+                        _selectedCountByMod[mod] = totalAll;
                     }
                     else if (!isOrphan)
                     {
@@ -49,9 +54,7 @@ public sealed partial class ConversionUI
                 foreach (var f in folderFiles) _selectedTextures.Remove(f);
                 foreach (var mod in child.Mods) _selectedEmptyMods.Remove(mod);
                 foreach (var mod in child.Mods)
-                {
-                    if (visibleByMod.ContainsKey(mod)) _selectedCountByMod[mod] = 0;
-                }
+                    _selectedCountByMod[mod] = 0;
             }
         }
         ImGui.EndDisabled();

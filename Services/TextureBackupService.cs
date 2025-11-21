@@ -386,6 +386,7 @@ public sealed class TextureBackupService
                 }
                 try
                 {
+                    modPaths ??= new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
                     foreach (var kv in modPaths)
                     {
                         var rp = (kv.Value ?? string.Empty).Replace('\\', '/').TrimEnd('/');
@@ -976,7 +977,7 @@ public sealed class TextureBackupService
             try { await Task.Delay(800, token).ConfigureAwait(false); } catch { }
             if (deregisterDuringRestore)
             {
-                try { _penumbraIpc.OpenModInPenumbra(modFolderName, null); } catch { }
+                try { _penumbraIpc.OpenModInPenumbra(modFolderName, modFolderName); } catch { }
             }
             try
             {
@@ -3293,6 +3294,7 @@ public sealed class TextureBackupService
             try { _modStateService.UpdateSavings(modFolderName, stats.OriginalBytes, stats.CurrentBytes, stats.ComparedFiles); } catch { }
         }
         catch { }
+        await Task.CompletedTask;
         return stats;
     }
 

@@ -99,7 +99,6 @@ public sealed partial class ConversionUI : Window, IDisposable
     // Cached backup storage info for statistics
     private Task<(long totalSize, int fileCount)>? _backupStorageInfoTask = null;
     private DateTime _lastBackupStorageInfoUpdate = DateTime.MinValue;
-    private (long totalSize, int fileCount) _cachedBackupStorageInfo = (0L, 0);
 
     // Cached savings info comparing backups vs current Penumbra files
     private Task<TextureBackupService.BackupSavingsStats>? _savingsInfoTask = null;
@@ -268,7 +267,7 @@ public sealed partial class ConversionUI : Window, IDisposable
     private int _startupEtaSeconds = 0;
     private readonly System.Collections.Generic.List<string> _startupDependencyErrors = new System.Collections.Generic.List<string>();
     private DateTime _startupRefreshStartedAt = DateTime.MinValue;
-    private volatile bool _refreshOnlyOnModStateChanged = true;
+    
     // Snapshot of known Penumbra mod folders to guard heavy scans
     private HashSet<string> _knownModFolders = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     // Debounce sequence to ensure trailing-edge execution for mod add/delete
@@ -385,8 +384,7 @@ public sealed partial class ConversionUI : Window, IDisposable
     private readonly Action _onExcludedTagsUpdated;
     private readonly Action _onPlayerResourcesChanged;
     private readonly Action<string> _onModStateEntryChanged;
-    private bool _reinstallInProgress = false;
-    private string _reinstallMod = string.Empty;
+    
     // Track last external conversion/restore notification to surface UI indicator
     private DateTime _lastExternalChangeAt = DateTime.MinValue;
     private string _lastExternalChangeReason = string.Empty;
@@ -686,8 +684,8 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
                             {
                                 try
                                 {
-                                    string mod = string.Empty;
-                                    if (!_fileOwnerMod.TryGetValue(file, out mod) || string.IsNullOrWhiteSpace(mod))
+                                    string? mod = null;
+                                    if (!_fileOwnerMod.TryGetValue(file, out var modTmp) || string.IsNullOrWhiteSpace(modTmp))
                                     {
                                         foreach (var kvp in _modPaths)
                                         {
@@ -695,6 +693,10 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
                                             if (string.IsNullOrWhiteSpace(abs)) continue;
                                             if (file.StartsWith(abs, StringComparison.OrdinalIgnoreCase)) { mod = kvp.Key; break; }
                                         }
+                                    }
+                                    else
+                                    {
+                                        mod = modTmp;
                                     }
                                     if (!string.IsNullOrWhiteSpace(mod)) modsToMark.Add(mod);
                                 }
@@ -1672,6 +1674,24 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
     private void DrawScannedFilesTable()
     {
         DrawScannedFilesTable_ViewImpl();
+    }
+
+    private List<string> GetAllFilesForModDisplay(string mod, List<string>? visibleFiles = null)
+    {
+        if (_scannedByMod.TryGetValue(mod, out var all) && all != null && all.Count > 0)
+            return all;
+        var vf = visibleFiles ?? _modStateService.ReadDetailTextures(mod);
+        return vf ?? new List<string>();
+    }
+
+    private int GetTotalTexturesForMod(string mod, List<string>? filesGuess = null)
+    {
+        if (_scannedByMod.TryGetValue(mod, out var all) && all != null)
+            return all.Count;
+        if (_modStateSnapshot != null && _modStateSnapshot.TryGetValue(mod, out var ms) && ms != null && ms.TotalTextures > 0)
+            return ms.TotalTextures;
+        var det = filesGuess ?? _modStateService.ReadDetailTextures(mod);
+        return det?.Count ?? 0;
     }
 
     // Human-readable size formatting
