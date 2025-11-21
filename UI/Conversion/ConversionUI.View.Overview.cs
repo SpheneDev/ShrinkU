@@ -650,6 +650,7 @@ public sealed partial class ConversionUI
         foreach (var m in selectedEmptyModsBtn) selectedModsAll.Add(m);
         var convertibleSelectedMods = new List<string>();
         var nonConvertibleSelectedMods = new List<string>();
+        var convertibleSelectedModsNoBackup = new List<string>();
         var snapGating = _modStateService.Snapshot();
         foreach (var m in selectedModsAll)
         {
@@ -659,6 +660,12 @@ public sealed partial class ConversionUI
             else if (_scannedByMod.TryGetValue(m, out var all) && all != null && all.Count > 0)
                 hasAny = true;
             if (hasAny) convertibleSelectedMods.Add(m); else nonConvertibleSelectedMods.Add(m);
+        }
+        foreach (var m in convertibleSelectedMods)
+        {
+            var hasAnyBackup = GetOrQueryModBackup(m) || GetOrQueryModTextureBackup(m) || GetOrQueryModPmp(m);
+            if (!hasAnyBackup)
+                convertibleSelectedModsNoBackup.Add(m);
         }
 
         ImGui.PushStyleColor(ImGuiCol.Button, ShrinkUColors.Accent);
@@ -701,13 +708,13 @@ public sealed partial class ConversionUI
         ImGui.PushStyleColor(ImGuiCol.ButtonHovered, ShrinkUColors.AccentHovered);
         ImGui.PushStyleColor(ImGuiCol.ButtonActive, ShrinkUColors.AccentActive);
         ImGui.PushStyleColor(ImGuiCol.Text, ShrinkUColors.ButtonTextOnAccent);
-        using (var _d2 = ImRaii.Disabled(ActionsDisabled() || (convertibleSelectedMods.Count == 0 && GetConvertableTextures().Count == 0)))
+        using (var _d2 = ImRaii.Disabled(ActionsDisabled() || (convertibleSelectedModsNoBackup.Count == 0 && GetConvertableTextures().Count == 0)))
         if (ImGui.Button("Convert"))
         {
             _running = true;
             ResetConversionProgress();
             var toConvert = GetConvertableTextures();
-            var modsToConvert = new HashSet<string>(convertibleSelectedMods, StringComparer.OrdinalIgnoreCase);
+            var modsToConvert = new HashSet<string>(convertibleSelectedModsNoBackup, StringComparer.OrdinalIgnoreCase);
             _uiThreadActions.Enqueue(() => { _totalMods = modsToConvert.Count; _currentModIndex = 0; _currentModTotalFiles = 0; _needsUIRefresh = true; });
             _ = Task.Run(async () =>
             {
@@ -768,121 +775,123 @@ public sealed partial class ConversionUI
         bool someSkippedByAuto = automaticMode && restorableFiltered.Count < restorableModsForAction.Count;
 
         using (var _d3 = ImRaii.Disabled(ActionsDisabled() || !canRestore))
-        ImGui.PushStyleColor(ImGuiCol.Button, ShrinkUColors.Accent);
-        ImGui.PushStyleColor(ImGuiCol.ButtonHovered, ShrinkUColors.AccentHovered);
-        ImGui.PushStyleColor(ImGuiCol.ButtonActive, ShrinkUColors.AccentActive);
-        ImGui.PushStyleColor(ImGuiCol.Text, ShrinkUColors.ButtonTextOnAccent);
-        if (ImGui.Button("Restore Backups"))
         {
-            _running = true;
-            ResetBothProgress();
-            var progress = new Progress<(string, int, int)>(e =>
+            ImGui.PushStyleColor(ImGuiCol.Button, ShrinkUColors.Accent);
+            ImGui.PushStyleColor(ImGuiCol.ButtonHovered, ShrinkUColors.AccentHovered);
+            ImGui.PushStyleColor(ImGuiCol.ButtonActive, ShrinkUColors.AccentActive);
+            ImGui.PushStyleColor(ImGuiCol.Text, ShrinkUColors.ButtonTextOnAccent);
+            if (ImGui.Button("Restore Backups"))
             {
-                _currentTexture = e.Item1;
-                _backupIndex = e.Item2;
-                _backupTotal = e.Item3;
-                _currentRestoreModIndex = e.Item2;
-                _currentRestoreModTotal = e.Item3;
-            });
-            _restoreCancellationTokenSource?.Dispose();
-            _restoreCancellationTokenSource = new CancellationTokenSource();
-            var restoreToken = _restoreCancellationTokenSource.Token;
-
-            _ = Task.Run(async () =>
-            {
-                foreach (var mod in restorableFiltered)
+                _running = true;
+                ResetBothProgress();
+                var progress = new Progress<(string, int, int)>(e =>
                 {
-                    try
+                    _currentTexture = e.Item1;
+                    _backupIndex = e.Item2;
+                    _backupTotal = e.Item3;
+                    _currentRestoreModIndex = e.Item2;
+                    _currentRestoreModTotal = e.Item3;
+                });
+                _restoreCancellationTokenSource?.Dispose();
+                _restoreCancellationTokenSource = new CancellationTokenSource();
+                var restoreToken = _restoreCancellationTokenSource.Token;
+
+                _ = Task.Run(async () =>
+                {
+                    foreach (var mod in restorableFiltered)
                     {
-                        _currentRestoreMod = mod;
-                        _currentRestoreModIndex = 0;
-                        _currentRestoreModTotal = 0;
-                        var preferPmp = _configService.Current.PreferPmpRestoreWhenAvailable;
-                        var hasPmp = false;
-                        try { hasPmp = _backupService.HasPmpBackupForModAsync(mod).GetAwaiter().GetResult(); }
-                        catch (Exception ex) { _logger.LogError(ex, "HasPmpBackup check failed for {mod}", mod); }
-                        if (preferPmp && hasPmp)
+                        try
                         {
-                            var latestPmp = _backupService.GetPmpBackupsForModAsync(mod).GetAwaiter().GetResult().FirstOrDefault();
-                            if (!string.IsNullOrEmpty(latestPmp))
+                            _currentRestoreMod = mod;
+                            _currentRestoreModIndex = 0;
+                            _currentRestoreModTotal = 0;
+                            var preferPmp = _configService.Current.PreferPmpRestoreWhenAvailable;
+                            var hasPmp = false;
+                            try { hasPmp = _backupService.HasPmpBackupForModAsync(mod).GetAwaiter().GetResult(); }
+                            catch (Exception ex) { _logger.LogError(ex, "HasPmpBackup check failed for {mod}", mod); }
+                            if (preferPmp && hasPmp)
                             {
-                                await _backupService.RestorePmpAsync(mod, latestPmp, progress, restoreToken);
+                                var latestPmp = _backupService.GetPmpBackupsForModAsync(mod).GetAwaiter().GetResult().FirstOrDefault();
+                                if (!string.IsNullOrEmpty(latestPmp))
+                                {
+                                    await _backupService.RestorePmpAsync(mod, latestPmp, progress, restoreToken);
+                                }
+                                else
+                                {
+                                    await _backupService.RestoreLatestForModAsync(mod, progress, restoreToken);
+                                }
                             }
                             else
                             {
                                 await _backupService.RestoreLatestForModAsync(mod, progress, restoreToken);
                             }
                         }
-                        else
-                        {
-                            await _backupService.RestoreLatestForModAsync(mod, progress, restoreToken);
-                        }
+                        catch (Exception ex) { _logger.LogError(ex, "Bulk restore failed for {mod}", mod); }
                     }
-                    catch (Exception ex) { _logger.LogError(ex, "Bulk restore failed for {mod}", mod); }
-                }
-            }).ContinueWith(_ =>
-            {
-                try { _backupService.RedrawPlayer(); }
-                catch (Exception ex) { _logger.LogError(ex, "RedrawPlayer after bulk restore failed"); }
-                _logger.LogDebug("Restore completed (bulk action)");
-                RefreshScanResults(true, "restore-bulk-completed");
-                foreach (var m in restorableFiltered)
+                }).ContinueWith(_ =>
                 {
-                    try { RefreshModState(m, "restore-bulk"); }
-                    catch (Exception ex) { _logger.LogError(ex, "RefreshModState after bulk restore failed for {mod}", m); }
-                }
-                _ = Task.Run(async () =>
-                {
+                    try { _backupService.RedrawPlayer(); }
+                    catch (Exception ex) { _logger.LogError(ex, "RedrawPlayer after bulk restore failed"); }
+                    _logger.LogDebug("Restore completed (bulk action)");
+                    RefreshScanResults(true, "restore-bulk-completed");
                     foreach (var m in restorableFiltered)
                     {
-                        try { await _backupService.ComputeSavingsForModAsync(m).ConfigureAwait(false); } catch { }
-                        await Task.Yield();
+                        try { RefreshModState(m, "restore-bulk"); }
+                        catch (Exception ex) { _logger.LogError(ex, "RefreshModState after bulk restore failed for {mod}", m); }
                     }
-                    _uiThreadActions.Enqueue(() => { _perModSavingsRevision++; _footerTotalsDirty = true; _needsUIRefresh = true; });
-                });
-                foreach (var m in restorableFiltered)
-                {
-                    try { bool _r; _modsWithPmpCache.TryRemove(m, out _r); }
-                    catch (Exception ex) { _logger.LogError(ex, "TryRemove _modsWithPmpCache failed for {mod}", m); }
-                    try { (string version, string author, DateTime createdUtc, string pmpFileName) _rm; _modsPmpMetaCache.TryRemove(m, out _rm); }
-                    catch (Exception ex) { _logger.LogError(ex, "TryRemove _modsPmpMetaCache failed for {mod}", m); }
-                    _ = _backupService.HasBackupForModAsync(m).ContinueWith(bt =>
+                    _ = Task.Run(async () =>
                     {
-                        if (bt.Status == TaskStatus.RanToCompletion)
+                        foreach (var m in restorableFiltered)
                         {
-                            bool any = bt.Result;
-                            try { any = any || _backupService.HasPmpBackupForModAsync(m).GetAwaiter().GetResult(); }
-                            catch (Exception ex) { _logger.LogError(ex, "HasPmpBackup check failed for {mod}", m); }
-                            _cacheService.SetModHasBackup(m, any);
-                            try { var hasPmpNow = _backupService.HasPmpBackupForModAsync(m).GetAwaiter().GetResult(); _cacheService.SetModHasPmp(m, hasPmpNow); }
-                            catch (Exception ex) { _logger.LogError(ex, "SetModHasPmp failed for {mod}", m); }
+                            try { await _backupService.ComputeSavingsForModAsync(m).ConfigureAwait(false); } catch { }
+                            await Task.Yield();
                         }
+                        _uiThreadActions.Enqueue(() => { _perModSavingsRevision++; _footerTotalsDirty = true; _needsUIRefresh = true; });
                     });
-                }
-                try
-                {
-                    int removed = 0;
                     foreach (var m in restorableFiltered)
                     {
-                        if (_configService.Current.ExternalConvertedMods.Remove(m))
-                            removed++;
+                        try { bool _r; _modsWithPmpCache.TryRemove(m, out _r); }
+                        catch (Exception ex) { _logger.LogError(ex, "TryRemove _modsWithPmpCache failed for {mod}", m); }
+                        try { (string version, string author, DateTime createdUtc, string pmpFileName) _rm; _modsPmpMetaCache.TryRemove(m, out _rm); }
+                        catch (Exception ex) { _logger.LogError(ex, "TryRemove _modsPmpMetaCache failed for {mod}", m); }
+                        _ = _backupService.HasBackupForModAsync(m).ContinueWith(bt =>
+                        {
+                            if (bt.Status == TaskStatus.RanToCompletion)
+                            {
+                                bool any = bt.Result;
+                                try { any = any || _backupService.HasPmpBackupForModAsync(m).GetAwaiter().GetResult(); }
+                                catch (Exception ex) { _logger.LogError(ex, "HasPmpBackup check failed for {mod}", m); }
+                                _cacheService.SetModHasBackup(m, any);
+                                try { var hasPmpNow = _backupService.HasPmpBackupForModAsync(m).GetAwaiter().GetResult(); _cacheService.SetModHasPmp(m, hasPmpNow); }
+                                catch (Exception ex) { _logger.LogError(ex, "SetModHasPmp failed for {mod}", m); }
+                            }
+                        });
                     }
-                    if (removed > 0)
-                        _configService.Save();
-                }
-                catch (Exception ex) { _logger.LogError(ex, "Update ExternalConvertedMods after bulk restore failed"); }
-                _uiThreadActions.Enqueue(() =>
-                {
-                    _running = false;
-                    _restoreCancellationTokenSource?.Dispose();
-                    _restoreCancellationTokenSource = null;
-                    _currentRestoreMod = string.Empty;
-                    _currentRestoreModIndex = 0;
-                    _currentRestoreModTotal = 0;
+                    try
+                    {
+                        int removed = 0;
+                        foreach (var m in restorableFiltered)
+                        {
+                            if (_configService.Current.ExternalConvertedMods.Remove(m))
+                                removed++;
+                        }
+                        if (removed > 0)
+                            _configService.Save();
+                    }
+                    catch (Exception ex) { _logger.LogError(ex, "Update ExternalConvertedMods after bulk restore failed"); }
+                    _uiThreadActions.Enqueue(() =>
+                    {
+                        _running = false;
+                        _restoreCancellationTokenSource?.Dispose();
+                        _restoreCancellationTokenSource = null;
+                        _currentRestoreMod = string.Empty;
+                        _currentRestoreModIndex = 0;
+                        _currentRestoreModTotal = 0;
+                    });
                 });
-            });
+            }
+            ImGui.PopStyleColor(4);
         }
-        ImGui.PopStyleColor(4);
         
 
         if (ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
