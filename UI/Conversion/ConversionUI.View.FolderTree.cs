@@ -80,8 +80,13 @@ public sealed partial class ConversionUI
                         }
                         if (!disableCheckbox)
                         {
-                            foreach (var f in files) _selectedTextures.Add(f);
-                            _selectedCountByMod[mod] = files.Count;
+                            List<string>? allFilesForMod = null;
+                            if (_scannedByMod.TryGetValue(mod, out var all) && all != null && all.Count > 0)
+                                allFilesForMod = all;
+                            else
+                                allFilesForMod = files;
+                            foreach (var f in allFilesForMod) _selectedTextures.Add(f);
+                            _selectedCountByMod[mod] = totalAll;
                         }
                     }
                 }
@@ -223,11 +228,23 @@ public sealed partial class ConversionUI
                     if (drawModRow) ImGui.TableSetColumnIndex(0);
                     bool modSelected = (files.Count == 0)
                         ? _selectedEmptyMods.Contains(mod)
-                        : ((_selectedCountByMod.TryGetValue(mod, out var sc) ? sc : 0) >= files.Count);
+                        : ((_selectedCountByMod.TryGetValue(mod, out var sc) ? sc : 0) >= totalAll);
                     var automaticMode = _configService.Current.TextureProcessingMode == TextureProcessingMode.Automatic;
                     var disableCheckbox = false;
                     if (drawModRow)
-                        disableCheckbox = ((!isNonConvertible) && files.Count == 0) || excluded || (automaticMode && !isOrphan && (convertedAll >= totalAll));
+                        disableCheckbox = excluded || (automaticMode && !isOrphan && (convertedAll >= totalAll));
+                    string disableReason = string.Empty;
+                    if (disableCheckbox)
+                    {
+                        if (excluded)
+                            disableReason = "Mod excluded by tags.";
+                        else if (automaticMode && !isOrphan && (convertedAll >= totalAll))
+                            disableReason = "All textures already converted.";
+                        else if (!isNonConvertible && files.Count == 0)
+                            disableReason = string.Empty;
+                        else if (isNonConvertible)
+                            disableReason = "Mod has no textures.";
+                    }
                     if (drawModRow) ImGui.BeginDisabled(disableCheckbox);
                     if (drawModRow && ImGui.Checkbox($"##modsel-{mod}", ref modSelected))
                     {
@@ -239,11 +256,18 @@ public sealed partial class ConversionUI
                         {
                             if (modSelected)
                             {
-                                foreach (var f in files) _selectedTextures.Add(f);
-                                _selectedCountByMod[mod] = files.Count;
+                                List<string>? allFilesForMod = null;
+                                if (_scannedByMod.TryGetValue(mod, out var all) && all != null && all.Count > 0)
+                                    allFilesForMod = all;
+                                else
+                                    allFilesForMod = files;
+                                foreach (var f in allFilesForMod) _selectedTextures.Add(f);
+                                _selectedCountByMod[mod] = totalAll;
                             }
                             else
                             {
+                                if (_scannedByMod.TryGetValue(mod, out var allRem) && allRem != null && allRem.Count > 0)
+                                    foreach (var f in allRem) _selectedTextures.Remove(f);
                                 foreach (var f in files) _selectedTextures.Remove(f);
                                 _selectedCountByMod[mod] = 0;
                             }
@@ -251,7 +275,7 @@ public sealed partial class ConversionUI
                     }
                     if (drawModRow) ImGui.EndDisabled();
                     if (drawModRow && disableCheckbox && ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
-                        ImGui.SetTooltip(automaticMode ? "Automatic mode: mod cannot be selected for conversion." : "Mod excluded by tags");
+                        ImGui.SetTooltip(string.IsNullOrEmpty(disableReason) ? "Selection disabled." : disableReason);
                     else if (drawModRow)
                         ShowTooltip("Toggle selection for all files in this mod.");
                     if (drawModRow && headerHoveredTree)

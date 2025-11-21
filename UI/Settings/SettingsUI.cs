@@ -229,13 +229,7 @@ public sealed class SettingsUI : Window
                     _configService.Save();
                 }
                 UiTooltip.Show("Display individual files under each mod in the overview table.");
-                bool includeHiddenOnConvert = _configService.Current.IncludeHiddenModTexturesOnConvert;
-                if (ImGui.Checkbox("Include hidden mod textures on Convert (UI)", ref includeHiddenOnConvert))
-                {
-                    _configService.Current.IncludeHiddenModTexturesOnConvert = includeHiddenOnConvert;
-                    _configService.Save();
-                }
-                UiTooltip.Show("When converting via ShrinkU UI, include non-visible mod textures even if filters hide them. Sphene automatic behavior remains unchanged.");
+                
 
                 ImGui.Separator();
                 ImGui.TextColored(ShrinkUColors.Accent, "Storage");

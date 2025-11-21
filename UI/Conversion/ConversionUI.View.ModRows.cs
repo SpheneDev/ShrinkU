@@ -112,11 +112,23 @@ public sealed partial class ConversionUI
         
 
         ImGui.TableSetColumnIndex(0);
-        bool modSelected = (files.Count == 0)
+        bool modSelected = isNonConvertible
             ? _selectedEmptyMods.Contains(mod)
-            : ((_selectedCountByMod.TryGetValue(mod, out var sc) ? sc : 0) >= files.Count);
+            : ((_selectedCountByMod.TryGetValue(mod, out var sc) ? sc : 0) >= totalAll);
         var automaticMode = _configService.Current.TextureProcessingMode == TextureProcessingMode.Automatic;
-        var disableCheckbox = ((!isNonConvertible) && files.Count == 0) || excluded || (automaticMode && !isOrphan && (convertedAll >= totalAll));
+        var disableCheckbox = excluded || (automaticMode && !isOrphan && (convertedAll >= totalAll));
+        string disableReason = string.Empty;
+        if (disableCheckbox)
+        {
+            if (excluded)
+                disableReason = "Mod excluded by tags.";
+            else if (automaticMode && !isOrphan && (convertedAll >= totalAll))
+                disableReason = "All textures already converted.";
+            else if (!isNonConvertible && files.Count == 0)
+                disableReason = string.Empty;
+            else if (isNonConvertible)
+                disableReason = "Mod has no textures.";
+        }
         using (var _d = ImRaii.Disabled(disableCheckbox))
         {
         if (ImGui.Checkbox($"##modsel-{mod}", ref modSelected))
@@ -129,11 +141,18 @@ public sealed partial class ConversionUI
             {
                 if (modSelected)
                 {
-                    foreach (var f in files) _selectedTextures.Add(f);
-                    _selectedCountByMod[mod] = files.Count;
+                    List<string>? allFilesForMod = null;
+                    if (_scannedByMod.TryGetValue(mod, out var all) && all != null && all.Count > 0)
+                        allFilesForMod = all;
+                    else
+                        allFilesForMod = files;
+                    foreach (var f in allFilesForMod) _selectedTextures.Add(f);
+                    _selectedCountByMod[mod] = totalAll;
                 }
                 else
                 {
+                    if (_scannedByMod.TryGetValue(mod, out var allRem) && allRem != null && allRem.Count > 0)
+                        foreach (var f in allRem) _selectedTextures.Remove(f);
                     foreach (var f in files) _selectedTextures.Remove(f);
                     _selectedCountByMod[mod] = 0;
                 }
@@ -141,7 +160,7 @@ public sealed partial class ConversionUI
         }
         }
         if (disableCheckbox && ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
-            ImGui.SetTooltip(automaticMode ? "Automatic mode: mod cannot be selected for conversion." : "Mod excluded by tags");
+            ImGui.SetTooltip(string.IsNullOrEmpty(disableReason) ? "Selection disabled." : disableReason);
         else
             ShowTooltip("Toggle selection for all files in this mod.");
 
@@ -281,13 +300,9 @@ public sealed partial class ConversionUI
                 {
                 if (ImGui.Button($"Convert##convert-{mod}", new Vector2(60, 0)))
                 {
-                    var allFilesForMod = files;
-                    try
-                    {
-                        if (_configService.Current.IncludeHiddenModTexturesOnConvert && _scannedByMod.TryGetValue(mod, out var all) && all != null && all.Count > 0)
-                            allFilesForMod = all;
-                    }
-                    catch (Exception ex) { _logger.LogError(ex, "IncludeHiddenModTexturesOnConvert evaluation failed for {mod}", mod); }
+                    List<string>? allFilesForMod = null;
+                    if (_scannedByMod.TryGetValue(mod, out var all) && all != null && all.Count > 0)
+                        allFilesForMod = all;
                     ResetConversionProgress();
                     ResetRestoreProgress();
                     _ = Task.Run(async () =>
@@ -310,13 +325,7 @@ public sealed partial class ConversionUI
                 if (convertDisabled && ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
                     ShowTooltip(convertedAll >= totalAll ? "All textures already converted." : (excluded ? "Mod excluded by tags." : "Processing in progress."));
                 ImGui.PopStyleColor(4);
-                if (!convertDisabled)
-                {
-                    var msg = _configService.Current.IncludeHiddenModTexturesOnConvert
-                        ? "Convert all textures for this mod."
-                        : "Convert all visible textures for this mod.";
-                    ShowTooltip(msg);
-                }
+                if (!convertDisabled) ShowTooltip("Convert all textures for this mod.");
                 }
             }
             else
