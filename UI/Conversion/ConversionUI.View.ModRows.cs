@@ -21,13 +21,6 @@ public sealed partial class ConversionUI
         var isOrphan = _orphaned.Any(x => string.Equals(x.ModFolderName, mod, StringComparison.OrdinalIgnoreCase));
         var hasBackup = GetOrQueryModBackup(mod);
         var excluded = (!hasBackup && !isOrphan && IsModExcludedByTags(mod));
-        var isNonConvertible = files.Count == 0;
-
-        ImGui.TableSetColumnIndex(1);
-        ImGui.SetCursorPosX(ImGui.GetCursorPosX() + row.Depth * 16f);
-        var nodeFlags = ImGuiTreeNodeFlags.NoTreePushOnOpen | ImGuiTreeNodeFlags.FramePadding;
-        if (!_configService.Current.ShowModFilesInOverview)
-            nodeFlags |= ImGuiTreeNodeFlags.Bullet | ImGuiTreeNodeFlags.Leaf;
         int totalAll = files.Count;
         if (_modStateSnapshot != null && _modStateSnapshot.TryGetValue(mod, out var msTotal) && msTotal != null && msTotal.TotalTextures > 0)
             totalAll = msTotal.TotalTextures;
@@ -39,6 +32,13 @@ public sealed partial class ConversionUI
             else if (_modStateSnapshot != null && _modStateSnapshot.TryGetValue(mod, out var ms) && ms != null && ms.ComparedFiles > 0)
                 convertedAll = Math.Min(ms.ComparedFiles, totalAll);
         }
+        var isNonConvertible = totalAll == 0;
+
+        ImGui.TableSetColumnIndex(1);
+        ImGui.SetCursorPosX(ImGui.GetCursorPosX() + row.Depth * 16f);
+        var nodeFlags = ImGuiTreeNodeFlags.NoTreePushOnOpen | ImGuiTreeNodeFlags.FramePadding;
+        if (!_configService.Current.ShowModFilesInOverview)
+            nodeFlags |= ImGuiTreeNodeFlags.Bullet | ImGuiTreeNodeFlags.Leaf;
         string header;
         if (hasBackup)
             header = ShrinkU.Helpers.ConversionUiHelpers.FormatHeader(ResolveModDisplayName(mod), convertedAll, totalAll);

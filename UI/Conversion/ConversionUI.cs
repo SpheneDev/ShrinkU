@@ -121,6 +121,66 @@ public sealed partial class ConversionUI : Window, IDisposable
     private readonly ConcurrentDictionary<string, bool> _modsTouchedLastRun = new(StringComparer.OrdinalIgnoreCase);
     private DateTime _disableActionsUntilUtc = DateTime.MinValue;
     private readonly Dictionary<string, string> _fileOwnerMod = new(StringComparer.OrdinalIgnoreCase);
+
+    private struct ModCapabilities
+    {
+        public bool CanConvert;
+        public bool CanBackup;
+        public bool CanRestore;
+        public bool CanReinstall;
+        public bool HasAnyBackup;
+        public bool Excluded;
+        public int TotalTextures;
+        public int VisibleFileCount;
+    }
+
+    private ModCapabilities EvaluateModCapabilities(string mod)
+    {
+        var isOrphan = _orphaned.Any(x => string.Equals(x.ModFolderName, mod, StringComparison.OrdinalIgnoreCase));
+        var snap = _modStateSnapshot ?? _modStateService.Snapshot();
+        int totalTextures = 0;
+        if (snap.TryGetValue(mod, out var ms) && ms != null)
+            totalTextures = ms.TotalTextures;
+        else if (_scannedByMod.TryGetValue(mod, out var list) && list != null)
+            totalTextures = list.Count;
+        var hasTexBackup = GetOrQueryModTextureBackup(mod);
+        var hasPmpBackup = GetOrQueryModPmp(mod);
+        var hasModBackup = GetOrQueryModBackup(mod);
+        var hasAnyBackup = hasTexBackup || hasPmpBackup || hasModBackup;
+        var excluded = !hasModBackup && !isOrphan && IsModExcludedByTags(mod);
+        var autoMode = _configService.Current.TextureProcessingMode == TextureProcessingMode.Automatic;
+        int convertedAll = 0;
+        if (totalTextures > 0)
+        {
+            if (_cachedPerModSavings.TryGetValue(mod, out var s2) && s2 != null && s2.ComparedFiles > 0)
+                convertedAll = Math.Min(s2.ComparedFiles, totalTextures);
+            else if (snap.TryGetValue(mod, out var ms2) && ms2 != null && ms2.ComparedFiles > 0)
+                convertedAll = Math.Min(ms2.ComparedFiles, totalTextures);
+        }
+        var canConvert = totalTextures > 0 && !hasModBackup && convertedAll < totalTextures;
+        var canBackup = totalTextures == 0 && !hasAnyBackup;
+        var canRestore = hasAnyBackup;
+        if (autoMode && !isOrphan)
+        {
+            if (snap.TryGetValue(mod, out var ams) && ams != null && ams.UsedTextureFiles != null && ams.UsedTextureFiles.Count > 0)
+                canRestore = false;
+        }
+        var canReinstall = isOrphan && hasPmpBackup;
+        int visibleCount = 0;
+        if (_visibleByMod.TryGetValue(mod, out var vis) && vis != null)
+            visibleCount = vis.Count;
+        return new ModCapabilities
+        {
+            CanConvert = canConvert,
+            CanBackup = canBackup,
+            CanRestore = canRestore,
+            CanReinstall = canReinstall,
+            HasAnyBackup = hasAnyBackup,
+            Excluded = excluded,
+            TotalTextures = totalTextures,
+            VisibleFileCount = visibleCount,
+        };
+    }
     private void ClearModCaches(string mod)
     {
         _cacheService.ClearModCaches(mod);

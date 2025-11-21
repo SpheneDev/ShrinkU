@@ -280,28 +280,111 @@ public sealed partial class ConversionUI
         TableCatNode? root = null;
 
         var selectAllClicked = ImGui.Button("Select All");
+        ImGui.SameLine();
+        ImGui.PushFont(UiBuilder.IconFont);
+        var selectAllMenuClicked = ImGui.Button(FontAwesomeIcon.CaretDown.ToIconString());
+        ImGui.PopFont();
+        if (selectAllMenuClicked) ImGui.OpenPopup("select_all_popup");
         if (selectAllClicked)
         {
+            _selectedTextures.Clear();
+            _selectedEmptyMods.Clear();
             foreach (var kv in visibleByMod)
             {
                 var mod = kv.Key;
-                var hasBackup = GetOrQueryModBackup(mod);
-                var excluded = !hasBackup && IsModExcludedByTags(mod);
-                foreach (var f in kv.Value)
+                var files = kv.Value ?? new List<string>();
+                var capsAll = EvaluateModCapabilities(mod);
+                if (!capsAll.Excluded && !capsAll.HasAnyBackup)
                 {
-                    if (!excluded || hasBackup)
-                        _selectedTextures.Add(f);
+                    if (capsAll.CanConvert)
+                    {
+                        if (files.Count > 0)
+                        {
+                            for (int i = 0; i < files.Count; i++)
+                                _selectedTextures.Add(files[i]);
+                            _selectedCountByMod[mod] = files.Count;
+                        }
+                        else
+                        {
+                            _selectedCountByMod[mod] = 0;
+                        }
+                    }
+                    else if (capsAll.CanBackup)
+                    {
+                        _selectedEmptyMods.Add(mod);
+                        _selectedCountByMod[mod] = 0;
+                    }
+                    else
+                    {
+                        _selectedCountByMod[mod] = 0;
+                        _selectedEmptyMods.Remove(mod);
+                    }
                 }
-                _selectedCountByMod[mod] = excluded && !hasBackup ? 0 : kv.Value.Count;
+                else
+                {
+                    _selectedCountByMod[mod] = 0;
+                    _selectedEmptyMods.Remove(mod);
+                }
             }
+        }
+        if (ImGui.BeginPopup("select_all_popup"))
+        {
+            if (ImGui.MenuItem("Mods that can be converted"))
+            {
+                var snapPopup = _modStateService.Snapshot();
+                foreach (var kv in visibleByMod)
+                {
+                    var mod = kv.Key;
+                    if (IsModExcludedByTags(mod)) continue;
+                    var canConvert = false;
+                    if (snapPopup.TryGetValue(mod, out var ms) && ms != null && ms.TotalTextures > 0)
+                        canConvert = true;
+                    else if (_scannedByMod.TryGetValue(mod, out var all) && all != null && all.Count > 0)
+                        canConvert = true;
+                    if (!canConvert) continue;
+                    var files = kv.Value ?? new List<string>();
+                    if (files.Count > 0)
+                    {
+                        for (int i = 0; i < files.Count; i++) _selectedTextures.Add(files[i]);
+                        _selectedCountByMod[mod] = files.Count;
+                        _selectedEmptyMods.Remove(mod);
+                    }
+                    else
+                    {
+                        _selectedEmptyMods.Add(mod);
+                        _selectedCountByMod[mod] = 0;
+                    }
+                }
+            }
+            if (ImGui.MenuItem("Mods without textures (backup)"))
+            {
+                var snapPopup2 = _modStateService.Snapshot();
+                foreach (var kv in visibleByMod)
+                {
+                    var mod = kv.Key;
+                    if (IsModExcludedByTags(mod)) continue;
+                    var noTextures = false;
+                    if (snapPopup2.TryGetValue(mod, out var ms) && ms != null)
+                        noTextures = ms.TotalTextures <= 0;
+                    else if (_scannedByMod.TryGetValue(mod, out var all) && all != null)
+                        noTextures = all.Count == 0;
+                    if (!noTextures) continue;
+                    var hasTexBackup = GetOrQueryModTextureBackup(mod);
+                    var hasPmpBackup = GetOrQueryModPmp(mod);
+                    var hasBackupAny = GetOrQueryModBackup(mod) || hasTexBackup || hasPmpBackup;
+                    if (hasBackupAny) continue;
+                    _selectedEmptyMods.Add(mod);
+                    _selectedCountByMod[mod] = 0;
+                }
+            }
+            ImGui.EndPopup();
         }
         ImGui.SameLine();
         var clearAllClicked = ImGui.Button("Clear All");
         if (clearAllClicked)
         {
-            foreach (var kv in visibleByMod)
-                foreach (var f in kv.Value)
-                    _selectedTextures.Remove(f);
+            _selectedTextures.Clear();
+            _selectedEmptyMods.Clear();
             foreach (var mod in visibleByMod.Keys)
                 _selectedCountByMod[mod] = 0;
         }
