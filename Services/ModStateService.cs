@@ -26,6 +26,8 @@ public sealed class ModStateService
     private volatile string _lastChangedMod = string.Empty;
     private volatile bool _batching = false;
     private volatile bool _batchDirty = false;
+    private DateTime _lastLoadedWriteUtc = DateTime.MinValue;
+    private long _lastLoadedLength = 0;
 
     public ModStateService(ILogger logger, ShrinkUConfigService config, DebugTraceService? debugTrace = null)
     {
@@ -40,6 +42,27 @@ public sealed class ModStateService
         var root = _config.Current.BackupFolderPath;
         try { Directory.CreateDirectory(root); } catch { }
         return Path.Combine(root, "mod_state.json");
+    }
+
+    public string GetStateFilePath()
+    {
+        return GetPath();
+    }
+
+    public bool ReloadIfChanged()
+    {
+        try
+        {
+            var path = GetPath();
+            if (!File.Exists(path)) return false;
+            var fi = new FileInfo(path);
+            if (fi.LastWriteTimeUtc == _lastLoadedWriteUtc && fi.Length == _lastLoadedLength)
+                return false;
+            Load();
+            try { OnStateSaved?.Invoke(); } catch { }
+            return true;
+        }
+        catch { return false; }
     }
 
     public IReadOnlyDictionary<string, ModStateEntry> Snapshot()
@@ -342,6 +365,7 @@ public sealed class ModStateService
             var json = File.ReadAllText(path);
             var dict = JsonSerializer.Deserialize<Dictionary<string, ModStateEntry>>(json) ?? new();
             lock (_lock) { _state = new Dictionary<string, ModStateEntry>(dict, StringComparer.OrdinalIgnoreCase); }
+            try { var fi = new FileInfo(path); _lastLoadedWriteUtc = fi.LastWriteTimeUtc; _lastLoadedLength = fi.Length; } catch { }
         }
         catch (Exception ex)
         {

@@ -366,6 +366,10 @@ public sealed partial class ConversionUI : Window, IDisposable
     private volatile bool _usedWatcherActive = false;
     private int _usedWatcherIntervalMs = 3000;
     private volatile bool _windowFocused = false;
+    private CancellationTokenSource? _modStatePollCts;
+    private Task? _modStatePollTask;
+    private volatile bool _modStateWatcherActive = false;
+    private int _modStateWatcherIntervalMs = 3000;
 
     // Stored delegate references for clean unsubscription on dispose
     private readonly Action<(string, int)> _onConversionProgress;
@@ -628,7 +632,17 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
                 _uiThreadActions.Enqueue(() =>
                 {
                     var snap = _modStateService.Snapshot();
-                    _modPaths = snap.ToDictionary(kv => kv.Key, kv => kv.Value?.PenumbraRelativePath ?? string.Empty, StringComparer.OrdinalIgnoreCase);
+                    _modPaths = snap.ToDictionary(
+                        kv => kv.Key,
+                        kv => {
+                            var folder = kv.Value?.PenumbraRelativePath ?? string.Empty;
+                            var leaf = kv.Value?.RelativeModName ?? string.Empty;
+                            if (string.IsNullOrWhiteSpace(folder)) return leaf ?? string.Empty;
+                            if (string.IsNullOrWhiteSpace(leaf)) return folder ?? string.Empty;
+                            return string.Concat(folder, "/", leaf);
+                        },
+                        StringComparer.OrdinalIgnoreCase);
+                    try { _modPaths.Remove("mod_state"); } catch { }
                     try
                     {
                         var sb = new System.Text.StringBuilder();
@@ -1055,6 +1069,11 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
             StopUsedResourcesWatcher();
         }
 
+        if (!_modStateWatcherActive)
+        {
+            StartModStateWatcher();
+        }
+
         // Preload mod paths lazily from mod_state snapshot
         if (!_loadingModPaths && _modPaths.Count == 0)
         {
@@ -1164,6 +1183,8 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
         // Stop Used-Only watcher
         StopUsedResourcesWatcher();
 
+        StopModStateWatcher();
+
         // Drain any queued UI actions
         try { while (_uiThreadActions.TryDequeue(out _)) { } }
         catch (Exception ex) { _logger.LogError(ex, "Drain UI thread actions failed"); }
@@ -1248,6 +1269,70 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
         _usedWatcherActive = false;
         _usedWatcherIntervalMs = 3000;
         try { _logger.LogDebug("Used-Only watcher stopped"); } catch { }
+    }
+
+    private void StartModStateWatcher()
+    {
+        try
+        {
+            StopModStateWatcher();
+            _modStatePollCts = new CancellationTokenSource();
+            var token = _modStatePollCts.Token;
+            _modStateWatcherActive = true;
+            _modStatePollTask = Task.Run(async () =>
+            {
+                while (!token.IsCancellationRequested)
+                {
+                    try
+                    {
+                        await Task.Delay(_modStateWatcherIntervalMs, token).ConfigureAwait(false);
+                        if (token.IsCancellationRequested)
+                            break;
+
+                        if (!IsOpen || !_windowFocused)
+                            continue;
+
+                        var changed = false;
+                        try { changed = _modStateService.ReloadIfChanged(); } catch { }
+                        if (changed)
+                        {
+                            _uiThreadActions.Enqueue(() =>
+                            {
+                                try { _modStateSnapshot = _modStateService.Snapshot(); } catch { }
+                                _needsUIRefresh = true;
+                            });
+                            _modStateWatcherIntervalMs = 3000;
+                        }
+                        else
+                        {
+                            var next = _modStateWatcherIntervalMs * 2;
+                            _modStateWatcherIntervalMs = next > 15000 ? 15000 : next;
+                        }
+                    }
+                    catch (TaskCanceledException) { }
+                    catch (Exception ex)
+                    {
+                        try { _logger.LogDebug(ex, "ModState watcher iteration failed"); } catch { }
+                    }
+                }
+            }, token);
+            try { _logger.LogDebug("ModState watcher started"); } catch { }
+        }
+        catch (Exception ex)
+        {
+            try { _logger.LogDebug(ex, "Failed to start ModState watcher"); } catch { }
+        }
+    }
+
+    private void StopModStateWatcher()
+    {
+        try { _modStatePollCts?.Cancel(); } catch { }
+        try { _modStatePollCts?.Dispose(); } catch { }
+        _modStatePollCts = null;
+        _modStatePollTask = null;
+        _modStateWatcherActive = false;
+        _modStateWatcherIntervalMs = 3000;
+        try { _logger.LogDebug("ModState watcher stopped"); } catch { }
     }
 
     private void DrawSettings()
@@ -1375,7 +1460,16 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                 var folders = await _conversionService.GetAllModFoldersAsync().ConfigureAwait(false);
                 Dictionary<string, string>? paths = null;
                 var snap = _modStateService.Snapshot();
-                paths = snap.ToDictionary(kv => kv.Key, kv => kv.Value?.PenumbraRelativePath ?? string.Empty, StringComparer.OrdinalIgnoreCase);
+                paths = snap.ToDictionary(
+                    kv => kv.Key,
+                    kv => {
+                        var folder = kv.Value?.PenumbraRelativePath ?? string.Empty;
+                        var leaf = kv.Value?.RelativeModName ?? string.Empty;
+                        if (string.IsNullOrWhiteSpace(folder)) return leaf ?? string.Empty;
+                        if (string.IsNullOrWhiteSpace(leaf)) return folder ?? string.Empty;
+                        return string.Concat(folder, "/", leaf);
+                    },
+                    StringComparer.OrdinalIgnoreCase);
 
                 // Determine if heavy grouped scan can be skipped based on folder snapshot.
                 bool skipHeavy;
@@ -1470,7 +1564,18 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                         catch { }
                     }
                     if (paths != null)
+                    {
                         _modPaths = paths;
+                        try { _modPaths.Remove("mod_state"); } catch { }
+                        try
+                        {
+                            var sb = new System.Text.StringBuilder();
+                            foreach (var kv in _modPaths.OrderBy(k => k.Key, StringComparer.OrdinalIgnoreCase))
+                                sb.Append(kv.Key).Append('=').Append(kv.Value).Append(';');
+                            _modPathsSig = sb.ToString();
+                        }
+                        catch { _modPathsSig = _modPaths.Count.ToString(); }
+                    }
                     if (folders != null)
                     {
                         foreach (var folder in folders)

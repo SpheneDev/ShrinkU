@@ -154,14 +154,30 @@ public sealed partial class ConversionUI
     private void DrawScannedFilesTable_ViewImpl()
     {
         var snapForSig = _modStateService.Snapshot();
+        var modCountSig = snapForSig.Count;
         var usedCountSig = 0;
+        var totalTexturesSig = 0;
         foreach (var kv in snapForSig)
         {
-            if (kv.Value != null && kv.Value.UsedTextureFiles != null)
-                usedCountSig += kv.Value.UsedTextureFiles.Count;
+            if (kv.Value != null)
+            {
+                if (kv.Value.UsedTextureFiles != null)
+                    usedCountSig += kv.Value.UsedTextureFiles.Count;
+                totalTexturesSig += Math.Max(0, kv.Value.TotalTextures);
+            }
         }
         var liveUsedCountSig = _filterPenumbraUsedOnly ? _penumbraUsedFiles.Count : 0;
-        var visibleSig = string.Concat(_scanFilter, "|", _filterPenumbraUsedOnly ? "1" : "0", "|", _filterNonConvertibleMods ? "1" : "0", "|", _filterInefficientMods ? "1" : "0", "|", _orphaned.Count.ToString(), "|", _scannedByMod.Count.ToString(), "|", usedCountSig.ToString(), "|", liveUsedCountSig.ToString());
+        var visibleSig = string.Concat(
+            _scanFilter, "|",
+            _filterPenumbraUsedOnly ? "1" : "0", "|",
+            _filterNonConvertibleMods ? "1" : "0", "|",
+            _filterInefficientMods ? "1" : "0", "|",
+            _orphaned.Count.ToString(), "|",
+            _scannedByMod.Count.ToString(), "|",
+            modCountSig.ToString(), "|",
+            totalTexturesSig.ToString(), "|",
+            usedCountSig.ToString(), "|",
+            liveUsedCountSig.ToString());
         if (!string.Equals(visibleSig, _visibleByModSig, StringComparison.Ordinal))
         {
             _visibleByMod.Clear();
@@ -207,7 +223,12 @@ public sealed partial class ConversionUI
                 }
 
                 var isOrphan = _orphaned.Any(x => string.Equals(x.ModFolderName, mod, StringComparison.OrdinalIgnoreCase));
-                if (_filterNonConvertibleMods && files.Count == 0 && !isOrphan)
+                var totalTexturesForMod = 0;
+                if (snap.TryGetValue(mod, out var msCount) && msCount != null)
+                    totalTexturesForMod = Math.Max(0, msCount.TotalTextures);
+                else
+                    totalTexturesForMod = files?.Count ?? 0;
+                if (_filterNonConvertibleMods && totalTexturesForMod == 0 && !isOrphan)
                     continue;
 
                 if (_filterInefficientMods && IsModInefficient(mod))
