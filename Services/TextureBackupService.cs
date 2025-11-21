@@ -12,6 +12,7 @@ using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Diagnostics;
 
 namespace ShrinkU.Services;
 
@@ -375,6 +376,8 @@ public sealed class TextureBackupService
     {
         try
         {
+            var trace = PerfTrace.Step(_logger, "RefreshAllBackupState total");
+            _modStateService.BeginBatch();
             Dictionary<string, string> modPaths = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             try { modPaths = await _penumbraIpc.GetModPathsAsync().ConfigureAwait(false); } catch { }
             var mods = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -401,9 +404,9 @@ public sealed class TextureBackupService
                         {
                             var name = Path.GetFileName(modSub);
                             if (!string.IsNullOrWhiteSpace(name)) mods.Add(name);
-            }
-        }
-    }
+                        }
+                    }
+                }
             }
             catch { }
 
@@ -422,50 +425,141 @@ public sealed class TextureBackupService
             }
             catch { }
 
-            foreach (var mod in mods)
+            var indexTrace = PerfTrace.Step(_logger, "RefreshAllBackupState index");
+            var latestZipByMod = new Dictionary<string, (string file, DateTime created)>(StringComparer.OrdinalIgnoreCase);
+            var latestPmpByMod = new Dictionary<string, (string file, DateTime created)>(StringComparer.OrdinalIgnoreCase);
+            var modsWithZip = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var modsWithPmp = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var modsInSessions = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            try
             {
-                try
+                var backupDirectory = _configService.Current.BackupFolderPath;
+                if (!string.IsNullOrWhiteSpace(backupDirectory) && Directory.Exists(backupDirectory))
                 {
-                    var hasTex = await HasBackupForModAsync(mod).ConfigureAwait(false);
-                    var hasPmp = await HasPmpBackupForModAsync(mod).ConfigureAwait(false);
-                    _modStateService.UpdateBackupFlags(mod, hasTex, hasPmp);
-                    var abs = GetModAbsolutePath(mod) ?? string.Empty;
-                    var rel = GetModPenumbraRelativePath(mod);
-                    var ver = GetModVersion(mod) ?? string.Empty;
-                    var auth = GetModAuthor(mod) ?? string.Empty;
-                    _modStateService.UpdateCurrentModInfo(mod, abs, rel, ver, auth);
-                    string zipName = string.Empty, zipVer = string.Empty;
-                    DateTime zipCreated = DateTime.MinValue;
-                    string pmpName = string.Empty, pmpVer = string.Empty;
-                    DateTime pmpCreated = DateTime.MinValue;
-                    try
+                    foreach (var dir in Directory.EnumerateDirectories(backupDirectory, "*", SearchOption.TopDirectoryOnly))
                     {
-                        var backupDirectory = _configService.Current.BackupFolderPath;
-                        var modDir = string.IsNullOrWhiteSpace(backupDirectory) ? string.Empty : Path.Combine(backupDirectory, mod);
-                        if (!string.IsNullOrWhiteSpace(modDir) && Directory.Exists(modDir))
+                        var modName = Path.GetFileName(dir);
+                        if (string.IsNullOrWhiteSpace(modName)) continue;
+                        if (modName.StartsWith("session_", StringComparison.OrdinalIgnoreCase)) continue;
+                        try
                         {
-                            var latestZip = Directory.EnumerateFiles(modDir, "backup_*.zip").OrderByDescending(f => f).FirstOrDefault();
+                            var latestZip = Directory.EnumerateFiles(dir, "backup_*.zip").OrderByDescending(f => f).FirstOrDefault();
                             if (!string.IsNullOrEmpty(latestZip))
                             {
-                                var meta = ReadMetaFromZip(latestZip);
-                                zipName = System.IO.Path.GetFileName(latestZip);
-                                zipVer = meta?.version ?? string.Empty;
-                                zipCreated = File.GetCreationTimeUtc(latestZip);
+                                var created = File.GetCreationTimeUtc(latestZip);
+                                latestZipByMod[modName] = (System.IO.Path.GetFileName(latestZip), created);
+                                modsWithZip.Add(modName);
                             }
-                            var latestPmp = Directory.EnumerateFiles(modDir, "mod_backup_*.pmp").OrderByDescending(f => f).FirstOrDefault();
+                        }
+                        catch { }
+                        try
+                        {
+                            var latestPmp = Directory.EnumerateFiles(dir, "mod_backup_*.pmp").OrderByDescending(f => f).FirstOrDefault();
                             if (!string.IsNullOrEmpty(latestPmp))
                             {
-                                pmpName = System.IO.Path.GetFileName(latestPmp);
-                                pmpCreated = File.GetCreationTimeUtc(latestPmp);
+                                var created = File.GetCreationTimeUtc(latestPmp);
+                                latestPmpByMod[modName] = (System.IO.Path.GetFileName(latestPmp), created);
+                                modsWithPmp.Add(modName);
+                            }
+                        }
+                        catch { }
+                    }
+                    foreach (var session in Directory.EnumerateDirectories(backupDirectory, "session_*", SearchOption.TopDirectoryOnly))
+                    {
+                        try
+                        {
+                            foreach (var modSub in Directory.EnumerateDirectories(session, "*", SearchOption.TopDirectoryOnly))
+                            {
+                                var name = Path.GetFileName(modSub);
+                                if (string.IsNullOrWhiteSpace(name)) continue;
+                                var manifestPath = Path.Combine(modSub, "manifest.json");
+                                if (File.Exists(manifestPath))
+                                    modsInSessions.Add(name);
+                            }
+                        }
+                        catch { }
+                    }
+                }
+            }
+            catch { }
+            indexTrace.Dispose();
+
+            var concurrency = Math.Max(4, Environment.ProcessorCount);
+            using var gate = new SemaphoreSlim(concurrency, concurrency);
+            var tasks = new List<Task>(mods.Count);
+            foreach (var mod in mods)
+            {
+                tasks.Add(Task.Run(async () =>
+                {
+                    await gate.WaitAsync().ConfigureAwait(false);
+                    try
+                    {
+                        var sw = Stopwatch.StartNew();
+                        var modTrace = PerfTrace.Step(_logger, "RefreshAllBackupState mod " + mod);
+                        var hasTex = modsWithZip.Contains(mod) || modsInSessions.Contains(mod);
+                        var hasPmp = modsWithPmp.Contains(mod);
+                        _modStateService.UpdateBackupFlags(mod, hasTex, hasPmp);
+                        var abs = string.Empty;
+                        try
+                        {
+                            if (modPaths.TryGetValue(mod, out var relPath) && !string.IsNullOrWhiteSpace(relPath))
+                            {
+                                var root = _penumbraIpc.ModDirectory ?? string.Empty;
+                                if (!string.IsNullOrWhiteSpace(root))
+                                {
+                                    var normRel = relPath.Replace('/', System.IO.Path.DirectorySeparatorChar).TrimStart(System.IO.Path.DirectorySeparatorChar);
+                                    abs = System.IO.Path.Combine(root, normRel);
+                                }
+                            }
+                            if (string.IsNullOrWhiteSpace(abs))
+                                abs = GetModAbsolutePath(mod) ?? string.Empty;
+                        }
+                        catch { abs = GetModAbsolutePath(mod) ?? string.Empty; }
+                        var rel = GetModPenumbraRelativePath(mod);
+                        var ver = GetModVersion(mod) ?? string.Empty;
+                        var auth = GetModAuthor(mod) ?? string.Empty;
+                        _modStateService.UpdateCurrentModInfo(mod, abs, rel, ver, auth);
+                        string zipName = string.Empty, zipVer = string.Empty;
+                        DateTime zipCreated = DateTime.MinValue;
+                        string pmpName = string.Empty, pmpVer = string.Empty;
+                        DateTime pmpCreated = DateTime.MinValue;
+                        try
+                        {
+                            if (latestZipByMod.TryGetValue(mod, out var zi))
+                            {
+                                zipName = zi.file;
+                                zipCreated = zi.created;
+                            }
+                        }
+                        catch { }
+                        try
+                        {
+                            if (latestPmpByMod.TryGetValue(mod, out var pi))
+                            {
+                                pmpName = pi.file;
+                                pmpCreated = pi.created;
                                 pmpVer = _modStateService.Get(mod).LatestPmpBackupVersion;
                             }
                         }
+                        catch { }
+                        _modStateService.UpdateLatestBackupsInfo(mod, zipName, zipVer, zipCreated, pmpName, pmpVer, pmpCreated);
+                        var ms = (int)Math.Round(sw.Elapsed.TotalMilliseconds);
+                        if (ms > 1000)
+                        {
+                            try { _logger.LogDebug("RefreshAllBackupState mod {mod} took {ms}ms", mod, ms); } catch { }
+                        }
+                        modTrace.Dispose();
                     }
                     catch { }
-                    _modStateService.UpdateLatestBackupsInfo(mod, zipName, zipVer, zipCreated, pmpName, pmpVer, pmpCreated);
-                }
-                catch { }
+                    finally
+                    {
+                        try { gate.Release(); } catch { }
+                    }
+                }));
             }
+            try { await Task.WhenAll(tasks).ConfigureAwait(false); } catch { }
+            _modStateService.EndBatch();
+            trace.Dispose();
         }
         catch { }
     }

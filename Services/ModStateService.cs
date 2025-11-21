@@ -24,6 +24,8 @@ public sealed class ModStateService
     private readonly DebugTraceService? _debug;
     private volatile string _lastSaveReason = string.Empty;
     private volatile string _lastChangedMod = string.Empty;
+    private volatile bool _batching = false;
+    private volatile bool _batchDirty = false;
 
     public ModStateService(ILogger logger, ShrinkUConfigService config, DebugTraceService? debugTrace = null)
     {
@@ -71,7 +73,8 @@ public sealed class ModStateService
             _lastSaveReason = nameof(UpdateBackupFlags);
             _lastChangedMod = mod;
             ScheduleSave();
-            try { OnEntryChanged?.Invoke(mod); } catch { }
+            if (!_batching)
+                try { OnEntryChanged?.Invoke(mod); } catch { }
         }
     }
 
@@ -112,7 +115,8 @@ public sealed class ModStateService
             e.LastUpdatedUtc = DateTime.UtcNow;
             _lastSaveReason = nameof(UpdateCurrentModInfo);
             ScheduleSave();
-            try { OnEntryChanged?.Invoke(mod); } catch { }
+            if (!_batching)
+                try { OnEntryChanged?.Invoke(mod); } catch { }
         }
     }
 
@@ -141,7 +145,8 @@ public sealed class ModStateService
             e.LastUpdatedUtc = DateTime.UtcNow;
             _lastSaveReason = nameof(UpdateLatestBackupsInfo);
             ScheduleSave();
-            try { OnEntryChanged?.Invoke(mod); } catch { }
+            if (!_batching)
+                try { OnEntryChanged?.Invoke(mod); } catch { }
         }
     }
 
@@ -155,7 +160,8 @@ public sealed class ModStateService
             e.LastUpdatedUtc = DateTime.UtcNow;
             _lastSaveReason = nameof(UpdateInstalledButNotConverted);
             ScheduleSave();
-            try { OnEntryChanged?.Invoke(mod); } catch { }
+            if (!_batching)
+                try { OnEntryChanged?.Invoke(mod); } catch { }
         }
     }
 
@@ -171,7 +177,8 @@ public sealed class ModStateService
             e.LastUpdatedUtc = DateTime.UtcNow;
             _lastSaveReason = nameof(UpdateEnabledState);
             ScheduleSave();
-            try { OnEntryChanged?.Invoke(mod); } catch { }
+            if (!_batching)
+                try { OnEntryChanged?.Invoke(mod); } catch { }
         }
     }
 
@@ -192,7 +199,8 @@ public sealed class ModStateService
             e.LastUpdatedUtc = DateTime.UtcNow;
             _lastSaveReason = nameof(UpdateDisplayAndTags);
             ScheduleSave();
-            try { OnEntryChanged?.Invoke(mod); } catch { }
+            if (!_batching)
+                try { OnEntryChanged?.Invoke(mod); } catch { }
         }
     }
 
@@ -209,7 +217,8 @@ public sealed class ModStateService
             _lastSaveReason = nameof(UpdateTextureFiles);
             _lastChangedMod = mod;
             ScheduleSave();
-            try { OnEntryChanged?.Invoke(mod); } catch { }
+            if (!_batching)
+                try { OnEntryChanged?.Invoke(mod); } catch { }
         }
     }
 
@@ -232,7 +241,8 @@ public sealed class ModStateService
             _lastSaveReason = nameof(UpdateUsedTextureFiles);
             _lastChangedMod = mod;
             ScheduleSave();
-            try { OnEntryChanged?.Invoke(mod); } catch { }
+            if (!_batching)
+                try { OnEntryChanged?.Invoke(mod); } catch { }
         }
     }
 
@@ -247,7 +257,8 @@ public sealed class ModStateService
             _lastSaveReason = nameof(UpdateTextureCount);
             _lastChangedMod = mod;
             ScheduleSave();
-            try { OnEntryChanged?.Invoke(mod); } catch { }
+            if (!_batching)
+                try { OnEntryChanged?.Invoke(mod); } catch { }
         }
     }
 
@@ -356,6 +367,7 @@ public sealed class ModStateService
     private void ScheduleSave()
     {
         if (!_savingEnabled) return;
+        if (_batching) { _batchDirty = true; return; }
         lock (_saveDebounceLock)
         {
             try { _saveDebounceCts?.Cancel(); } catch { }
@@ -460,7 +472,8 @@ public sealed class ModStateService
             if (string.IsNullOrWhiteSpace(mod)) return;
             if (!_state.Remove(mod)) return;
             ScheduleSave();
-            try { OnEntryChanged?.Invoke(mod); } catch { }
+            if (!_batching)
+                try { OnEntryChanged?.Invoke(mod); } catch { }
         }
     }
 
@@ -483,9 +496,28 @@ public sealed class ModStateService
         }
         foreach (var m in changed)
         {
-            try { OnEntryChanged?.Invoke(m); } catch { }
+            if (!_batching)
+                try { OnEntryChanged?.Invoke(m); } catch { }
         }
-        ScheduleSave();
+        if (!_batching) ScheduleSave();
+        else _batchDirty = true;
+    }
+
+    public void BeginBatch()
+    {
+        _batching = true;
+        _batchDirty = false;
+    }
+
+    public void EndBatch()
+    {
+        _batching = false;
+        if (_batchDirty)
+        {
+            try { SaveInternal(); } catch { }
+            try { OnStateSaved?.Invoke(); } catch { }
+            _batchDirty = false;
+        }
     }
 }
 
