@@ -54,6 +54,7 @@ public sealed partial class ConversionUI
             _filterPenumbraUsedOnly = !_filterPenumbraUsedOnly;
             _configService.Current.FilterPenumbraUsedOnly = _filterPenumbraUsedOnly;
             _configService.Save();
+            RequestUiRefresh("used-only-toggle");
             if (_filterPenumbraUsedOnly && _penumbraUsedFiles.Count == 0 && !_loadingPenumbraUsed)
             {
                 _loadingPenumbraUsed = true;
@@ -64,6 +65,7 @@ public sealed partial class ConversionUI
                         _penumbraUsedFiles = t.Result;
                     }
                     _loadingPenumbraUsed = false;
+                    RequestUiRefresh("used-only-toggle-loaded");
                 });
             }
         }
@@ -157,7 +159,8 @@ public sealed partial class ConversionUI
             if (kv.Value != null && kv.Value.UsedTextureFiles != null)
                 usedCountSig += kv.Value.UsedTextureFiles.Count;
         }
-        var visibleSig = string.Concat(_scanFilter, "|", _filterPenumbraUsedOnly ? "1" : "0", "|", _filterNonConvertibleMods ? "1" : "0", "|", _filterInefficientMods ? "1" : "0", "|", _orphaned.Count.ToString(), "|", _scannedByMod.Count.ToString(), "|", usedCountSig.ToString());
+        var liveUsedCountSig = _filterPenumbraUsedOnly ? _penumbraUsedFiles.Count : 0;
+        var visibleSig = string.Concat(_scanFilter, "|", _filterPenumbraUsedOnly ? "1" : "0", "|", _filterNonConvertibleMods ? "1" : "0", "|", _filterInefficientMods ? "1" : "0", "|", _orphaned.Count.ToString(), "|", _scannedByMod.Count.ToString(), "|", usedCountSig.ToString(), "|", liveUsedCountSig.ToString());
         if (!string.Equals(visibleSig, _visibleByModSig, StringComparison.Ordinal))
         {
             _visibleByMod.Clear();
@@ -182,16 +185,24 @@ public sealed partial class ConversionUI
                                     || displayName.IndexOf(_scanFilter, StringComparison.OrdinalIgnoreCase) >= 0).ToList();
                 if (_filterPenumbraUsedOnly)
                 {
-                    List<string> usedList = null;
-                    if (snap.TryGetValue(mod, out var eUsed) && eUsed != null && eUsed.UsedTextureFiles != null)
-                        usedList = eUsed.UsedTextureFiles;
+                    if (_penumbraUsedFiles.Count > 0)
+                    {
+                        var usedGlobal = new HashSet<string>(_penumbraUsedFiles.Select(p => (p ?? string.Empty).Replace('/', '\\')), StringComparer.OrdinalIgnoreCase);
+                        filtered = filtered.Where(f => usedGlobal.Contains((f ?? string.Empty).Replace('/', '\\'))).ToList();
+                    }
                     else
-                        usedList = _modStateService.ReadDetailUsed(mod);
-                    var usedByMod = new HashSet<string>(usedList ?? new List<string>(), StringComparer.OrdinalIgnoreCase);
-                    if (usedByMod.Count > 0)
-                        filtered = filtered.Where(f => usedByMod.Contains(f)).ToList();
-                    else
-                        filtered = new List<string>();
+                    {
+                        List<string> usedList = null;
+                        if (snap.TryGetValue(mod, out var eUsed) && eUsed != null && eUsed.UsedTextureFiles != null)
+                            usedList = eUsed.UsedTextureFiles;
+                        else
+                            usedList = _modStateService.ReadDetailUsed(mod);
+                        var usedByMod = new HashSet<string>((usedList ?? new List<string>()).Select(p => (p ?? string.Empty).Replace('/', '\\')), StringComparer.OrdinalIgnoreCase);
+                        if (usedByMod.Count > 0)
+                            filtered = filtered.Where(f => usedByMod.Contains((f ?? string.Empty).Replace('/', '\\'))).ToList();
+                        else
+                            filtered = new List<string>();
+                    }
                 }
 
                 var isOrphan = _orphaned.Any(x => string.Equals(x.ModFolderName, mod, StringComparison.OrdinalIgnoreCase));
