@@ -289,16 +289,44 @@ public TextureConversionService(ILogger logger, PenumbraIpc penumbraIpc, Texture
                             relFull = (relFull ?? string.Empty).Replace('\\', '/').TrimEnd('/');
                             if (!string.IsNullOrWhiteSpace(relFull))
                             {
-                                var idx = relFull.LastIndexOf('/');
-                                if (idx >= 0)
+                                var dispName = names.TryGetValue(key, out var dispTmp) ? (dispTmp ?? string.Empty) : string.Empty;
+                                if (!string.IsNullOrWhiteSpace(dispName))
                                 {
-                                    relFolder = relFull.Substring(0, idx);
-                                    relLeaf = relFull.Substring(idx + 1);
+                                    var pSegs = relFull.Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                                    var dSegs = dispName.Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                                    if (pSegs.Length >= dSegs.Length)
+                                    {
+                                        bool tailMatches = true;
+                                        for (int i = 0; i < dSegs.Length; i++)
+                                        {
+                                            var ps = pSegs[pSegs.Length - dSegs.Length + i];
+                                            var ds = dSegs[i];
+                                            if (!string.Equals(ps, ds, StringComparison.OrdinalIgnoreCase))
+                                            {
+                                                tailMatches = false;
+                                                break;
+                                            }
+                                        }
+                                        if (tailMatches)
+                                        {
+                                            relFolder = string.Join('/', pSegs.Take(pSegs.Length - dSegs.Length));
+                                            relLeaf = dispName;
+                                        }
+                                    }
                                 }
-                                else
+                                if (string.IsNullOrWhiteSpace(relLeaf))
                                 {
-                                    relFolder = string.Empty;
-                                    relLeaf = relFull;
+                                    var idx = relFull.LastIndexOf('/');
+                                    if (idx >= 0)
+                                    {
+                                        relFolder = relFull.Substring(0, idx);
+                                        relLeaf = relFull.Substring(idx + 1);
+                                    }
+                                    else
+                                    {
+                                        relFolder = string.Empty;
+                                        relLeaf = relFull;
+                                    }
                                 }
                             }
                         }
@@ -308,16 +336,44 @@ public TextureConversionService(ILogger logger, PenumbraIpc penumbraIpc, Texture
                             relFull = (relFull ?? string.Empty).Replace('\\', '/').TrimEnd('/');
                             if (!string.IsNullOrWhiteSpace(relFull))
                             {
-                                var idx = relFull.LastIndexOf('/');
-                                if (idx >= 0)
+                                var dispName = names.TryGetValue(key, out var dispTmp2) ? (dispTmp2 ?? string.Empty) : string.Empty;
+                                if (!string.IsNullOrWhiteSpace(dispName))
                                 {
-                                    relFolder = relFull.Substring(0, idx);
-                                    relLeaf = relFull.Substring(idx + 1);
+                                    var pSegs = relFull.Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                                    var dSegs = dispName.Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                                    if (pSegs.Length >= dSegs.Length)
+                                    {
+                                        bool tailMatches = true;
+                                        for (int i = 0; i < dSegs.Length; i++)
+                                        {
+                                            var ps = pSegs[pSegs.Length - dSegs.Length + i];
+                                            var ds = dSegs[i];
+                                            if (!string.Equals(ps, ds, StringComparison.OrdinalIgnoreCase))
+                                            {
+                                                tailMatches = false;
+                                                break;
+                                            }
+                                        }
+                                        if (tailMatches)
+                                        {
+                                            relFolder = string.Join('/', pSegs.Take(pSegs.Length - dSegs.Length));
+                                            relLeaf = dispName;
+                                        }
+                                    }
                                 }
-                                else
+                                if (string.IsNullOrWhiteSpace(relLeaf))
                                 {
-                                    relFolder = string.Empty;
-                                    relLeaf = relFull;
+                                    var idx = relFull.LastIndexOf('/');
+                                    if (idx >= 0)
+                                    {
+                                        relFolder = relFull.Substring(0, idx);
+                                        relLeaf = relFull.Substring(idx + 1);
+                                    }
+                                    else
+                                    {
+                                        relFolder = string.Empty;
+                                        relLeaf = relFull;
+                                    }
                                 }
                             }
                         }

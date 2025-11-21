@@ -590,16 +590,44 @@ public sealed class TextureBackupService
                             if (!string.IsNullOrWhiteSpace(relFull))
                             {
                                 relFull = relFull.Replace('\\', '/').TrimEnd('/');
-                                var idx = relFull.LastIndexOf('/');
-                                if (idx >= 0)
+                                var dispName = displayByMod.TryGetValue(mod, out var dn) ? (dn ?? string.Empty) : string.Empty;
+                                if (!string.IsNullOrWhiteSpace(dispName))
                                 {
-                                    relFolder = relFull.Substring(0, idx);
-                                    relLeaf = relFull.Substring(idx + 1);
+                                    var pSegs = relFull.Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                                    var dSegs = dispName.Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                                    if (pSegs.Length >= dSegs.Length)
+                                    {
+                                        bool tailMatches = true;
+                                        for (int i = 0; i < dSegs.Length; i++)
+                                        {
+                                            var ps = pSegs[pSegs.Length - dSegs.Length + i];
+                                            var ds = dSegs[i];
+                                            if (!string.Equals(ps, ds, StringComparison.OrdinalIgnoreCase))
+                                            {
+                                                tailMatches = false;
+                                                break;
+                                            }
+                                        }
+                                        if (tailMatches)
+                                        {
+                                            relFolder = string.Join('/', pSegs.Take(pSegs.Length - dSegs.Length));
+                                            relLeaf = dispName;
+                                        }
+                                    }
                                 }
-                                else
+                                if (string.IsNullOrWhiteSpace(relLeaf))
                                 {
-                                    relFolder = string.Empty;
-                                    relLeaf = relFull;
+                                    var idx = relFull.LastIndexOf('/');
+                                    if (idx >= 0)
+                                    {
+                                        relFolder = relFull.Substring(0, idx);
+                                        relLeaf = relFull.Substring(idx + 1);
+                                    }
+                                    else
+                                    {
+                                        relFolder = string.Empty;
+                                        relLeaf = relFull;
+                                    }
                                 }
                             }
                         }
