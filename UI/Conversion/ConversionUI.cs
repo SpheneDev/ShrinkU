@@ -970,7 +970,16 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
         {
             _loadingModPaths = true;
             var snap = _modStateService.Snapshot();
-            _modPaths = snap.ToDictionary(kv => kv.Key, kv => kv.Value?.PenumbraRelativePath ?? string.Empty, StringComparer.OrdinalIgnoreCase);
+            _modPaths = snap.ToDictionary(
+                kv => kv.Key,
+                kv => {
+                    var folder = kv.Value?.PenumbraRelativePath ?? string.Empty;
+                    var leaf = kv.Value?.RelativeModName ?? string.Empty;
+                    if (string.IsNullOrWhiteSpace(folder)) return leaf ?? string.Empty;
+                    if (string.IsNullOrWhiteSpace(leaf)) return folder ?? string.Empty;
+                    return string.Concat(folder, "/", leaf);
+                },
+                StringComparer.OrdinalIgnoreCase);
             try { _modPaths.Remove("mod_state"); } catch { }
             try
             {

@@ -582,12 +582,32 @@ public sealed class TextureBackupService
                                 abs = GetModAbsolutePath(mod) ?? string.Empty;
                         }
                         catch { abs = GetModAbsolutePath(mod) ?? string.Empty; }
-                        var rel = string.Empty;
-                        try { rel = GetModPenumbraRelativePath(mod); } catch { rel = string.Empty; }
+                        var relFolder = string.Empty;
+                        var relLeaf = string.Empty;
+                        try
+                        {
+                            var relFull = GetModPenumbraRelativePath(mod);
+                            if (!string.IsNullOrWhiteSpace(relFull))
+                            {
+                                relFull = relFull.Replace('\\', '/').TrimEnd('/');
+                                var idx = relFull.LastIndexOf('/');
+                                if (idx >= 0)
+                                {
+                                    relFolder = relFull.Substring(0, idx);
+                                    relLeaf = relFull.Substring(idx + 1);
+                                }
+                                else
+                                {
+                                    relFolder = string.Empty;
+                                    relLeaf = relFull;
+                                }
+                            }
+                        }
+                        catch { relFolder = string.Empty; relLeaf = string.Empty; }
                         var existingForMod = _modStateService.Get(mod);
                         var ver = versionByMod.TryGetValue(mod, out var vv) ? vv : (existingForMod.CurrentVersion ?? string.Empty);
                         var auth = authorByMod.TryGetValue(mod, out var aa) ? aa : (existingForMod.CurrentAuthor ?? string.Empty);
-                        _modStateService.UpdateCurrentModInfo(mod, abs, rel, ver, auth);
+                        _modStateService.UpdateCurrentModInfo(mod, abs, relFolder, ver, auth, relLeaf);
                         try
                         {
                             var dn = displayByMod.TryGetValue(mod, out var disp) ? disp : string.Empty;

@@ -218,7 +218,13 @@ public sealed partial class ConversionUI
             _modStateSnapshot = snap;
             _modPaths = snap.ToDictionary(
                 kv => kv.Key,
-                kv => kv.Value?.PenumbraRelativePath ?? string.Empty,
+                kv => {
+                    var folder = kv.Value?.PenumbraRelativePath ?? string.Empty;
+                    var leaf = kv.Value?.RelativeModName ?? string.Empty;
+                    if (string.IsNullOrWhiteSpace(folder)) return leaf ?? string.Empty;
+                    if (string.IsNullOrWhiteSpace(leaf)) return folder ?? string.Empty;
+                    return string.Concat(folder, "/", leaf);
+                },
                 StringComparer.OrdinalIgnoreCase);
             _modDisplayNames = snap.ToDictionary(kv => kv.Key, kv => kv.Value?.DisplayName ?? string.Empty, StringComparer.OrdinalIgnoreCase);
             _selectedCountByMod.Clear();

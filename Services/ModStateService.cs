@@ -94,7 +94,7 @@ public sealed class ModStateService
         }
     }
 
-    public void UpdateCurrentModInfo(string mod, string absolutePath, string relativePath, string version, string author)
+    public void UpdateCurrentModInfo(string mod, string absolutePath, string relativePath, string version, string author, string relativeModName)
     {
         lock (_lock)
         {
@@ -103,15 +103,18 @@ public sealed class ModStateService
             var rel = relativePath ?? string.Empty;
             var ver = version ?? string.Empty;
             var auth = author ?? string.Empty;
+            var rname = relativeModName ?? string.Empty;
             bool changed = !string.Equals(e.ModAbsolutePath, abs, StringComparison.Ordinal)
                 || !string.Equals(e.PenumbraRelativePath, rel, StringComparison.Ordinal)
                 || !string.Equals(e.CurrentVersion, ver, StringComparison.Ordinal)
-                || !string.Equals(e.CurrentAuthor, auth, StringComparison.Ordinal);
+                || !string.Equals(e.CurrentAuthor, auth, StringComparison.Ordinal)
+                || !string.Equals(e.RelativeModName, rname, StringComparison.Ordinal);
             if (!changed) return;
             e.ModAbsolutePath = abs;
             e.PenumbraRelativePath = rel;
             e.CurrentVersion = ver;
             e.CurrentAuthor = auth;
+            e.RelativeModName = rname;
             e.LastUpdatedUtc = DateTime.UtcNow;
             _lastSaveReason = nameof(UpdateCurrentModInfo);
             ScheduleSave();
@@ -287,7 +290,7 @@ public sealed class ModStateService
             List<string> t = textures ?? ReadDetailTextures(mod);
             List<string> u = used ?? ReadDetailUsed(mod);
             var obj = new ModDetail { TextureFiles = t, UsedTextureFiles = u };
-            var json = JsonSerializer.Serialize(obj, new JsonSerializerOptions { WriteIndented = false });
+            var json = JsonSerializer.Serialize(obj, new JsonSerializerOptions { WriteIndented = true });
             File.WriteAllText(path, json);
             trace.Dispose();
         }
@@ -401,8 +404,8 @@ public sealed class ModStateService
             var sw = Stopwatch.StartNew();
             using (var fs = new FileStream(tmp, FileMode.Create, FileAccess.Write, FileShare.None, 65536, FileOptions.SequentialScan))
             {
-                using var writer = new Utf8JsonWriter(fs, new JsonWriterOptions { Indented = false });
-                JsonSerializer.Serialize(writer, _state, new JsonSerializerOptions { WriteIndented = false });
+                using var writer = new Utf8JsonWriter(fs, new JsonWriterOptions { Indented = true });
+                JsonSerializer.Serialize(writer, _state, new JsonSerializerOptions { WriteIndented = true });
                 writer.Flush();
             }
             try
@@ -535,6 +538,7 @@ public sealed class ModStateEntry
     public DateTime LastUpdatedUtc { get; set; } = DateTime.MinValue;
     public string ModAbsolutePath { get; set; } = string.Empty;
     public string PenumbraRelativePath { get; set; } = string.Empty;
+    public string RelativeModName { get; set; } = string.Empty;
     public string CurrentVersion { get; set; } = string.Empty;
     public string CurrentAuthor { get; set; } = string.Empty;
     public string DisplayName { get; set; } = string.Empty;

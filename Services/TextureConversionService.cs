@@ -274,22 +274,57 @@ public TextureConversionService(ILogger logger, PenumbraIpc penumbraIpc, Texture
                             abs = (!string.IsNullOrWhiteSpace(defaultAbs) && Directory.Exists(defaultAbs)) ? defaultAbs : (_backupService.GetModAbsolutePath(key) ?? string.Empty);
                         }
                         catch { abs = _backupService.GetModAbsolutePath(key) ?? string.Empty; }
-                        string rel = string.Empty;
+                        string relFolder = string.Empty;
+                        string relLeaf = string.Empty;
                         try
                         {
                             var (ec, fullPath, _, _) = _penumbraIpc.GetModPath(key);
                             var p = (fullPath ?? string.Empty).Replace('\\', '/');
                             try { _logger.LogDebug("PenumbraRelativePath Startup: mod={mod} ec={ec} path={path}", key, ec, p); } catch { }
+                            var relFull = string.Empty;
                             if (ec == Penumbra.Api.Enums.PenumbraApiEc.Success && !string.IsNullOrWhiteSpace(p))
-                                rel = p;
+                                relFull = p;
                             else
-                                rel = ComputeRelativePathFromAbs(root, abs);
+                                relFull = ComputeRelativePathFromAbs(root, abs);
+                            relFull = (relFull ?? string.Empty).Replace('\\', '/').TrimEnd('/');
+                            if (!string.IsNullOrWhiteSpace(relFull))
+                            {
+                                var idx = relFull.LastIndexOf('/');
+                                if (idx >= 0)
+                                {
+                                    relFolder = relFull.Substring(0, idx);
+                                    relLeaf = relFull.Substring(idx + 1);
+                                }
+                                else
+                                {
+                                    relFolder = string.Empty;
+                                    relLeaf = relFull;
+                                }
+                            }
                         }
-                        catch { rel = ComputeRelativePathFromAbs(root, abs); }
+                        catch
+                        {
+                            var relFull = ComputeRelativePathFromAbs(root, abs);
+                            relFull = (relFull ?? string.Empty).Replace('\\', '/').TrimEnd('/');
+                            if (!string.IsNullOrWhiteSpace(relFull))
+                            {
+                                var idx = relFull.LastIndexOf('/');
+                                if (idx >= 0)
+                                {
+                                    relFolder = relFull.Substring(0, idx);
+                                    relLeaf = relFull.Substring(idx + 1);
+                                }
+                                else
+                                {
+                                    relFolder = string.Empty;
+                                    relLeaf = relFull;
+                                }
+                            }
+                        }
                         var existing = snap.TryGetValue(key, out var e) && e != null ? e : null;
                         var ver = existing?.CurrentVersion ?? string.Empty;
                         var auth = existing?.CurrentAuthor ?? string.Empty;
-                        _modStateService.UpdateCurrentModInfo(key, abs, rel, ver, auth);
+                        _modStateService.UpdateCurrentModInfo(key, abs, relFolder, ver, auth, relLeaf);
 
                         if (states.TryGetValue(mod, out var st))
                             _modStateService.UpdateEnabledState(key, st.Enabled, st.Priority);
@@ -944,7 +979,27 @@ public TextureConversionService(ILogger logger, PenumbraIpc penumbraIpc, Texture
                     var existing = snap.TryGetValue(key, out var e) && e != null ? e : null;
                     var ver = existing?.CurrentVersion ?? string.Empty;
                     var auth = existing?.CurrentAuthor ?? string.Empty;
-                    _modStateService.UpdateCurrentModInfo(key, abs, rel, ver, auth);
+                    string relFolder = string.Empty, relLeaf = string.Empty;
+                    try
+                    {
+                        var rf = (rel ?? string.Empty).Replace('\\', '/').TrimEnd('/');
+                        if (!string.IsNullOrWhiteSpace(rf))
+                        {
+                            var idx = rf.LastIndexOf('/');
+                            if (idx >= 0)
+                            {
+                                relFolder = rf.Substring(0, idx);
+                                relLeaf = rf.Substring(idx + 1);
+                            }
+                            else
+                            {
+                                relFolder = string.Empty;
+                                relLeaf = rf;
+                            }
+                        }
+                    }
+                    catch { relFolder = string.Empty; relLeaf = string.Empty; }
+                    _modStateService.UpdateCurrentModInfo(key, abs, relFolder, ver, auth, relLeaf);
 
                     if (states.TryGetValue(mod, out var st))
                         _modStateService.UpdateEnabledState(key, st.Enabled, st.Priority);
