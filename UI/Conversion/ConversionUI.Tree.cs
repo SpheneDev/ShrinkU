@@ -31,6 +31,15 @@ public sealed partial class ConversionUI
         var root = new TableCatNode("/");
         foreach (var mod in mods)
         {
+            var isOrphan = _orphaned.Any(x => string.Equals(x.ModFolderName, mod, StringComparison.OrdinalIgnoreCase));
+            if (isOrphan)
+            {
+                if (!root.Children.TryGetValue("Uninstalled", out var uninst))
+                    root.Children["Uninstalled"] = uninst = new TableCatNode("Uninstalled");
+                uninst.Mods.Add(mod);
+                continue;
+            }
+
             if (!_modPaths.TryGetValue(mod, out var fullPath) || string.IsNullOrWhiteSpace(fullPath))
             {
                 if (!root.Children.TryGetValue("(Uncategorized)", out var unc))
@@ -78,7 +87,8 @@ public sealed partial class ConversionUI
     private IEnumerable<KeyValuePair<string, TableCatNode>> OrderedChildrenPairs(TableCatNode node)
     {
         return node.Children
-            .OrderBy(kv => kv.Key.Equals("(Uncategorized)", StringComparison.OrdinalIgnoreCase) ? 1 : 0)
+            .OrderBy(kv => kv.Key.Equals("Uninstalled", StringComparison.OrdinalIgnoreCase) ? -1
+                             : kv.Key.Equals("(Uncategorized)", StringComparison.OrdinalIgnoreCase) ? 1 : 0)
             .ThenBy(kv => kv.Key, StringComparer.OrdinalIgnoreCase);
     }
 
