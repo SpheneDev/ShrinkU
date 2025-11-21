@@ -225,6 +225,7 @@ public sealed class PenumbraIpc : IDisposable
 
     // Event surface for consumers
     public event Action? ModsChanged;
+    public event Action<string, string>? ModPathChanged;
     public event Action<string>? ModAdded;
     public event Action<string>? ModDeleted;
     public event Action<string, string>? ModMoved;
@@ -290,13 +291,14 @@ public sealed class PenumbraIpc : IDisposable
                                 {
                                     anyChange = true;
                                     _logger.LogDebug("Penumbra mod path changed (watcher): {dir} : {old} -> {new}", dir, oldPath, path);
+                                    try { ModPathChanged?.Invoke(dir, path); } catch { }
                                 }
                             }
                             else
                             {
-                                // Newly discovered mod
                                 anyChange = true;
                                 _logger.LogDebug("Penumbra mod path discovered (watcher): {dir} : {new}", dir, path);
+                                try { ModPathChanged?.Invoke(dir, path); } catch { }
                             }
                         }
 

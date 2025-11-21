@@ -109,6 +109,7 @@ public sealed class Plugin : IDalamudPlugin
 
         try
         {
+            _conversionService.SetEnabled(true);
             var asm = typeof(Plugin).Assembly;
             var ver = asm?.GetName()?.Version?.ToString() ?? "unknown";
             var loc = asm?.Location ?? "unknown";
