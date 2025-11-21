@@ -18,6 +18,7 @@ public sealed partial class ConversionUI
             SetStatus("Automatic mode active: restoring is disabled.");
             return;
         }
+        TraceAction(refreshReason, nameof(TryStartPmpRestoreNewest), mod);
         List<string>? pmpFiles = null;
         try { pmpFiles = _backupService.GetPmpBackupsForModAsync(mod).GetAwaiter().GetResult(); } catch { }
         if (pmpFiles == null || pmpFiles.Count == 0)
@@ -42,6 +43,7 @@ public sealed partial class ConversionUI
             .ContinueWith(t =>
             {
                 var success = t.Status == TaskStatus.RanToCompletion && t.Result;
+                TraceAction(refreshReason, "RestorePmpAsync.completed", success ? latest : string.Empty);
                 try { _backupService.RedrawPlayer(); } catch { }
                 if (setCompletionStatus)
                 {
@@ -70,10 +72,15 @@ public sealed partial class ConversionUI
                         try { var hasPmpNow = _backupService.HasPmpBackupForModAsync(mod).GetAwaiter().GetResult(); _cacheService.SetModHasPmp(mod, hasPmpNow); } catch { }
                     }
                 });
-                _running = false;
-                if (resetConversionAfter) ResetConversionProgress();
-                if (resetRestoreAfter) ResetRestoreProgress();
-                if (closePopup) ImGui.CloseCurrentPopup();
+                _uiThreadActions.Enqueue(() =>
+                {
+                    _running = false;
+                    if (resetConversionAfter) ResetConversionProgress();
+                    if (resetRestoreAfter) ResetRestoreProgress();
+                    if (closePopup) ImGui.CloseCurrentPopup();
+                    _modStateSnapshot = _modStateService.Snapshot();
+                    _needsUIRefresh = true;
+                });
             });
     }
 }

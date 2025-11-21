@@ -142,8 +142,7 @@ public sealed partial class ConversionUI
         }
         if (_scannedByMod.Count == 0)
         {
-            ImGui.Text("No scan results yet. Use 'Scan All Mod Textures'.");
-            return;
+            // Proceed with empty file lists; rows will use mod_state counts
         }
 
         DrawScannedFilesTable();
@@ -151,12 +150,28 @@ public sealed partial class ConversionUI
 
     private void DrawScannedFilesTable_ViewImpl()
     {
-        var visibleSig = string.Concat(_scanFilter, "|", _filterPenumbraUsedOnly ? "1" : "0", "|", _filterNonConvertibleMods ? "1" : "0", "|", _filterInefficientMods ? "1" : "0", "|", _orphaned.Count.ToString(), "|", _scannedByMod.Count.ToString(), "|", _penumbraUsedFiles.Count.ToString());
+        var snapForSig = _modStateService.Snapshot();
+        var usedCountSig = 0;
+        foreach (var kv in snapForSig)
+        {
+            if (kv.Value != null && kv.Value.UsedTextureFiles != null)
+                usedCountSig += kv.Value.UsedTextureFiles.Count;
+        }
+        var visibleSig = string.Concat(_scanFilter, "|", _filterPenumbraUsedOnly ? "1" : "0", "|", _filterNonConvertibleMods ? "1" : "0", "|", _filterInefficientMods ? "1" : "0", "|", _orphaned.Count.ToString(), "|", _scannedByMod.Count.ToString(), "|", usedCountSig.ToString());
         if (!string.Equals(visibleSig, _visibleByModSig, StringComparison.Ordinal))
         {
             _visibleByMod.Clear();
-            foreach (var (mod, files) in _scannedByMod)
+            var snap = snapForSig;
+            var sourceKeys = _scannedByMod.Count > 0
+                ? _scannedByMod.Keys.Union(snap.Keys, StringComparer.OrdinalIgnoreCase).ToList()
+                : snap.Keys.ToList();
+            foreach (var mod in sourceKeys)
             {
+                List<string> files = null;
+                if (_scannedByMod.TryGetValue(mod, out var list) && list != null)
+                    files = list;
+                else
+                    files = _modStateService.ReadDetailTextures(mod);
                 if (IsModExcludedByTags(mod))
                     continue;
                 var displayName = ResolveModDisplayName(mod);
@@ -165,8 +180,19 @@ public sealed partial class ConversionUI
                     : files.Where(f => Path.GetFileName(f).IndexOf(_scanFilter, StringComparison.OrdinalIgnoreCase) >= 0
                                     || mod.IndexOf(_scanFilter, StringComparison.OrdinalIgnoreCase) >= 0
                                     || displayName.IndexOf(_scanFilter, StringComparison.OrdinalIgnoreCase) >= 0).ToList();
-                if (_filterPenumbraUsedOnly && _penumbraUsedFiles.Count > 0)
-                     filtered = filtered.Where(f => _penumbraUsedFiles.Contains(f)).ToList();
+                if (_filterPenumbraUsedOnly)
+                {
+                    List<string> usedList = null;
+                    if (snap.TryGetValue(mod, out var eUsed) && eUsed != null && eUsed.UsedTextureFiles != null)
+                        usedList = eUsed.UsedTextureFiles;
+                    else
+                        usedList = _modStateService.ReadDetailUsed(mod);
+                    var usedByMod = new HashSet<string>(usedList ?? new List<string>(), StringComparer.OrdinalIgnoreCase);
+                    if (usedByMod.Count > 0)
+                        filtered = filtered.Where(f => usedByMod.Contains(f)).ToList();
+                    else
+                        filtered = new List<string>();
+                }
 
                 var isOrphan = _orphaned.Any(x => string.Equals(x.ModFolderName, mod, StringComparison.OrdinalIgnoreCase));
                 if (_filterNonConvertibleMods && files.Count == 0 && !isOrphan)
@@ -189,7 +215,12 @@ public sealed partial class ConversionUI
                     _visibleByMod[name] = new List<string>();
             }
             _visibleByModSig = visibleSig;
-            _modStateSnapshot = _modStateService.Snapshot();
+            _modStateSnapshot = snap;
+            _modPaths = snap.ToDictionary(
+                kv => kv.Key,
+                kv => kv.Value?.PenumbraRelativePath ?? string.Empty,
+                StringComparer.OrdinalIgnoreCase);
+            _modDisplayNames = snap.ToDictionary(kv => kv.Key, kv => kv.Value?.DisplayName ?? string.Empty, StringComparer.OrdinalIgnoreCase);
             _selectedCountByMod.Clear();
             foreach (var (mod, files) in _visibleByMod)
             {
@@ -320,8 +351,7 @@ public sealed partial class ConversionUI
             var sig = string.Concat(expandedFoldersSig, "|", expandedModsSig, "|", visibleByMod.Count.ToString(), "|", (_configService.Current.ShowModFilesInOverview ? "1" : "0"), "|", _scanFilter, "|", _filterPenumbraUsedOnly ? "1" : "0", "|", _filterNonConvertibleMods ? "1" : "0", "|", _filterInefficientMods ? "1" : "0", "|", _modPathsSig);
             if (!string.Equals(sig, _flatRowsSig, StringComparison.Ordinal))
             {
-                if (_modPaths.Count > 0)
-                    root = BuildTableCategoryTree(mods);
+                root = BuildTableCategoryTree(mods);
                 _flatRows.Clear();
                 BuildFlatRows(root, visibleByMod, string.Empty, 0);
                 _cachedTotalRows = _flatRows.Count;
@@ -433,7 +463,7 @@ public sealed partial class ConversionUI
                 }
                 if (modOrig <= 0)
                 {
-                    var snap = _modStateService.Snapshot();
+                    var snap = _modStateSnapshot ?? _modStateService.Snapshot();
                     if (snap.TryGetValue(m, out var st) && st != null && st.ComparedFiles > 0)
                         modOrig = st.OriginalBytes;
                     else
@@ -516,13 +546,62 @@ public sealed partial class ConversionUI
             var backupTasks = new List<Task<bool>>();
             foreach (var m in selectedEmptyMods)
             {
-                try { backupTasks.Add(_backupService.CreateFullModBackupAsync(m, progress, CancellationToken.None)); } catch { }
+                try { backupTasks.Add(_backupService.CreateFullModBackupAsync(m, progress, CancellationToken.None)); }
+                catch (Exception ex) { _logger.LogError(ex, "Queue backup task failed for {mod}", m); }
             }
             if (toConvert.Count == 0 && backupTasks.Count == 0)
             {
-                SetStatus("Nothing selected to backup or convert.");
-                _running = false;
-                ResetBothProgress();
+                var modsToConvert = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var (mod, count) in _selectedCountByMod)
+                {
+                    if (count > 0 && !GetOrQueryModBackup(mod) && !IsModExcludedByTags(mod))
+                        modsToConvert.Add(mod);
+                }
+                foreach (var m in _selectedEmptyMods)
+                {
+                    if (!GetOrQueryModBackup(m) && !IsModExcludedByTags(m))
+                        modsToConvert.Add(m);
+                }
+                if (modsToConvert.Count == 0)
+                {
+                    SetStatus("Nothing selected to backup or convert.");
+                    _running = false;
+                    ResetBothProgress();
+                }
+                else
+                {
+                    _ = Task.Run(async () =>
+                    {
+                        try
+                        {
+                            foreach (var m in modsToConvert)
+                            {
+                                var list = await _conversionService.GetModTextureFilesAsync(m).ConfigureAwait(false);
+                                if (list != null && list.Count > 0)
+                                {
+                                    foreach (var f in list)
+                                        toConvert[f] = Array.Empty<string>();
+                                    _uiThreadActions.Enqueue(() => { _scannedByMod[m] = list; _needsUIRefresh = true; });
+                                }
+                                await Task.Yield();
+                            }
+                            if (toConvert.Count == 0)
+                            {
+                                _uiThreadActions.Enqueue(() => { SetStatus("Nothing selected to convert."); _running = false; ResetBothProgress(); });
+                            }
+                            else
+                            {
+                                await _conversionService.StartConversionAsync(toConvert).ConfigureAwait(false);
+                                _uiThreadActions.Enqueue(() => { _running = false; });
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger.LogError(ex, "On-demand scan for selected mods failed");
+                            _uiThreadActions.Enqueue(() => { _running = false; ResetBothProgress(); });
+                        }
+                    });
+                }
             }
             else
             {
@@ -533,7 +612,8 @@ public sealed partial class ConversionUI
                     {
                         foreach (var m in modsQueue)
                         {
-                            try { await _backupService.CreateFullModBackupAsync(m, progress, CancellationToken.None).ConfigureAwait(false); } catch { }
+                            try { await _backupService.CreateFullModBackupAsync(m, progress, CancellationToken.None).ConfigureAwait(false); }
+                            catch (Exception ex) { _logger.LogError(ex, "Backup task failed for {mod}", m); }
                             await Task.Yield();
                         }
                         _uiThreadActions.Enqueue(() => { TriggerMetricsRefresh(); if (toConvert.Count == 0) { _running = false; ResetBothProgress(); } });
@@ -542,7 +622,7 @@ public sealed partial class ConversionUI
                 if (toConvert.Count > 0)
                 {
                     _ = _conversionService.StartConversionAsync(toConvert)
-                        .ContinueWith(_ => { _running = false; }, TaskScheduler.Default);
+                        .ContinueWith(_ => { _uiThreadActions.Enqueue(() => { _running = false; }); }, TaskScheduler.Default);
                 }
             }
         }
@@ -555,7 +635,12 @@ public sealed partial class ConversionUI
         var automaticMode = _configService.Current.TextureProcessingMode == TextureProcessingMode.Automatic;
         var restorableFiltered = automaticMode
             ? restorableModsForAction.Where(m =>
-                !_scannedByMod.TryGetValue(m, out var files) || !files.Any(f => _penumbraUsedFiles.Contains(f)))
+                {
+                    var snap = _modStateSnapshot ?? _modStateService.Snapshot();
+                    if (snap.TryGetValue(m, out var ms) && ms != null && ms.UsedTextureFiles != null && ms.UsedTextureFiles.Count > 0)
+                        return false;
+                    return true;
+                })
                 .ToList()
             : restorableModsForAction;
         bool canRestore = restorableFiltered.Count > 0;
@@ -593,7 +678,8 @@ public sealed partial class ConversionUI
                         _currentRestoreModTotal = 0;
                         var preferPmp = _configService.Current.PreferPmpRestoreWhenAvailable;
                         var hasPmp = false;
-                        try { hasPmp = _backupService.HasPmpBackupForModAsync(mod).GetAwaiter().GetResult(); } catch { }
+                        try { hasPmp = _backupService.HasPmpBackupForModAsync(mod).GetAwaiter().GetResult(); }
+                        catch (Exception ex) { _logger.LogError(ex, "HasPmpBackup check failed for {mod}", mod); }
                         if (preferPmp && hasPmp)
                         {
                             var latestPmp = _backupService.GetPmpBackupsForModAsync(mod).GetAwaiter().GetResult().FirstOrDefault();
@@ -611,40 +697,44 @@ public sealed partial class ConversionUI
                             await _backupService.RestoreLatestForModAsync(mod, progress, restoreToken);
                         }
                     }
-                    catch { }
+                    catch (Exception ex) { _logger.LogError(ex, "Bulk restore failed for {mod}", mod); }
                 }
             }).ContinueWith(_ =>
             {
-                try { _backupService.RedrawPlayer(); } catch { }
+                try { _backupService.RedrawPlayer(); }
+                catch (Exception ex) { _logger.LogError(ex, "RedrawPlayer after bulk restore failed"); }
                 _logger.LogDebug("Restore completed (bulk action)");
                 foreach (var m in restorableFiltered)
                 {
-                    try { RefreshModState(m, "restore-bulk"); } catch { }
+                    try { RefreshModState(m, "restore-bulk"); }
+                    catch (Exception ex) { _logger.LogError(ex, "RefreshModState after bulk restore failed for {mod}", m); }
                 }
                 TriggerMetricsRefresh();
-                _perModSavingsTask = _backupService.ComputePerModSavingsAsync();
-                _perModSavingsTask.ContinueWith(ps =>
+                _ = Task.Run(async () =>
                 {
-                    if (ps.Status == TaskStatus.RanToCompletion && ps.Result != null)
+                    foreach (var m in restorableFiltered)
                     {
-                        _cachedPerModSavings = ps.Result;
-                        _perModSavingsRevision++;
-                        _footerTotalsDirty = true;
-                        _needsUIRefresh = true;
+                        try { await _backupService.ComputeSavingsForModAsync(m).ConfigureAwait(false); } catch { }
+                        await Task.Yield();
                     }
-                }, TaskScheduler.Default);
+                    _uiThreadActions.Enqueue(() => { _perModSavingsRevision++; _footerTotalsDirty = true; _needsUIRefresh = true; });
+                });
                 foreach (var m in restorableFiltered)
                 {
-                    try { bool _r; _modsWithPmpCache.TryRemove(m, out _r); } catch { }
-                    try { (string version, string author, DateTime createdUtc, string pmpFileName) _rm; _modsPmpMetaCache.TryRemove(m, out _rm); } catch { }
+                    try { bool _r; _modsWithPmpCache.TryRemove(m, out _r); }
+                    catch (Exception ex) { _logger.LogError(ex, "TryRemove _modsWithPmpCache failed for {mod}", m); }
+                    try { (string version, string author, DateTime createdUtc, string pmpFileName) _rm; _modsPmpMetaCache.TryRemove(m, out _rm); }
+                    catch (Exception ex) { _logger.LogError(ex, "TryRemove _modsPmpMetaCache failed for {mod}", m); }
                     _ = _backupService.HasBackupForModAsync(m).ContinueWith(bt =>
                     {
                         if (bt.Status == TaskStatus.RanToCompletion)
                         {
                             bool any = bt.Result;
-                            try { any = any || _backupService.HasPmpBackupForModAsync(m).GetAwaiter().GetResult(); } catch { }
+                            try { any = any || _backupService.HasPmpBackupForModAsync(m).GetAwaiter().GetResult(); }
+                            catch (Exception ex) { _logger.LogError(ex, "HasPmpBackup check failed for {mod}", m); }
                             _cacheService.SetModHasBackup(m, any);
-                            try { var hasPmpNow = _backupService.HasPmpBackupForModAsync(m).GetAwaiter().GetResult(); _cacheService.SetModHasPmp(m, hasPmpNow); } catch { }
+                            try { var hasPmpNow = _backupService.HasPmpBackupForModAsync(m).GetAwaiter().GetResult(); _cacheService.SetModHasPmp(m, hasPmpNow); }
+                            catch (Exception ex) { _logger.LogError(ex, "SetModHasPmp failed for {mod}", m); }
                         }
                     });
                 }
@@ -659,13 +749,16 @@ public sealed partial class ConversionUI
                     if (removed > 0)
                         _configService.Save();
                 }
-                catch { }
-                _running = false;
-                _restoreCancellationTokenSource?.Dispose();
-                _restoreCancellationTokenSource = null;
-                _currentRestoreMod = string.Empty;
-                _currentRestoreModIndex = 0;
-                _currentRestoreModTotal = 0;
+                catch (Exception ex) { _logger.LogError(ex, "Update ExternalConvertedMods after bulk restore failed"); }
+                _uiThreadActions.Enqueue(() =>
+                {
+                    _running = false;
+                    _restoreCancellationTokenSource?.Dispose();
+                    _restoreCancellationTokenSource = null;
+                    _currentRestoreMod = string.Empty;
+                    _currentRestoreModIndex = 0;
+                    _currentRestoreModTotal = 0;
+                });
             });
         }
         ImGui.PopStyleColor(4);

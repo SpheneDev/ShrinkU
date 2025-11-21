@@ -103,13 +103,13 @@ public sealed class FirstRunSetupUI : Window
                 _configService.Save();
                 _logger.LogDebug("First run setup completed. Backup folder: {path}", _selectedFolder);
             }
-            catch { }
+            catch (Exception ex) { _logger.LogError(ex, "Persist first run setup failed"); }
 
             try
             {
                 OnCompleted?.Invoke();
             }
-            catch { }
+            catch (Exception ex) { _logger.LogError(ex, "OnCompleted callback failed"); }
 
             IsOpen = false;
         }
@@ -131,7 +131,8 @@ public sealed class FirstRunSetupUI : Window
             if (dialog.ShowDialog() == DialogResult.OK && !string.IsNullOrWhiteSpace(dialog.SelectedPath))
             {
                 _selectedFolder = dialog.SelectedPath;
-                try { Directory.CreateDirectory(_selectedFolder); } catch { }
+                try { Directory.CreateDirectory(_selectedFolder); }
+                catch (Exception ex) { _logger.LogError(ex, "CreateDirectory failed for {path}", _selectedFolder); }
                 _logger.LogDebug("Setup selected backup folder: {path}", _selectedFolder);
             }
         }
@@ -144,7 +145,7 @@ public sealed class FirstRunSetupUI : Window
     private static bool DirectoryExistsSafe(string path)
     {
         try { return !string.IsNullOrWhiteSpace(path) && Directory.Exists(path); }
-        catch { return false; }
+        catch (Exception ex) { return false; }
     }
 
     private static void TryOpenFolder(string path)
@@ -153,10 +154,12 @@ public sealed class FirstRunSetupUI : Window
         {
             if (!string.IsNullOrWhiteSpace(path))
             {
-                try { Directory.CreateDirectory(path); } catch { }
-                Process.Start(new ProcessStartInfo("explorer.exe", path) { UseShellExecute = true });
+                try { Directory.CreateDirectory(path); }
+                catch (Exception ex) { }
+                try { Process.Start(new ProcessStartInfo("explorer.exe", path) { UseShellExecute = true }); }
+                catch (Exception ex) { }
             }
         }
-        catch { }
+        catch (Exception ex) { }
     }
 }

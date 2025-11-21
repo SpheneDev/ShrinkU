@@ -42,31 +42,18 @@ public sealed partial class ConversionUI
             string folderOnly;
             try
             {
-                var fpNorm = fullPath.Replace('\\', '/');
-                if (_modDisplayNames.TryGetValue(mod, out var dn) && !string.IsNullOrWhiteSpace(dn))
-                {
-                    var dnNorm = dn.Replace('\\', '/');
-                    if (fpNorm.EndsWith(dnNorm, StringComparison.Ordinal))
-                        folderOnly = fpNorm.Substring(0, fpNorm.Length - dnNorm.Length).TrimEnd('/');
-                    else
-                        folderOnly = fpNorm;
-                }
-                else
-                {
-                    folderOnly = fpNorm;
-                }
+                int lastSlash = fullPath.LastIndexOf('/');
+                folderOnly = lastSlash >= 0 ? fullPath.Substring(0, lastSlash) : string.Empty;
             }
             catch
             {
-                folderOnly = fullPath.Replace('\\', '/');
+                folderOnly = string.Empty;
             }
 
             var parts = folderOnly.Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
             if (parts.Length == 0)
             {
-                if (!root.Children.TryGetValue("(Uncategorized)", out var unc2))
-                    root.Children["(Uncategorized)"] = unc2 = new TableCatNode("(Uncategorized)");
-                unc2.Mods.Add(mod);
+                root.Mods.Add(mod);
                 continue;
             }
 
@@ -120,6 +107,21 @@ public sealed partial class ConversionUI
 
     private void BuildFlatRows(TableCatNode node, Dictionary<string, List<string>> visibleByMod, string pathPrefix, int depth)
     {
+        foreach (var mod in node.Mods)
+        {
+            if (!visibleByMod.ContainsKey(mod))
+                continue;
+            _flatRows.Add(new FlatRow { Kind = FlatRowKind.Mod, Node = node, Mod = mod, Depth = depth });
+            if (_configService.Current.ShowModFilesInOverview && _expandedMods.Contains(mod))
+            {
+                var files = visibleByMod[mod];
+                if (files != null)
+                {
+                    for (int i = 0; i < files.Count; i++)
+                        _flatRows.Add(new FlatRow { Kind = FlatRowKind.File, Node = node, Mod = mod, File = files[i], Depth = depth + 1 });
+                }
+            }
+        }
         foreach (var (name, child) in OrderedChildrenPairs(node))
         {
             var fullPath = string.IsNullOrEmpty(pathPrefix) ? name : $"{pathPrefix}/{name}";
@@ -128,21 +130,6 @@ public sealed partial class ConversionUI
             if (!catOpen)
                 continue;
             BuildFlatRows(child, visibleByMod, fullPath, depth + 1);
-            foreach (var mod in child.Mods)
-            {
-                if (!visibleByMod.ContainsKey(mod))
-                    continue;
-                _flatRows.Add(new FlatRow { Kind = FlatRowKind.Mod, Node = child, Mod = mod, Depth = depth + 1 });
-                if (_configService.Current.ShowModFilesInOverview && _expandedMods.Contains(mod))
-                {
-                    var files = visibleByMod[mod];
-                    if (files != null)
-                    {
-                        for (int i = 0; i < files.Count; i++)
-                            _flatRows.Add(new FlatRow { Kind = FlatRowKind.File, Node = child, Mod = mod, File = files[i], Depth = depth + 2 });
-                    }
-                }
-            }
         }
     }
 
@@ -167,7 +154,7 @@ public sealed partial class ConversionUI
                         texturesConverted += s.ComparedFiles;
                     else
                     {
-                        var snap = _modStateService.Snapshot();
+                        var snap = _modStateSnapshot ?? _modStateService.Snapshot();
                         if (snap.TryGetValue(m, out var st) && st != null && st.ComparedFiles > 0)
                             texturesConverted += st.ComparedFiles;
                     }

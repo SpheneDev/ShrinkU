@@ -117,6 +117,7 @@ public sealed partial class ConversionUI : Window, IDisposable
     private readonly HashSet<string> _selectedTextures = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, bool> _modsWithBackupCache = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, bool> _modsWithTexBackupCache = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, DateTime> _lastModRefreshAt = new(StringComparer.OrdinalIgnoreCase);
     private DateTime _disableActionsUntilUtc = DateTime.MinValue;
     private readonly Dictionary<string, string> _fileOwnerMod = new(StringComparer.OrdinalIgnoreCase);
     private void ClearModCaches(string mod)
@@ -131,7 +132,7 @@ public sealed partial class ConversionUI : Window, IDisposable
         _cacheService.ClearAll();
         try { _cachedPerModSavings.Clear(); } catch { }
         try { _cachedPerModOriginalSizes.Clear(); } catch { }
-        _needsUIRefresh = true;
+        RequestUiRefresh("clear-all-caches");
 
         try
         {
@@ -141,17 +142,19 @@ public sealed partial class ConversionUI : Window, IDisposable
                 if (ps.Status == TaskStatus.RanToCompletion && ps.Result != null)
                 {
                     _cachedPerModSavings = ps.Result;
-                    _needsUIRefresh = true;
+                    RequestUiRefresh("per-mod-savings-updated-clear-all-caches");
                 }
             }, TaskScheduler.Default);
         }
         catch { }
     }
 
+    
+
     private void OnModeChanged()
     {
         _disableActionsUntilUtc = DateTime.UtcNow.AddSeconds(1);
-        _needsUIRefresh = true;
+        RequestUiRefresh("mode-changed");
         try
         {
             if (_perModSavingsTask == null || _perModSavingsTask.IsCompleted)
@@ -162,7 +165,7 @@ public sealed partial class ConversionUI : Window, IDisposable
                     if (ps.Status == TaskStatus.RanToCompletion && ps.Result != null)
                     {
                         _cachedPerModSavings = ps.Result;
-                        _needsUIRefresh = true;
+                        RequestUiRefresh("per-mod-savings-updated-mode-changed");
                     }
                 }, TaskScheduler.Default);
             }
@@ -193,6 +196,7 @@ public sealed partial class ConversionUI : Window, IDisposable
     private Task? _fileSizeWarmupTask = null;
     private readonly ModStateService _modStateService;
     private readonly ConversionCacheService _cacheService;
+    private readonly DebugTraceService? _debugTrace;
     // Queue for marshalling UI state updates onto the main thread during Draw
     private readonly ConcurrentQueue<Action> _uiThreadActions = new();
     // Cancellation for restore operations
@@ -212,16 +216,110 @@ public sealed partial class ConversionUI : Window, IDisposable
     
     // UI refresh flag to force ImGui redraw after async data updates
     private volatile bool _needsUIRefresh = false;
+    private volatile bool _startupRefreshInProgress = false;
+    private int _startupTotalMods = 0;
+    private int _startupProcessedMods = 0;
+    private int _startupEtaSeconds = 0;
+    private readonly System.Collections.Generic.List<string> _startupDependencyErrors = new System.Collections.Generic.List<string>();
+    private DateTime _startupRefreshStartedAt = DateTime.MinValue;
+    private volatile bool _refreshOnlyOnModStateChanged = true;
     // Snapshot of known Penumbra mod folders to guard heavy scans
     private HashSet<string> _knownModFolders = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     // Debounce sequence to ensure trailing-edge execution for mod add/delete
     private int _modsChangedDebounceSeq = 0;
     // Timestamp of last heavy scan to rate-limit repeated rescans
     private DateTime _lastHeavyScanAt = DateTime.MinValue;
+    
+    private void RequestUiRefresh(string reason)
+    {
+        try
+        {
+            if (_configService.Current.DebugTraceUiRefresh)
+            {
+                _logger.LogDebug("UI refresh requested: {reason}", reason);
+                _debugTrace?.AddUi($"refresh requested: {reason} thread={System.Environment.CurrentManagedThreadId}");
+            }
+        }
+        catch { }
+        _needsUIRefresh = true;
+    }
+    private void TraceAction(string action, string function, string path = "")
+    {
+        try
+        {
+            if (!_configService.Current.DebugTraceActions)
+                return;
+            var msg = string.IsNullOrWhiteSpace(path)
+                ? $"action={action} func={function}"
+                : $"action={action} func={function} path={path}";
+            _debugTrace?.AddAction(msg);
+        }
+        catch { }
+    }
+    private void ReloadPenumbraUsedFiles(string reason)
+    {
+        try
+        {
+            if (!_filterPenumbraUsedOnly)
+                return;
+            if (_loadingPenumbraUsed)
+                return;
+            TraceAction(reason, nameof(ReloadPenumbraUsedFiles));
+            _loadingPenumbraUsed = true;
+            _ = _conversionService.GetUsedModTexturePathsAsync().ContinueWith(t =>
+            {
+                try
+                {
+                    if (t.Status == TaskStatus.RanToCompletion && t.Result != null)
+                    {
+                        var result = t.Result;
+                        bool changed = result.Count != _penumbraUsedFiles.Count
+                            || result.Any(p => !_penumbraUsedFiles.Contains(p))
+                            || _penumbraUsedFiles.Any(p => !result.Contains(p));
+                        if (changed)
+                        {
+                            _penumbraUsedFiles = result;
+                            if (_configService.Current.DebugTraceActions)
+                            {
+                                foreach (var p in result)
+                                    TraceAction(reason, "used-file", p);
+                            }
+                            _uiThreadActions.Enqueue(() =>
+                            {
+                                try { RefreshScanResults(false, reason); } catch { }
+                                _needsUIRefresh = true;
+                            });
+                        }
+                    }
+                }
+                finally
+                {
+                    _loadingPenumbraUsed = false;
+                }
+            }, TaskScheduler.Default);
+        }
+        catch { }
+    }
+    private void SubscribeStartupProgress(ShrinkU.Services.TextureConversionService conversion)
+    {
+        try
+        {
+            conversion.OnStartupProgress += e =>
+            {
+                _startupProcessedMods = e.processed;
+                _startupTotalMods = e.total;
+                _startupEtaSeconds = e.etaSeconds;
+                _needsUIRefresh = true;
+            };
+        }
+        catch { }
+    }
     // Poller to keep Used-Only list in sync even when no redraw occurs
     private CancellationTokenSource? _usedResourcesPollCts;
     private Task? _usedResourcesPollTask;
     private volatile bool _usedWatcherActive = false;
+    private int _usedWatcherIntervalMs = 3000;
+    private volatile bool _windowFocused = false;
 
     // Stored delegate references for clean unsubscription on dispose
     private readonly Action<(string, int)> _onConversionProgress;
@@ -236,13 +334,14 @@ public sealed partial class ConversionUI : Window, IDisposable
     private readonly Action<string> _onExternalTexturesChanged;
     private readonly Action _onExcludedTagsUpdated;
     private readonly Action _onPlayerResourcesChanged;
+    private readonly Action<string> _onModStateEntryChanged;
     private bool _reinstallInProgress = false;
     private string _reinstallMod = string.Empty;
     // Track last external conversion/restore notification to surface UI indicator
     private DateTime _lastExternalChangeAt = DateTime.MinValue;
     private string _lastExternalChangeReason = string.Empty;
 
-public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureConversionService conversionService, TextureBackupService backupService, Action? openSettings = null, ModStateService? modStateService = null, ConversionCacheService? cacheService = null)
+public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureConversionService conversionService, TextureBackupService backupService, Action? openSettings = null, ModStateService? modStateService = null, ConversionCacheService? cacheService = null, DebugTraceService? debugTrace = null)
         : base("ShrinkU###ShrinkUConversionUI")
     {
         _logger = logger;
@@ -251,7 +350,13 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
         _backupService = backupService;
         _openSettings = openSettings;
         _modStateService = modStateService ?? new ModStateService(_logger, _configService);
+        try { _modStateService.OnStateSaved += () => { _needsUIRefresh = true; }; }
+        catch (Exception ex) { _logger.LogError(ex, "Subscribe OnStateSaved failed"); }
+        _onModStateEntryChanged = m => { try { RefreshModState(m, "mod-state-changed"); } catch (Exception ex) { _logger.LogError(ex, "RefreshModState failed for {mod}", m); } };
+        try { _modStateService.OnEntryChanged += _onModStateEntryChanged; }
+        catch (Exception ex) { _logger.LogError(ex, "Subscribe OnEntryChanged failed"); }
         _cacheService = cacheService ?? new ConversionCacheService(_logger, _configService, _backupService, _modStateService);
+        _debugTrace = debugTrace;
 
         SizeConstraints = new WindowSizeConstraints
         {
@@ -296,18 +401,21 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
                             _perModOriginalSizesTasks[mod] = _backupService.GetLatestOriginalSizesForModAsync(mod);
                             _perModOriginalSizesTasks[mod].ContinueWith(t =>
                             {
-                                if (t.Status == TaskStatus.RanToCompletion && t.Result != null)
+                                _uiThreadActions.Enqueue(() =>
                                 {
-                                    _cachedPerModOriginalSizes[mod] = t.Result;
-                                    _needsUIRefresh = true;
-                                }
-                                _perModOriginalSizesTasks.Remove(mod);
+                                    if (t.Status == TaskStatus.RanToCompletion && t.Result != null)
+                                    {
+                                        _cachedPerModOriginalSizes[mod] = t.Result;
+                                        _needsUIRefresh = true;
+                                    }
+                                    _perModOriginalSizesTasks.Remove(mod);
+                                });
                             }, TaskScheduler.Default);
                         }
                     }
                 }
             }
-            catch { }
+            catch (Exception ex) { _logger.LogError(ex, "ExcludedTagsUpdated handler failed"); }
         };
         _conversionService.OnBackupProgress += _onBackupProgress;
 
@@ -324,7 +432,7 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
                 if (automaticMode && targetHasUsed)
                 {
                     _logger.LogDebug("Automatic mode active; skipping restore-after-cancel for currently used mod: {mod}", target);
-                    _running = false;
+                    _uiThreadActions.Enqueue(() => { _running = false; });
                     return;
                 }
                 var progress = new Progress<(string, int, int)>(e =>
@@ -385,35 +493,31 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
                                 _cacheService.SetModHasBackup(target, any);
                             }
                         });
-                        _running = false;
-                        try { _restoreCancellationTokenSource?.Dispose(); } catch { }
-                        _restoreCancellationTokenSource = null;
-                        _currentRestoreMod = string.Empty;
-                        _currentRestoreModIndex = 0;
-                        _currentRestoreModTotal = 0;
-                        _cancelTargetMod = string.Empty;
-                        _restoreAfterCancel = false;
+                        _uiThreadActions.Enqueue(() =>
+                        {
+                            _running = false;
+                            try { _restoreCancellationTokenSource?.Dispose(); } catch { }
+                            _restoreCancellationTokenSource = null;
+                            _currentRestoreMod = string.Empty;
+                            _currentRestoreModIndex = 0;
+                            _currentRestoreModTotal = 0;
+                            _cancelTargetMod = string.Empty;
+                            _restoreAfterCancel = false;
+                        });
                     }, TaskScheduler.Default);
                 return;
             }
 
-            // Normal completion path: recompute savings and refresh UI
+            // Normal completion path: refresh UI without global savings scan
             _cacheService.ClearAll();
-            _perModSavingsTask = _backupService.ComputePerModSavingsAsync();
-            _perModSavingsTask.ContinueWith(t =>
-            {
-                if (t.Status == TaskStatus.RanToCompletion && t.Result != null)
-                {
-                    _cachedPerModSavings = t.Result;
-                    _needsUIRefresh = true;
-                }
-            }, TaskScheduler.Default);
             _logger.LogDebug("Heavy scan triggered: conversion completed");
-            RefreshScanResults(true, "conversion-completed");
-            _running = false;
-            // Clear progress so UI returns to Waiting...
-            ResetConversionProgress();
-            ResetRestoreProgress();
+            RefreshScanResults(false, "conversion-completed");
+            _uiThreadActions.Enqueue(() =>
+            {
+                _running = false;
+                ResetConversionProgress();
+                ResetRestoreProgress();
+            });
         };
         _conversionService.OnConversionCompleted += _onConversionCompleted;
 
@@ -423,13 +527,8 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
         // Generic ModsChanged only marks UI for refresh; heavy scan is driven by add/delete.
         _onPenumbraModsChanged = () =>
         {
-            _modsWithBackupCache.Clear();
-            _modsPmpMetaCache.Clear();
-            _modsZipMetaCache.Clear();
-            _modsWithPmpCache.Clear();
-            _modsPmpCheckInFlight.Clear();
             _logger.LogDebug("Penumbra mods changed (DIAG-v3); refreshing UI state");
-            _needsUIRefresh = true;
+            RequestUiRefresh("penumbra-mods-changed");
             if (!_orphanScanInFlight)
             {
                 _orphanScanInFlight = true;
@@ -442,7 +541,7 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
                         {
                             _orphaned = orphans ?? new List<TextureBackupService.OrphanBackupInfo>();
                             _lastOrphanScanUtc = DateTime.UtcNow;
-                            _needsUIRefresh = true;
+                            RequestUiRefresh("orphaned-backups-refreshed");
                         });
                     }
                     finally
@@ -451,98 +550,30 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
                     }
                 });
             }
-            // Refresh hierarchical mod paths so folder moves/creations reflect in the UI
+            // Refresh hierarchical mod paths from mod_state snapshot
             if (!_loadingModPaths)
             {
                 _loadingModPaths = true;
-                _ = _conversionService.GetModPathsAsync().ContinueWith(t =>
+                _uiThreadActions.Enqueue(() =>
                 {
-                    if (t.Status == TaskStatus.RanToCompletion && t.Result != null)
+                    var snap = _modStateService.Snapshot();
+                    _modPaths = snap.ToDictionary(kv => kv.Key, kv => kv.Value?.PenumbraRelativePath ?? string.Empty, StringComparer.OrdinalIgnoreCase);
+                    try
                     {
-                        _modPaths = t.Result;
-                        try
-                        {
-                            var sb = new System.Text.StringBuilder();
-                            foreach (var kv in _modPaths.OrderBy(k => k.Key, StringComparer.OrdinalIgnoreCase))
-                                sb.Append(kv.Key).Append('=').Append(kv.Value).Append(';');
-                            _modPathsSig = sb.ToString();
-                        }
-                        catch { _modPathsSig = _modPaths.Count.ToString(); }
+                        var sb = new System.Text.StringBuilder();
+                        foreach (var kv in _modPaths.OrderBy(k => k.Key, StringComparer.OrdinalIgnoreCase))
+                            sb.Append(kv.Key).Append('=').Append(kv.Value).Append(';');
+                        _modPathsSig = sb.ToString();
                     }
+                    catch { _modPathsSig = _modPaths.Count.ToString(); }
                     _loadingModPaths = false;
-                    _needsUIRefresh = true;
+                    RequestUiRefresh("mod-paths-reloaded");
                 });
             }
 
-            // If Used-Only filter is active, reload the currently used textures
-            if (_filterPenumbraUsedOnly && !_loadingPenumbraUsed)
-            {
-                _loadingPenumbraUsed = true;
-                _ = _conversionService.GetUsedModTexturePathsAsync().ContinueWith(t =>
-                {
-                    try
-                    {
-                        if (t.Status == TaskStatus.RanToCompletion && t.Result != null)
-                        {
-                            _penumbraUsedFiles = t.Result;
-                            _logger.LogDebug("Penumbra used set reloaded after ModsChanged: {count} files", _penumbraUsedFiles.Count);
-                            _uiThreadActions.Enqueue(() =>
-                            {
-                                try { RefreshScanResults(false, "penumbra-used-mods-changed"); } catch { }
-                                _needsUIRefresh = true;
-                            });
-                        }
-                    }
-                    finally
-                    {
-                        _loadingPenumbraUsed = false;
-                    }
-                }, TaskScheduler.Default);
-            }
+            if (_filterPenumbraUsedOnly) ReloadPenumbraUsedFiles("mods-changed");
 
-            lock (_modsChangedLock)
-            {
-                try { _modsChangedDebounceCts?.Cancel(); } catch { }
-                try { _modsChangedDebounceCts?.Dispose(); } catch { }
-                _modsChangedDebounceCts = new CancellationTokenSource();
-                var token = _modsChangedDebounceCts.Token;
-                _modsChangedDebounceSeq++;
-                var mySeq = _modsChangedDebounceSeq;
-                Task.Run(async () =>
-                {
-                    try
-                    {
-                        await Task.Delay(1200, token).ConfigureAwait(false);
-                        if (token.IsCancellationRequested)
-                            return;
-                        lock (_modsChangedLock)
-                        {
-                            if (mySeq != _modsChangedDebounceSeq)
-                                return;
-                        }
-                        var currentFolders = await _conversionService.GetAllModFoldersAsync().ConfigureAwait(false);
-                        bool modsChanged;
-                        lock (_modsChangedLock)
-                        {
-                            var snapshot = _knownModFolders;
-                            modsChanged = currentFolders.Count != snapshot.Count
-                                || currentFolders.Any(f => !snapshot.Contains(f));
-                        }
-                        if (!modsChanged)
-                        {
-                            _uiThreadActions.Enqueue(() => { _needsUIRefresh = true; });
-                            return;
-                        }
-                        if (_scanInProgress)
-                            return;
-                        _scanInProgress = true;
-                        await Task.Delay(300, token).ConfigureAwait(false);
-                        RefreshScanResults(true, "penumbra-mods-changed");
-                    }
-                    catch (TaskCanceledException) { }
-                    catch { }
-                });
-            }
+            _uiThreadActions.Enqueue(() => { _needsUIRefresh = true; RequestUiRefresh("mods-changed-light"); });
         };
         _conversionService.OnPenumbraModsChanged += _onPenumbraModsChanged;
 
@@ -551,16 +582,7 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
         {
             _logger.LogDebug("External texture change: {reason}; refreshing UI and scan state", reason);
             try { _lastExternalChangeReason = reason ?? string.Empty; _lastExternalChangeAt = DateTime.UtcNow; } catch { }
-            // Ensure backup states and metrics reflect latest changes from Sphene
-            try { _modsWithBackupCache.Clear(); } catch { }
-            try { _modsWithTexBackupCache.Clear(); } catch { }
-            try { _modsPmpMetaCache.Clear(); } catch { }
-            try { _modsZipMetaCache.Clear(); } catch { }
-            try { _modsBackupCheckInFlight.Clear(); } catch { }
-            try { _modsWithPmpCache.Clear(); } catch { }
-            try { _modsPmpCheckInFlight.Clear(); } catch { }
-            try { _cachedPerModSavings.Clear(); } catch { }
-            try { _cachedPerModOriginalSizes.Clear(); } catch { }
+            try { ClearAllCaches(); } catch { }
             try { TriggerMetricsRefresh(); } catch { }
 
             // Persist per-mod external-change markers so indicators survive restarts
@@ -594,44 +616,17 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
             }
             catch { }
 
-            // If Penumbra Used Only is enabled, reload the used textures set so filter applies immediately
-            if (_filterPenumbraUsedOnly)
-            {
-                try { _penumbraUsedFiles.Clear(); } catch { }
-                if (!_loadingPenumbraUsed)
-                {
-                    _loadingPenumbraUsed = true;
-                    _ = _conversionService.GetUsedModTexturePathsAsync().ContinueWith(t =>
-                    {
-                        try
-                        {
-                            if (t.Status == TaskStatus.RanToCompletion && t.Result != null)
-                            {
-                                _penumbraUsedFiles = t.Result;
-                                _logger.LogDebug("Reloaded {count} used textures from Penumbra after external change", _penumbraUsedFiles.Count);
-                                _uiThreadActions.Enqueue(() =>
-                                {
-                                    try { RefreshScanResults(false, $"external-{reason}-penumbra-used-reloaded"); } catch { }
-                                    _needsUIRefresh = true;
-                                });
-                            }
-                        }
-                        finally
-                        {
-                            _loadingPenumbraUsed = false;
-                        }
-                    }, TaskScheduler.Default);
-                }
-            }
+            if (_filterPenumbraUsedOnly) ReloadPenumbraUsedFiles($"external-{reason}");
 
             if (_scanInProgress)
             {
-                _needsUIRefresh = true;
+                RequestUiRefresh("scan-in-progress");
                 return;
             }
             _scanInProgress = true;
-            RefreshScanResults(true, $"external-{reason}");
-            _needsUIRefresh = true;
+            try { RefreshScanResults(true, $"external-{reason}"); }
+            catch (Exception ex) { _logger.LogError(ex, "RefreshScanResults failed for external change {reason}", reason); }
+            RequestUiRefresh("external-change-refresh");
         };
         _conversionService.OnExternalTexturesChanged += _onExternalTexturesChanged;
 
@@ -642,35 +637,10 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
             {
                 if (!_filterPenumbraUsedOnly)
                 {
-                    _needsUIRefresh = true;
+                    RequestUiRefresh("player-resources-changed-no-used-filter");
                     return;
                 }
-                if (_loadingPenumbraUsed)
-                {
-                    _needsUIRefresh = true;
-                    return;
-                }
-                _loadingPenumbraUsed = true;
-                _ = _conversionService.GetUsedModTexturePathsAsync().ContinueWith(t =>
-                {
-                    try
-                    {
-                        if (t.Status == TaskStatus.RanToCompletion && t.Result != null)
-                        {
-                            _penumbraUsedFiles = t.Result;
-                            _logger.LogDebug("Reloaded {count} used textures after player redraw/resources changed", _penumbraUsedFiles.Count);
-                            _uiThreadActions.Enqueue(() =>
-                            {
-                                try { RefreshScanResults(false, "player-resources-changed"); } catch { }
-                                _needsUIRefresh = true;
-                            });
-                        }
-                    }
-                    finally
-                    {
-                        _loadingPenumbraUsed = false;
-                    }
-                }, TaskScheduler.Default);
+                ReloadPenumbraUsedFiles("player-resources-changed");
             }
             catch { }
         };
@@ -716,11 +686,7 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
                             // No actual mod set change; just mark UI refresh.
                             _uiThreadActions.Enqueue(() =>
                             {
-                                _modsWithBackupCache.Clear();
-                                _modsPmpMetaCache.Clear();
-                                _modsZipMetaCache.Clear();
-                                _modsWithPmpCache.Clear();
-                                _modsPmpCheckInFlight.Clear();
+                                ClearModCaches(dir);
                                 _logger.LogDebug("Suppressed heavy scan: mod folders unchanged after ModAdded");
                                 _needsUIRefresh = true;
                                 RefreshModState(dir, "mod-added-targeted");
@@ -735,7 +701,7 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
                         RefreshScanResults(true, "mod-added");
                     }
                     catch (TaskCanceledException) { }
-                    catch { }
+                    catch (Exception ex) { _logger.LogError(ex, "ModAdded debounce task failed"); }
                 });
             }
         };
@@ -745,7 +711,7 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
         {
             lock (_modsChangedLock)
             {
-                                ClearModCaches(modDir);
+                _uiThreadActions.Enqueue(() => { ClearModCaches(modDir); });
                 try { _modsChangedDebounceCts?.Cancel(); } catch { }
                 try { _modsChangedDebounceCts?.Dispose(); } catch { }
                 _modsChangedDebounceCts = new CancellationTokenSource();
@@ -757,49 +723,30 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
                 {
                     try
                     {
-                        await Task.Delay(1200, token).ConfigureAwait(false);
+                        await Task.Delay(350, token).ConfigureAwait(false);
                         if (token.IsCancellationRequested)
                             return;
-                        // Ensure only the latest scheduled task runs (trailing edge)
                         lock (_modsChangedLock)
                         {
                             if (mySeq != _modsChangedDebounceSeq)
                                 return;
                         }
-                        // Check whether the actual set of mods has changed before heavy scan.
-                        var currentFolders = await _conversionService.GetAllModFoldersAsync().ConfigureAwait(false);
-                        bool modsChanged;
-                        lock (_modsChangedLock)
+                        _uiThreadActions.Enqueue(() =>
                         {
-                            var snapshot = _knownModFolders;
-                            modsChanged = currentFolders.Count != snapshot.Count
-                                || currentFolders.Any(f => !snapshot.Contains(f));
-                        }
-                        if (!modsChanged)
-                        {
-                            _uiThreadActions.Enqueue(() =>
+                            try
                             {
-                                _modsWithBackupCache.Clear();
-                                _modsPmpMetaCache.Clear();
-                                _modsZipMetaCache.Clear();
-                                _modsWithPmpCache.Clear();
-                                _modsPmpCheckInFlight.Clear();
-                                _logger.LogDebug("Suppressed heavy scan: mod folders unchanged after ModDeleted");
-                                _needsUIRefresh = true;
+                                var snap = _modStateService.Snapshot();
+                                _knownModFolders = new HashSet<string>(snap.Keys, StringComparer.OrdinalIgnoreCase);
+                                _modPaths = snap.ToDictionary(kv => kv.Key, kv => kv.Value?.PenumbraRelativePath ?? string.Empty, StringComparer.OrdinalIgnoreCase);
                                 ClearModCaches(modDir);
-                                RefreshModState(modDir, "mod-deleted-targeted");
-                            });
-                            return;
-                        }
-                        if (_scanInProgress)
-                            return;
-                        _scanInProgress = true;
-                        _logger.LogDebug("Heavy scan triggered: ModDeleted detected changes");
-                        await Task.Delay(500, token).ConfigureAwait(false);
-                        RefreshScanResults(true, "mod-deleted");
+                                _needsUIRefresh = true;
+                            }
+                            catch { }
+                            RequestUiRefresh("mod-deleted-light");
+                        });
                     }
                     catch (TaskCanceledException) { }
-                    catch { }
+                    catch (Exception ex) { _logger.LogError(ex, "ModDeleted debounce task failed"); }
                 });
             }
         };
@@ -837,35 +784,11 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
                         });
                     }
                     catch (TaskCanceledException) { }
-                    catch { }
+                    catch (Exception ex) { _logger.LogError(ex, "ModSettingChanged debounce task failed"); }
                 });
             }
 
-            // If Used-Only filter is active, reload currently used textures to reflect setting changes immediately.
-            if (_filterPenumbraUsedOnly && !_loadingPenumbraUsed)
-            {
-                _loadingPenumbraUsed = true;
-                _ = _conversionService.GetUsedModTexturePathsAsync().ContinueWith(t =>
-                {
-                    try
-                    {
-                        if (t.Status == TaskStatus.RanToCompletion && t.Result != null)
-                        {
-                            _penumbraUsedFiles = t.Result;
-                            _logger.LogDebug("Penumbra used set reloaded after ModSettingChanged: {count} files", _penumbraUsedFiles.Count);
-                            _uiThreadActions.Enqueue(() =>
-                            {
-                                try { RefreshScanResults(false, "penumbra-used-setting-changed"); } catch { }
-                                _needsUIRefresh = true;
-                            });
-                        }
-                    }
-                    finally
-                    {
-                        _loadingPenumbraUsed = false;
-                    }
-                }, TaskScheduler.Default);
-            }
+            ReloadPenumbraUsedFiles("mod-setting");
         };
         _conversionService.OnPenumbraModSettingChanged += _onPenumbraModSettingChanged;
 
@@ -886,37 +809,9 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
                     return;
                 }
 
-                // Penumbra enabled: if filter active, reload used-only set
-                if (_filterPenumbraUsedOnly && !_loadingPenumbraUsed)
-                {
-                    _loadingPenumbraUsed = true;
-                    _ = _conversionService.GetUsedModTexturePathsAsync().ContinueWith(t =>
-                    {
-                        try
-                        {
-                            if (t.Status == TaskStatus.RanToCompletion && t.Result != null)
-                            {
-                                _penumbraUsedFiles = t.Result;
-                                _logger.LogDebug("Reloaded {count} used textures after Penumbra enabled", _penumbraUsedFiles.Count);
-                                _uiThreadActions.Enqueue(() =>
-                                {
-                                    try { RefreshScanResults(false, "penumbra-enabled-used-reloaded"); } catch { }
-                                    _needsUIRefresh = true;
-                                });
-                            }
-                        }
-                        finally
-                        {
-                            _loadingPenumbraUsed = false;
-                        }
-                    }, TaskScheduler.Default);
-                }
-                else
-                {
-                    _uiThreadActions.Enqueue(() => { _needsUIRefresh = true; });
-                }
+                ReloadPenumbraUsedFiles("penumbra-enabled");
             }
-            catch { }
+            catch (Exception ex) { _logger.LogError(ex, "PenumbraEnabledChanged handler failed"); }
         };
         _conversionService.OnPenumbraEnabledChanged += _onPenumbraEnabledChanged;
 
@@ -983,6 +878,7 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
             });
         }
 
+        SubscribeStartupProgress(conversionService);
         // Defer initial scan until first draw to avoid UI hitch on window open
     }
 
@@ -1008,19 +904,54 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
             ImGui.TextWrapped("Open the setup guide and select a backup folder.");
             return;
         }
+        // Keep startup flag controlled by Plugin; do not auto-clear here
+        if (_startupDependencyErrors.Count > 0)
+        {
+            ImGui.PushStyleColor(ImGuiCol.Text, ShrinkUColors.WarningLight);
+            ImGui.TextWrapped("Dependency checks failed. Some features are disabled.");
+            ImGui.PopStyleColor();
+            foreach (var e in _startupDependencyErrors)
+                ImGui.BulletText(e);
+            ImGui.Separator();
+        }
         // Apply any background-computed UI state updates on the main thread
         while (_uiThreadActions.TryDequeue(out var action))
         {
-            try { action(); } catch { }
+            try { action(); }
+            catch (Exception ex) { _logger.LogError(ex, "UI thread action failed"); }
+        }
+        var showStartupProgress = (_startupTotalMods > 0) && (_startupProcessedMods < _startupTotalMods || _startupEtaSeconds > 0);
+        if (showStartupProgress)
+        {
+            try
+            {
+                var eta = _startupEtaSeconds;
+                if (eta < 0) eta = 0;
+                var m = eta / 60;
+                var s = eta % 60;
+                var etaStr = $"{m}:{s:D2}";
+                ImGui.TextColored(ShrinkUColors.Accent, $"Initializing: {_startupProcessedMods}/{_startupTotalMods} • ETA {etaStr}");
+                var width = ImGui.GetContentRegionAvail().X;
+                float frac = (_startupTotalMods > 0) ? (float)_startupProcessedMods / _startupTotalMods : 0f;
+                ImGui.ProgressBar(frac, new System.Numerics.Vector2(width, 0), "");
+                ImGui.Separator();
+            }
+            catch { }
         }
         // Status message will be rendered in the progress area instead of here
 
-        // Check if UI needs refresh due to async data updates
-        if (_needsUIRefresh)
-        {
-            _needsUIRefresh = false;
-            // Avoid forcing focus to prevent hitch; normal redraw will occur
-        }
+            // Check if UI needs refresh due to async data updates
+            if (_needsUIRefresh)
+            {
+                _needsUIRefresh = false;
+                try
+                {
+                    if (_configService.Current.DebugTraceUiRefresh)
+                        _logger.LogDebug("UI refresh applied: thread={thread}", System.Environment.CurrentManagedThreadId);
+                }
+                catch { }
+                // Avoid forcing focus to prevent hitch; normal redraw will occur
+            }
         // Trigger initial scan lazily on first draw
         QueueInitialScan();
 
@@ -1034,26 +965,21 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
             StopUsedResourcesWatcher();
         }
 
-        // Preload mod paths lazily
+        // Preload mod paths lazily from mod_state snapshot
         if (!_loadingModPaths && _modPaths.Count == 0)
         {
             _loadingModPaths = true;
-            _ = _conversionService.GetModPathsAsync().ContinueWith(t =>
+            var snap = _modStateService.Snapshot();
+            _modPaths = snap.ToDictionary(kv => kv.Key, kv => kv.Value?.PenumbraRelativePath ?? string.Empty, StringComparer.OrdinalIgnoreCase);
+            try
             {
-                if (t.Status == TaskStatus.RanToCompletion && t.Result != null)
-                {
-                    _modPaths = t.Result;
-                    try
-                    {
-                        var sb = new System.Text.StringBuilder();
-                        foreach (var kv in _modPaths.OrderBy(k => k.Key, StringComparer.OrdinalIgnoreCase))
-                            sb.Append(kv.Key).Append('=').Append(kv.Value).Append(';');
-                        _modPathsSig = sb.ToString();
-                    }
-                    catch { _modPathsSig = _modPaths.Count.ToString(); }
-                }
-                _loadingModPaths = false;
-            });
+                var sb = new System.Text.StringBuilder();
+                foreach (var kv in _modPaths.OrderBy(k => k.Key, StringComparer.OrdinalIgnoreCase))
+                    sb.Append(kv.Key).Append('=').Append(kv.Value).Append(';');
+                _modPathsSig = sb.ToString();
+            }
+            catch { _modPathsSig = _modPaths.Count.ToString(); }
+            _loadingModPaths = false;
         }
         // Subtle accent header bar for branding
         var headerStart = ImGui.GetCursorScreenPos();
@@ -1079,6 +1005,8 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
         DrawProgress();
         ImGui.EndChild();
 
+        _windowFocused = ImGui.IsWindowFocused(ImGuiFocusedFlags.RootAndChildWindows);
+
         ImGui.SameLine();
         DrawSplitter(totalWidth, ref leftWidth);
         ImGui.BeginChild("RightPanel", new Vector2(0, 0), true);
@@ -1089,37 +1017,59 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
     public void Dispose()
     {
         // Unsubscribe from all service events
-        try { _conversionService.OnConversionProgress -= _onConversionProgress; } catch { }
-        try { _conversionService.OnBackupProgress -= _onBackupProgress; } catch { }
-        try { _conversionService.OnConversionCompleted -= _onConversionCompleted; } catch { }
-        try { _conversionService.OnModProgress -= _onModProgress; } catch { }
-        try { _conversionService.OnPenumbraModsChanged -= _onPenumbraModsChanged; } catch { }
-        try { _conversionService.OnPenumbraModAdded -= _onPenumbraModAdded; } catch { }
-        try { _conversionService.OnPenumbraModDeleted -= _onPenumbraModDeleted; } catch { }
-        try { _conversionService.OnExternalTexturesChanged -= _onExternalTexturesChanged; } catch { }
-        try { _conversionService.OnPenumbraModSettingChanged -= _onPenumbraModSettingChanged; } catch { }
-        try { _conversionService.OnPenumbraEnabledChanged -= _onPenumbraEnabledChanged; } catch { }
-        try { _conversionService.OnPlayerResourcesChanged -= _onPlayerResourcesChanged; } catch { }
-        try { _configService.OnExcludedTagsUpdated -= _onExcludedTagsUpdated; } catch { }
+        try { _conversionService.OnConversionProgress -= _onConversionProgress; }
+        catch (Exception ex) { _logger.LogError(ex, "Unsubscribe OnConversionProgress failed"); }
+        try { _conversionService.OnBackupProgress -= _onBackupProgress; }
+        catch (Exception ex) { _logger.LogError(ex, "Unsubscribe OnBackupProgress failed"); }
+        try { _conversionService.OnConversionCompleted -= _onConversionCompleted; }
+        catch (Exception ex) { _logger.LogError(ex, "Unsubscribe OnConversionCompleted failed"); }
+        try { _conversionService.OnModProgress -= _onModProgress; }
+        catch (Exception ex) { _logger.LogError(ex, "Unsubscribe OnModProgress failed"); }
+        try { _conversionService.OnPenumbraModsChanged -= _onPenumbraModsChanged; }
+        catch (Exception ex) { _logger.LogError(ex, "Unsubscribe OnPenumbraModsChanged failed"); }
+        try { _conversionService.OnPenumbraModAdded -= _onPenumbraModAdded; }
+        catch (Exception ex) { _logger.LogError(ex, "Unsubscribe OnPenumbraModAdded failed"); }
+        try { _conversionService.OnPenumbraModDeleted -= _onPenumbraModDeleted; }
+        catch (Exception ex) { _logger.LogError(ex, "Unsubscribe OnPenumbraModDeleted failed"); }
+        try { _conversionService.OnExternalTexturesChanged -= _onExternalTexturesChanged; }
+        catch (Exception ex) { _logger.LogError(ex, "Unsubscribe OnExternalTexturesChanged failed"); }
+        try { _conversionService.OnPenumbraModSettingChanged -= _onPenumbraModSettingChanged; }
+        catch (Exception ex) { _logger.LogError(ex, "Unsubscribe OnPenumbraModSettingChanged failed"); }
+        try { _conversionService.OnPenumbraEnabledChanged -= _onPenumbraEnabledChanged; }
+        catch (Exception ex) { _logger.LogError(ex, "Unsubscribe OnPenumbraEnabledChanged failed"); }
+        try { _conversionService.OnPlayerResourcesChanged -= _onPlayerResourcesChanged; }
+        catch (Exception ex) { _logger.LogError(ex, "Unsubscribe OnPlayerResourcesChanged failed"); }
+        try { _configService.OnExcludedTagsUpdated -= _onExcludedTagsUpdated; }
+        catch (Exception ex) { _logger.LogError(ex, "Unsubscribe OnExcludedTagsUpdated failed"); }
+        try { _modStateService.OnEntryChanged -= _onModStateEntryChanged; }
+        catch (Exception ex) { _logger.LogError(ex, "Unsubscribe OnEntryChanged failed"); }
 
         // Cancel and dispose any outstanding debounce or restore operations
-        try { _modsChangedDebounceCts?.Cancel(); } catch { }
-        try { _modsChangedDebounceCts?.Dispose(); } catch { }
+        try { _modsChangedDebounceCts?.Cancel(); }
+        catch (Exception ex) { _logger.LogError(ex, "Cancel modsChangedDebounceCts failed"); }
+        try { _modsChangedDebounceCts?.Dispose(); }
+        catch (Exception ex) { _logger.LogError(ex, "Dispose modsChangedDebounceCts failed"); }
         _modsChangedDebounceCts = null;
-        try { _enabledStatesDebounceCts?.Cancel(); } catch { }
-        try { _enabledStatesDebounceCts?.Dispose(); } catch { }
+        try { _enabledStatesDebounceCts?.Cancel(); }
+        catch (Exception ex) { _logger.LogError(ex, "Cancel enabledStatesDebounceCts failed"); }
+        try { _enabledStatesDebounceCts?.Dispose(); }
+        catch (Exception ex) { _logger.LogError(ex, "Dispose enabledStatesDebounceCts failed"); }
         _enabledStatesDebounceCts = null;
-        try { _restoreCancellationTokenSource?.Cancel(); } catch { }
-        try { _restoreCancellationTokenSource?.Dispose(); } catch { }
+        try { _restoreCancellationTokenSource?.Cancel(); }
+        catch (Exception ex) { _logger.LogError(ex, "Cancel restoreCancellationTokenSource failed"); }
+        try { _restoreCancellationTokenSource?.Dispose(); }
+        catch (Exception ex) { _logger.LogError(ex, "Dispose restoreCancellationTokenSource failed"); }
         _restoreCancellationTokenSource = null;
 
         // Stop Used-Only watcher
         StopUsedResourcesWatcher();
 
         // Drain any queued UI actions
-        try { while (_uiThreadActions.TryDequeue(out _)) { } } catch { }
+        try { while (_uiThreadActions.TryDequeue(out _)) { } }
+        catch (Exception ex) { _logger.LogError(ex, "Drain UI thread actions failed"); }
 
-        try { _logger.LogDebug("ConversionUI disposed: DIAG-v3"); } catch { }
+        try { _logger.LogDebug("ConversionUI disposed: DIAG-v3"); }
+        catch (Exception ex) { _logger.LogError(ex, "Log dispose message failed"); }
     }
 
     // Start background watcher to refresh used-only set even without redraw events
@@ -1137,11 +1087,11 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
                 {
                     try
                     {
-                        await Task.Delay(1500, token).ConfigureAwait(false);
+                        await Task.Delay(_usedWatcherIntervalMs, token).ConfigureAwait(false);
                         if (token.IsCancellationRequested)
                             break;
 
-                        if (!_filterPenumbraUsedOnly || _loadingPenumbraUsed)
+                        if (!IsOpen || !_filterPenumbraUsedOnly || _loadingPenumbraUsed || !_windowFocused)
                             continue;
 
                         _loadingPenumbraUsed = true;
@@ -1161,6 +1111,12 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
                                     try { RefreshScanResults(false, "used-only-watcher-update"); } catch { }
                                     _needsUIRefresh = true;
                                 });
+                                _usedWatcherIntervalMs = 3000;
+                            }
+                            else
+                            {
+                                var next = _usedWatcherIntervalMs * 2;
+                                _usedWatcherIntervalMs = next > 15000 ? 15000 : next;
                             }
                         }
                         finally
@@ -1190,6 +1146,7 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
         _usedResourcesPollCts = null;
         _usedResourcesPollTask = null;
         _usedWatcherActive = false;
+        _usedWatcherIntervalMs = 3000;
         try { _logger.LogDebug("Used-Only watcher stopped"); } catch { }
     }
 
@@ -1227,56 +1184,7 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
 
         if (!(_running || _conversionService.IsConverting))
         {
-            // Aggregate mod statistics
-            int totalMods = _scannedByMod.Count;
-            int restorableModsCount = 0;
-            int convertedModsCount = 0;
-            int convertibleModsCount = 0;
-            foreach (var mod in _scannedByMod.Keys)
-            {
-                var hasBackup = GetOrQueryModBackup(mod);
-                if (hasBackup)
-                    restorableModsCount++;
-
-                var remaining = _scannedByMod[mod].Count;
-                if (remaining == 0)
-                    convertedModsCount++;
-                else if (remaining > 0)
-                {
-                    // Exclude mods marked by tags from convertible count
-                    if (!IsModExcludedByTags(mod))
-                        convertibleModsCount++;
-                }
-            }
-
-            // Event-driven metrics update: only when focused or idle
-            var shouldUpdateMetrics = ImGui.IsWindowFocused(ImGuiFocusedFlags.RootAndChildWindows) || !_running;
-            if (shouldUpdateMetrics)
-            {
-                if (_backupStorageInfoTask == null)
-                {
-                    _backupStorageInfoTask = ComputeBackupStorageInfoAsync();
-                }
-                if (_backupStorageInfoTask != null && _backupStorageInfoTask.IsCompleted)
-                {
-                    _cachedBackupStorageInfo = _backupStorageInfoTask.Result;
-                }
-
-                // Update per-mod savings asynchronously
-                if (_perModSavingsTask == null)
-                {
-                    _perModSavingsTask = _backupService.ComputePerModSavingsAsync();
-                }
-                if (_perModSavingsTask != null && _perModSavingsTask.IsCompleted)
-                {
-                    _cachedPerModSavings = _perModSavingsTask.Result ?? new Dictionary<string, TextureBackupService.ModSavingsStats>(StringComparer.OrdinalIgnoreCase);
-                    _perModSavingsRevision++;
-                    _footerTotalsDirty = true;
-                }
-            }
-
-            // Stats removed from action area; table now contains key information
-
+            
         }
         else
         {
@@ -1293,7 +1201,6 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
             try
             {
                 await Task.Delay(500).ConfigureAwait(false);
-                var grouped = await _conversionService.GetGroupedCandidateTexturesAsync().ConfigureAwait(false);
                 var names = await _conversionService.GetModDisplayNamesAsync().ConfigureAwait(false);
                 var tags = await _conversionService.GetModTagsAsync().ConfigureAwait(false);
                 var folders = await _conversionService.GetAllModFoldersAsync().ConfigureAwait(false);
@@ -1304,18 +1211,6 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                     _selectedTextures.Clear();
                     _texturesToConvert.Clear();
                     _fileOwnerMod.Clear();
-                    if (grouped != null)
-                    {
-                        foreach (var mod in grouped)
-                        {
-                            _scannedByMod[mod.Key] = mod.Value;
-                            foreach (var file in mod.Value)
-                            {
-                                _texturesToConvert[file] = Array.Empty<string>();
-                                _fileOwnerMod[file] = mod.Key;
-                            }
-                        }
-                    }
                     if (names != null)
                         _modDisplayNames = names;
                     if (tags != null)
@@ -1323,7 +1218,6 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                         _modTags = tags.ToDictionary(kv => kv.Key, kv => (IReadOnlyList<string>)kv.Value, StringComparer.OrdinalIgnoreCase);
                         try
                         {
-                            // Persistently expand known tags list with newly discovered tags
                             var existingKnown = _configService.Current.KnownModTags ?? new List<string>();
                             var normalizedExisting = new HashSet<string>(existingKnown.Select(NormalizeTag).Where(s => s.Length > 0), StringComparer.OrdinalIgnoreCase);
                             foreach (var kv in _modTags)
@@ -1353,16 +1247,14 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                             if (!_scannedByMod.ContainsKey(folder))
                                 _scannedByMod[folder] = new List<string>();
                         }
-                        // Update known mod folders snapshot
                         _knownModFolders = new HashSet<string>(folders, StringComparer.OrdinalIgnoreCase);
                     }
-                    _logger.LogDebug("Initial scan loaded {mods} mods and {files} textures", _scannedByMod.Count, _texturesToConvert.Count);
+                    _logger.LogDebug("Initial mods loaded: {mods}", _scannedByMod.Count);
                     _needsUIRefresh = true;
-                    // Warm up file size cache on background thread after UI state is applied
-                    Task.Run(() => { try { WarmupFileSizeCache(); } catch { } });
+                    Task.Run(async () => { try { await _conversionService.UpdateAllModTextureCountsAsync().ConfigureAwait(false); } catch { } });
                 });
             }
-            catch { }
+            catch (Exception ex) { _logger.LogError(ex, "Startup refresh check failed"); }
         });
     }
 
@@ -1373,12 +1265,17 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
         {
             try
             {
+                TraceAction(origin, nameof(RefreshScanResults), force ? "force" : "no-force");
                 _logger.LogDebug("Scan requested: origin={origin} force={force}", origin, force);
+                TraceAction(origin, "GetModDisplayNamesAsync");
                 var names = await _conversionService.GetModDisplayNamesAsync().ConfigureAwait(false);
+                TraceAction(origin, "GetModTagsAsync");
                 var tags = await _conversionService.GetModTagsAsync().ConfigureAwait(false);
+                TraceAction(origin, "GetAllModFoldersAsync");
                 var folders = await _conversionService.GetAllModFoldersAsync().ConfigureAwait(false);
                 Dictionary<string, string>? paths = null;
-                paths = await _conversionService.GetModPathsAsync().ConfigureAwait(false);
+                var snap = _modStateService.Snapshot();
+                paths = snap.ToDictionary(kv => kv.Key, kv => kv.Value?.PenumbraRelativePath ?? string.Empty, StringComparer.OrdinalIgnoreCase);
 
                 // Determine if heavy grouped scan can be skipped based on folder snapshot.
                 bool skipHeavy;
@@ -1394,7 +1291,7 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                 var since = now - _lastHeavyScanAt;
                 var allowHeavy = !skipHeavy || force;
                 _logger.LogDebug("Scan decision: origin={origin} skipHeavy={skip} sinceMs={ms} allowHeavyPreLimit={allow}", origin, skipHeavy, (int)since.TotalMilliseconds, allowHeavy);
-                if (allowHeavy && since < TimeSpan.FromSeconds(2))
+                if (allowHeavy && since < TimeSpan.FromSeconds(3))
                 {
                     _logger.LogDebug("Suppressed heavy scan: rate limit active ({ms} ms since last heavy)", (int)since.TotalMilliseconds);
                     allowHeavy = false;
@@ -1403,6 +1300,7 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                 Dictionary<string, List<string>>? grouped = null;
                 if (allowHeavy)
                 {
+                    TraceAction(origin, "GetGroupedCandidateTexturesAsync");
                     grouped = await _conversionService.GetGroupedCandidateTexturesAsync().ConfigureAwait(false);
                     _lastHeavyScanAt = DateTime.UtcNow;
                     _logger.LogDebug("Heavy scan executed: origin={origin} groupedMods={mods}", origin, grouped?.Count ?? 0);
@@ -1419,6 +1317,12 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                         _fileOwnerMod.Clear();
                         foreach (var mod in grouped)
                         {
+                            if (_configService.Current.DebugTraceActions)
+                            {
+                                TraceAction(origin, "mod", mod.Key);
+                                foreach (var file in mod.Value)
+                                    TraceAction(origin, "file", file);
+                            }
                             _scannedByMod[mod.Key] = mod.Value;
                             foreach (var file in mod.Value)
                             {
@@ -1429,15 +1333,6 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                     }
                     else
                     {
-                        // Preserve existing scan results when skipping heavy scan; only ensure folder keys exist
-                        if (folders != null)
-                        {
-                            foreach (var folder in folders)
-                            {
-                                if (!_scannedByMod.ContainsKey(folder))
-                                    _scannedByMod[folder] = new List<string>();
-                            }
-                        }
                         _logger.LogDebug("UI state updated (DIAG-v3): origin={origin} heavy scan skipped; preserving previous results", origin);
                     }
 
@@ -1697,27 +1592,41 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
             if (_cachedPerModOriginalSizes.TryGetValue(mod, out var map) && map != null && map.Count > 0)
                 return map.Values.Sum();
 
-            // Only query backup sizes when the mod has a backup; otherwise use current file sizes
             if (GetOrQueryModBackup(mod))
             {
-                var sizes = _backupService.GetLatestOriginalSizesForModAsync(mod).GetAwaiter().GetResult();
-                if (sizes != null && sizes.Count > 0)
+                if (_perModOriginalSizesTasks.TryGetValue(mod, out var task))
                 {
-                    _cachedPerModOriginalSizes[mod] = sizes;
-                    return sizes.Values.Sum();
+                    if (task.Status == TaskStatus.RanToCompletion && task.Result != null && task.Result.Count > 0)
+                    {
+                        _cachedPerModOriginalSizes[mod] = task.Result;
+                        return task.Result.Values.Sum();
+                    }
                 }
+                else
+                {
+                    _perModOriginalSizesTasks[mod] = _backupService.GetLatestOriginalSizesForModAsync(mod);
+                    _perModOriginalSizesTasks[mod].ContinueWith(t =>
+                    {
+                        _uiThreadActions.Enqueue(() =>
+                        {
+                            if (t.Status == TaskStatus.RanToCompletion && t.Result != null)
+                            {
+                                _cachedPerModOriginalSizes[mod] = t.Result;
+                                _needsUIRefresh = true;
+                            }
+                        });
+                    }, TaskScheduler.Default);
+                }
+                return 0;
             }
 
-            // Fallback for unconverted mods: sum current file sizes
-            if (_scannedByMod.TryGetValue(mod, out var files) && files != null)
+            if (_scannedByMod.TryGetValue(mod, out var files) && files != null && files.Count > 0)
             {
-                long total = 0;
-                foreach (var f in files)
+                try
                 {
-                    var sz = GetCachedOrComputeSize(f);
-                    if (sz > 0) total += sz;
+                    _cacheService.WarmupFileSizeCache(files.Take(500));
                 }
-                return total;
+                catch { }
             }
         }
         catch { }
@@ -1755,28 +1664,40 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
     {
         if (string.IsNullOrEmpty(folder))
             return folder;
+        if (_modStateSnapshot != null && _modStateSnapshot.TryGetValue(folder, out var ms) && ms != null && !string.IsNullOrWhiteSpace(ms.DisplayName))
+            return ms.DisplayName.Replace('\\', '/');
         if (_modDisplayNames.TryGetValue(folder, out var name) && !string.IsNullOrWhiteSpace(name))
-            return name;
+            return name.Replace('\\', '/');
         return folder;
     }
 
     private void RefreshModState(string mod, string origin)
     {
+        if (_startupRefreshInProgress)
+            return;
+        try
+        {
+            if (_lastModRefreshAt.TryGetValue(mod, out var last) && (DateTime.UtcNow - last).TotalMilliseconds < 300)
+                return;
+            _lastModRefreshAt[mod] = DateTime.UtcNow;
+        }
+        catch { }
         Task.Run(async () =>
         {
             try
             {
                 var files = await _conversionService.GetModTextureFilesAsync(mod).ConfigureAwait(false);
-                var names = await _conversionService.GetModDisplayNamesAsync().ConfigureAwait(false);
-                var tags = await _conversionService.GetModTagsAsync().ConfigureAwait(false);
+                try { _modStateService.UpdateTextureCount(mod, files?.Count ?? 0); } catch { }
+                var display = await _conversionService.GetModDisplayNameAsync(mod).ConfigureAwait(false);
+                var tagList = await _conversionService.GetModTagsAsync(mod).ConfigureAwait(false);
                 _uiThreadActions.Enqueue(() =>
                 {
                     _logger.LogDebug("Mod scan refreshed: origin={origin} mod={mod} files={count}", origin, mod, files?.Count ?? 0);
                     _scannedByMod[mod] = files ?? new List<string>();
                     foreach (var f in _scannedByMod[mod])
                         _texturesToConvert[f] = Array.Empty<string>();
-                    if (names != null) _modDisplayNames = names;
-                    if (tags != null) _modTags = tags.ToDictionary(kv => kv.Key, kv => (IReadOnlyList<string>)kv.Value, StringComparer.OrdinalIgnoreCase);
+                    _modDisplayNames[mod] = display ?? string.Empty;
+                    _modTags[mod] = tagList ?? new List<string>();
                     _needsUIRefresh = true;
                 });
             }
@@ -1795,7 +1716,12 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
             return false;
         if (string.IsNullOrEmpty(mod))
             return false;
-        if (_modTags.TryGetValue(mod, out var tags) && tags != null)
+        IReadOnlyList<string>? tags = null;
+        if (_modStateSnapshot != null && _modStateSnapshot.TryGetValue(mod, out var ms) && ms != null && ms.Tags != null)
+            tags = ms.Tags;
+        else if (_modTags.TryGetValue(mod, out var t) && t != null)
+            tags = t;
+        if (tags != null)
         {
             foreach (var t in tags)
             {
@@ -1951,5 +1877,33 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
     private void DrawFileFlatRow(FlatRow row, Dictionary<string, List<string>> visibleByMod)
     {
         DrawFileFlatRow_ViewImpl(row, visibleByMod);
+    }
+
+    public void SetStartupRefreshInProgress(bool value)
+    {
+        _startupRefreshInProgress = value;
+        if (value) _startupRefreshStartedAt = DateTime.UtcNow;
+        else _startupRefreshStartedAt = DateTime.MinValue;
+    }
+
+    public void SetStartupDependencyErrors(System.Collections.Generic.IEnumerable<string> errors)
+    {
+        _startupDependencyErrors.Clear();
+        if (errors == null) return;
+        foreach (var e in errors)
+        {
+            if (!string.IsNullOrWhiteSpace(e))
+                _startupDependencyErrors.Add(e);
+        }
+    }
+
+    public void DisableModStateSaving()
+    {
+        try { _modStateService.SetSavingEnabled(false); } catch { }
+    }
+
+    public void ShutdownBackgroundWork()
+    {
+        try { _cacheService.Dispose(); } catch { }
     }
 }
