@@ -408,7 +408,7 @@ public sealed partial class ConversionUI
                     ImGui.PushStyleColor(ImGuiCol.Text, ShrinkUColors.ButtonTextOnAccent);
                     using (var _d = ImRaii.Disabled(ActionsDisabled()))
                     {
-                    if (ImGui.Button($"Reinstall##reinstall-{mod}", new Vector2(80, 0)))
+                    if (ImGui.Button($"Reinstall##reinstall-{mod}", new Vector2(60, 0)))
                     {
                         _running = true;
                         ResetBothProgress();

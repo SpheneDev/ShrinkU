@@ -1434,7 +1434,7 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                             var leaf = TextureConversionService.NormalizeLeafKey(folder);
                             var files = _modStateService.ReadDetailTextures(leaf);
                             _scannedByMod[leaf] = files ?? new List<string>();
-                            foreach (var file in files)
+                            foreach (var file in (files ?? new List<string>()))
                             {
                                 _texturesToConvert[file] = Array.Empty<string>();
                                 _fileOwnerMod[file] = leaf;
@@ -1509,21 +1509,25 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
 
                     try
                     {
-                        _modStateService.BeginBatch();
-                        foreach (var kv in grouped)
+                        if (grouped != null)
                         {
-                            var prev = _modStateService.ReadDetailTextures(kv.Key);
-                            bool sameCount = prev.Count == kv.Value.Count;
-                            if (sameCount)
+                            _modStateService.BeginBatch();
+                            foreach (var kv in grouped)
                             {
-                                var prevSet = new HashSet<string>(prev, StringComparer.OrdinalIgnoreCase);
-                                var newSet = new HashSet<string>(kv.Value, StringComparer.OrdinalIgnoreCase);
-                                if (prevSet.SetEquals(newSet))
-                                    continue;
+                                var prev = _modStateService.ReadDetailTextures(kv.Key);
+                                var prevCount = prev?.Count ?? 0;
+                                bool sameCount = prevCount == kv.Value.Count;
+                                if (sameCount)
+                                {
+                                    var prevSet = new HashSet<string>(prev ?? new List<string>(), StringComparer.OrdinalIgnoreCase);
+                                    var newSet = new HashSet<string>(kv.Value, StringComparer.OrdinalIgnoreCase);
+                                    if (prevSet.SetEquals(newSet))
+                                        continue;
+                                }
+                                _modStateService.UpdateTextureFiles(kv.Key, kv.Value);
                             }
-                            _modStateService.UpdateTextureFiles(kv.Key, kv.Value);
+                            _modStateService.EndBatch();
                         }
-                        _modStateService.EndBatch();
                     }
                     catch { }
                 }
