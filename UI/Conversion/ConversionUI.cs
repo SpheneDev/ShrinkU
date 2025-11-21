@@ -156,22 +156,7 @@ public sealed partial class ConversionUI : Window, IDisposable
     {
         _disableActionsUntilUtc = DateTime.UtcNow.AddSeconds(1);
         RequestUiRefresh("mode-changed");
-        try
-        {
-            if (_perModSavingsTask == null || _perModSavingsTask.IsCompleted)
-            {
-                _perModSavingsTask = _backupService.ComputePerModSavingsAsync();
-                _perModSavingsTask.ContinueWith(ps =>
-                {
-                    if (ps.Status == TaskStatus.RanToCompletion && ps.Result != null)
-                    {
-                        _cachedPerModSavings = ps.Result;
-                        RequestUiRefresh("per-mod-savings-updated-mode-changed");
-                    }
-                }, TaskScheduler.Default);
-            }
-        }
-        catch { }
+        _footerTotalsDirty = true;
     }
     private bool ActionsDisabled()
     {

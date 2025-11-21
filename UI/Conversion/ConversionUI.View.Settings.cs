@@ -27,7 +27,7 @@ public sealed partial class ConversionUI
             {
                 _configService.Current.TextureProcessingMode = TextureProcessingMode.Manual;
                 _configService.Save();
-                try { OnModeChanged(); TriggerMetricsRefresh(); } catch { }
+                try { OnModeChanged(); } catch { }
             }
 
             if (spheneIntegrated)
@@ -39,7 +39,7 @@ public sealed partial class ConversionUI
                     _configService.Current.AutomaticHandledBySphene = true;
                     _configService.Current.AutomaticControllerName = string.IsNullOrWhiteSpace(controller) ? "Sphene" : controller;
                     _configService.Save();
-                    try { OnModeChanged(); TriggerMetricsRefresh(); } catch { }
+                    try { OnModeChanged(); } catch { }
                 }
             }
             else
@@ -50,7 +50,7 @@ public sealed partial class ConversionUI
                     _configService.Current.AutomaticHandledBySphene = false;
                     _configService.Current.AutomaticControllerName = string.Empty;
                     _configService.Save();
-                    try { OnModeChanged(); TriggerMetricsRefresh(); } catch { }
+                    try { OnModeChanged(); } catch { }
                 }
             }
             ImGui.EndCombo();
