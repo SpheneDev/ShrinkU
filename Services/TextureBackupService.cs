@@ -3193,8 +3193,8 @@ public sealed class TextureBackupService
             if (string.IsNullOrWhiteSpace(backupDirectory) || string.IsNullOrWhiteSpace(modFolderName))
                 return stats;
             var modDir = Path.Combine(backupDirectory, modFolderName);
-            if (!Directory.Exists(modDir))
-                return stats;
+            try { _logger.LogDebug("[ShrinkU] Populate: ComputeSavings start mod={mod}", modFolderName); } catch { }
+            
 
             // Prefer latest PMP for accurate original sizes
             string? latestPmp = null;
@@ -3255,7 +3255,10 @@ public sealed class TextureBackupService
                 var modAbs = GetModAbsolutePath(modFolderName);
                 if (!string.IsNullOrWhiteSpace(modAbs) && Directory.Exists(modAbs))
                 {
-                    foreach (var file in Directory.EnumerateFiles(modAbs!, "*", SearchOption.AllDirectories))
+                    int countedCurrentFiles = 0;
+                    foreach (var file in Directory.EnumerateFiles(modAbs!, "*.*", SearchOption.AllDirectories)
+                                                   .Where(p => p.EndsWith(".tex", StringComparison.OrdinalIgnoreCase)
+                                                            || p.EndsWith(".dds", StringComparison.OrdinalIgnoreCase)))
                     {
                         try
                         {
@@ -3267,16 +3270,102 @@ public sealed class TextureBackupService
                             }
                             var fi = new FileInfo(file);
                             stats.CurrentBytes += fi.Length;
+                            countedCurrentFiles++;
                         }
                         catch { }
                     }
+                    if (stats.ComparedFiles <= 0)
+                        stats.ComparedFiles = countedCurrentFiles;
                 }
             }
             catch { }
+
+            if (stats.OriginalBytes <= 0)
+            {
+                stats.OriginalBytes = stats.CurrentBytes;
+            }
+
+            try { _logger.LogDebug("[ShrinkU] Populate: ComputeSavings done mod={mod} original={orig} current={cur} comparedFiles={cmp}", modFolderName, stats.OriginalBytes, stats.CurrentBytes, stats.ComparedFiles); } catch { }
 
             try { _modStateService.UpdateSavings(modFolderName, stats.OriginalBytes, stats.CurrentBytes, stats.ComparedFiles); } catch { }
         }
         catch { }
         return stats;
+    }
+
+    public async Task PopulateMissingOriginalBytesAsync(System.Threading.CancellationToken token)
+    {
+        try
+        {
+            var snapshot = _modStateService.Snapshot();
+            var candidates = new List<string>();
+            foreach (var kv in snapshot)
+            {
+                var e = kv.Value;
+                if (e == null) continue;
+                if (e.OriginalBytes != 0) continue;
+                var mod = kv.Key ?? string.Empty;
+                if (!string.IsNullOrWhiteSpace(mod))
+                    candidates.Add(mod);
+            }
+            try { _logger.LogDebug("[ShrinkU] PopulateMissingOriginalBytes: candidates={count}", candidates.Count); } catch { }
+            if (candidates.Count == 0) return;
+            Dictionary<string, List<string>> grouped = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+            try { grouped = await _penumbraIpc.ScanModTexturesGroupedAsync().ConfigureAwait(false); } catch { }
+            _modStateService.BeginBatch();
+            try
+            {
+                int updated = 0;
+                int threads = Math.Max(1, _configService.Current.MaxStartupThreads);
+                using var sem = new SemaphoreSlim(threads);
+                var tasks = new List<Task>(candidates.Count);
+                foreach (var mod in candidates)
+                {
+                    await sem.WaitAsync(token).ConfigureAwait(false);
+                    tasks.Add(Task.Run(async () =>
+                    {
+                        try
+                        {
+                            if (token.IsCancellationRequested) return;
+                            try { _logger.LogDebug("[ShrinkU] PopulateMissingOriginalBytes: compute mod={mod}", mod); } catch { }
+                            var entry = snapshot.TryGetValue(mod, out var e) ? e : null;
+                            bool hasBackup = entry != null && (entry.HasTextureBackup || entry.HasPmpBackup);
+                            if (hasBackup)
+                            {
+                                var stats = await ComputeSavingsForModAsync(mod).ConfigureAwait(false);
+                                try { _logger.LogDebug("[ShrinkU] PopulateMissingOriginalBytes: stats mod={mod} original={orig} current={cur} comparedFiles={cmp}", mod, stats.OriginalBytes, stats.CurrentBytes, stats.ComparedFiles); } catch { }
+                                System.Threading.Interlocked.Increment(ref updated);
+                                return;
+                            }
+                            var list = grouped.TryGetValue(mod, out var files) && files != null ? files : new List<string>();
+                            long current = 0L;
+                            int compared = 0;
+                            foreach (var f in list)
+                            {
+                                try { var fi = new FileInfo(f); current += fi.Length; compared++; }
+                                catch { }
+                            }
+                            long original = current;
+                            try { _modStateService.UpdateSavings(mod, original, current, compared); } catch { }
+                            try { _logger.LogDebug("[ShrinkU] PopulateMissingOriginalBytes: stats mod={mod} original={orig} current={cur} comparedFiles={cmp}", mod, original, current, compared); } catch { }
+                            System.Threading.Interlocked.Increment(ref updated);
+                        }
+                        catch { }
+                        finally
+                        {
+                            try { sem.Release(); } catch { }
+                        }
+                    }, token));
+                }
+                try { await Task.WhenAll(tasks).ConfigureAwait(false); } catch { }
+                try { _logger.LogDebug("[ShrinkU] PopulateMissingOriginalBytes: completed updated={updated}", updated); } catch { }
+            }
+            finally
+            {
+                _modStateService.EndBatch();
+            }
+        }
+        catch { }
+        await Task.CompletedTask;
     }
 }

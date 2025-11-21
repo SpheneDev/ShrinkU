@@ -164,6 +164,7 @@ public sealed class Plugin : IDalamudPlugin
                         {
                             
                             await _backupService.RefreshAllBackupStateAsync().ConfigureAwait(false);
+                            await _backupService.PopulateMissingOriginalBytesAsync(token).ConfigureAwait(false);
                             var threads = Math.Max(1, _configService.Current.MaxStartupThreads);
                             await _conversionService.RunInitialParallelUpdateAsync(threads, token).ConfigureAwait(false);
                             await _conversionService.UpdateAllModUsedTextureFilesAsync().ConfigureAwait(false);

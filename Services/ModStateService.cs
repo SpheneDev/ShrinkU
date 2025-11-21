@@ -89,8 +89,10 @@ public sealed class ModStateService
             e.LastUpdatedUtc = DateTime.UtcNow;
             _lastSaveReason = nameof(UpdateSavings);
             _lastChangedMod = mod;
+            try { _logger.LogDebug("[ShrinkU] ModState UpdateSavings: mod={mod} original={orig} current={cur} comparedFiles={cmp}", mod, originalBytes, currentBytes, comparedFiles); } catch { }
             ScheduleSave();
-            try { OnEntryChanged?.Invoke(mod); } catch { }
+            if (!_batching)
+                try { OnEntryChanged?.Invoke(mod); } catch { }
         }
     }
 
