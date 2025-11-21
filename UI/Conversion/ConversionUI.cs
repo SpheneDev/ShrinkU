@@ -971,6 +971,7 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
             _loadingModPaths = true;
             var snap = _modStateService.Snapshot();
             _modPaths = snap.ToDictionary(kv => kv.Key, kv => kv.Value?.PenumbraRelativePath ?? string.Empty, StringComparer.OrdinalIgnoreCase);
+            try { _modPaths.Remove("mod_state"); } catch { }
             try
             {
                 var sb = new System.Text.StringBuilder();

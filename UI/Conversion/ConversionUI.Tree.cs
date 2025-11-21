@@ -53,7 +53,9 @@ public sealed partial class ConversionUI
             var parts = folderOnly.Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
             if (parts.Length == 0)
             {
-                root.Mods.Add(mod);
+                if (!root.Children.TryGetValue("(Uncategorized)", out var unc2))
+                    root.Children["(Uncategorized)"] = unc2 = new TableCatNode("(Uncategorized)");
+                unc2.Mods.Add(mod);
                 continue;
             }
 
@@ -107,6 +109,15 @@ public sealed partial class ConversionUI
 
     private void BuildFlatRows(TableCatNode node, Dictionary<string, List<string>> visibleByMod, string pathPrefix, int depth)
     {
+        foreach (var (name, child) in OrderedChildrenPairs(node))
+        {
+            var fullPath = string.IsNullOrEmpty(pathPrefix) ? name : $"{pathPrefix}/{name}";
+            _flatRows.Add(new FlatRow { Kind = FlatRowKind.Folder, Node = child, FolderPath = fullPath, Depth = depth });
+            var catOpen = _filterPenumbraUsedOnly || _expandedFolders.Contains(fullPath);
+            if (!catOpen)
+                continue;
+            BuildFlatRows(child, visibleByMod, fullPath, depth + 1);
+        }
         foreach (var mod in node.Mods)
         {
             if (!visibleByMod.ContainsKey(mod))
@@ -121,15 +132,6 @@ public sealed partial class ConversionUI
                         _flatRows.Add(new FlatRow { Kind = FlatRowKind.File, Node = node, Mod = mod, File = files[i], Depth = depth + 1 });
                 }
             }
-        }
-        foreach (var (name, child) in OrderedChildrenPairs(node))
-        {
-            var fullPath = string.IsNullOrEmpty(pathPrefix) ? name : $"{pathPrefix}/{name}";
-            _flatRows.Add(new FlatRow { Kind = FlatRowKind.Folder, Node = child, FolderPath = fullPath, Depth = depth });
-            var catOpen = _filterPenumbraUsedOnly || _expandedFolders.Contains(fullPath);
-            if (!catOpen)
-                continue;
-            BuildFlatRows(child, visibleByMod, fullPath, depth + 1);
         }
     }
 

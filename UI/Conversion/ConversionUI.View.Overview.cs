@@ -246,7 +246,7 @@ public sealed partial class ConversionUI
         }
         var visibleByMod = _visibleByMod;
 
-        var mods = visibleByMod.Keys.ToList();
+        var mods = visibleByMod.Keys.Where(m => !string.Equals(m, "mod_state", StringComparison.OrdinalIgnoreCase)).ToList();
         if (_scanSortKind == ScanSortKind.ModName)
             mods = (_scanSortAsc ? mods.OrderBy(m => ResolveModDisplayName(m)) : mods.OrderByDescending(m => ResolveModDisplayName(m))).ToList();
         else

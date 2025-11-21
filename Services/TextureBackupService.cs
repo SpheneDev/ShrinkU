@@ -423,7 +423,10 @@ public sealed class TextureBackupService
                     foreach (var dir in Directory.EnumerateDirectories(backupDirectory, "*", SearchOption.TopDirectoryOnly))
                     {
                         var name = Path.GetFileName(dir);
-                        if (!string.IsNullOrWhiteSpace(name)) mods.Add(name);
+                        if (string.IsNullOrWhiteSpace(name)) continue;
+                        if (name.Equals("mod_state", StringComparison.OrdinalIgnoreCase)) continue;
+                        if (name.StartsWith("session_", StringComparison.OrdinalIgnoreCase)) continue;
+                        mods.Add(name);
                     }
                     foreach (var session in Directory.EnumerateDirectories(backupDirectory, "session_*", SearchOption.TopDirectoryOnly))
                     {
