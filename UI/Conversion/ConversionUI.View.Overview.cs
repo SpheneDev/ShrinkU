@@ -307,50 +307,20 @@ public sealed partial class ConversionUI
         {
             _selectedTextures.Clear();
             _selectedEmptyMods.Clear();
-            var snapAll = _modStateService.Snapshot();
-            var sourceKeysAll = _scannedByMod.Count > 0
-                ? _scannedByMod.Keys.Union(snapAll.Keys, StringComparer.OrdinalIgnoreCase).ToList()
-                : snapAll.Keys.ToList();
-            foreach (var mod in sourceKeysAll)
+            foreach (var mod in mods)
             {
-                var files = visibleByMod.TryGetValue(mod, out var v) && v != null ? v : new List<string>();
-                var capsAll = EvaluateModCapabilities(mod);
-                if (!capsAll.Excluded)
+                var files = GetAllFilesForModDisplay(mod, visibleByMod.TryGetValue(mod, out var v) ? v : null);
+                var count = files?.Count ?? 0;
+                if (count > 0)
                 {
-                    if (capsAll.CanConvert)
-                    {
-                        List<string>? allFilesForMod = null;
-                        if (_scannedByMod.TryGetValue(mod, out var all) && all != null && all.Count > 0)
-                            allFilesForMod = all;
-                        else
-                            allFilesForMod = files;
-                        var totalAll = allFilesForMod.Count;
-                        if (totalAll > 0)
-                        {
-                            for (int i = 0; i < totalAll; i++)
-                                _selectedTextures.Add(allFilesForMod[i]);
-                            _selectedCountByMod[mod] = totalAll;
-                        }
-                        else
-                        {
-                            _selectedCountByMod[mod] = 0;
-                        }
-                    }
-                    else if (capsAll.CanBackup)
-                    {
-                        _selectedEmptyMods.Add(mod);
-                        _selectedCountByMod[mod] = 0;
-                    }
-                    else
-                    {
-                        _selectedCountByMod[mod] = 0;
-                        _selectedEmptyMods.Remove(mod);
-                    }
+                    foreach (var f in files!)
+                        _selectedTextures.Add(f);
+                    _selectedCountByMod[mod] = count;
                 }
                 else
                 {
+                    _selectedEmptyMods.Add(mod);
                     _selectedCountByMod[mod] = 0;
-                    _selectedEmptyMods.Remove(mod);
                 }
             }
         }
