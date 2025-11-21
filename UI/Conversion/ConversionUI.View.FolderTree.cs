@@ -189,6 +189,8 @@ public sealed partial class ConversionUI
                                 var snap = _modStateSnapshot ?? _modStateService.Snapshot();
                                 if (snap.TryGetValue(mod, out var ms) && ms != null && ms.ComparedFiles > 0)
                                     convertedAll = Math.Min(ms.ComparedFiles, totalAll);
+                                if (ms != null && ms.InstalledButNotConverted)
+                                    convertedAll = 0;
                             }
                         }
                         // Re-evaluate non-convertible based on all textures, not current filter
@@ -303,7 +305,10 @@ public sealed partial class ConversionUI
                         ImGui.BeginTooltip();
                         ImGui.TextUnformatted($"{ResolveModDisplayName(mod)}");
                         ImGui.Separator();
-                        ImGui.TextUnformatted($"Textures: {(hasBackup ? convertedAll : 0)}/{totalAll} converted");
+                        var snap2 = _modStateSnapshot ?? _modStateService.Snapshot();
+                        var entryState = snap2.TryGetValue(mod, out var entry2) ? entry2 : null;
+                        var showConvertedCount = hasBackup && !(entryState != null && entryState.InstalledButNotConverted);
+                        ImGui.TextUnformatted($"Textures: {(showConvertedCount ? convertedAll : 0)}/{totalAll} converted");
                         if (comparedFilesTip > 0)
                             ImGui.TextUnformatted($"Compared: {comparedFilesTip}");
                         ImGui.TextUnformatted($"Uncompressed: {FormatSize(origBytesTip)}");

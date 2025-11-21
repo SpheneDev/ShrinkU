@@ -31,6 +31,11 @@ public sealed partial class ConversionUI
             else if (_modStateSnapshot != null && _modStateSnapshot.TryGetValue(mod, out var ms) && ms != null && ms.ComparedFiles > 0)
                 convertedAll = Math.Min(ms.ComparedFiles, totalAll);
         }
+        ShrinkU.Services.ModStateEntry? modState = null;
+        if (_modStateSnapshot != null)
+            _modStateSnapshot.TryGetValue(mod, out modState);
+        if (modState != null && modState.InstalledButNotConverted)
+            convertedAll = 0;
         var isNonConvertible = totalAll == 0;
 
         ImGui.TableSetColumnIndex(1);
@@ -197,7 +202,8 @@ public sealed partial class ConversionUI
             ImGui.BeginTooltip();
             ImGui.TextUnformatted($"{ResolveModDisplayName(mod)}");
             ImGui.Separator();
-            ImGui.TextUnformatted($"Textures: {(hasBackup ? convertedAll : 0)}/{totalAll} converted");
+            var showConvertedCountTip = hasBackup && !(modState != null && modState.InstalledButNotConverted);
+            ImGui.TextUnformatted($"Textures: {(showConvertedCountTip ? convertedAll : 0)}/{totalAll} converted");
             if (comparedFilesTip > 0)
                 ImGui.TextUnformatted($"Compared: {comparedFilesTip}");
             ImGui.TextUnformatted($"Uncompressed: {FormatSize(origBytesTip)}");
@@ -260,9 +266,6 @@ public sealed partial class ConversionUI
 
         ImGui.TableSetColumnIndex(3);
         _cachedPerModSavings.TryGetValue(mod, out var modStats);
-        ShrinkU.Services.ModStateEntry? modState = null;
-        if (_modStateSnapshot != null)
-            _modStateSnapshot.TryGetValue(mod, out modState);
         long modOriginalBytes = modState != null && modState.ComparedFiles > 0 ? modState.OriginalBytes : GetOrQueryModOriginalTotal(mod);
         var hideStatsForNoTextures = totalAll == 0;
         if (hideStatsForNoTextures)
@@ -292,7 +295,7 @@ public sealed partial class ConversionUI
         if (totalAll > 0)
         {
             var autoMode = _configService.Current.TextureProcessingMode == TextureProcessingMode.Automatic;
-            var showRestore = anyBackup;
+            var showRestore = anyBackup && !(modState != null && modState.InstalledButNotConverted);
             if (!showRestore)
             {
                 ImGui.PushStyleColor(ImGuiCol.Button, ShrinkUColors.ConvertButton);
