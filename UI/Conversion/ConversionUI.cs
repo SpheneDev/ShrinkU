@@ -836,6 +836,19 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
                             catch { }
                             RequestUiRefresh("mod-deleted-light");
                         });
+
+                        try
+                        {
+                            var orphans = await _backupService.FindOrphanedBackupsAsync().ConfigureAwait(false);
+                            _uiThreadActions.Enqueue(() =>
+                            {
+                                _orphaned = orphans ?? new List<TextureBackupService.OrphanBackupInfo>();
+                                _lastOrphanScanUtc = DateTime.UtcNow;
+                                _needsUIRefresh = true;
+                                RequestUiRefresh("mod-deleted-orphan-refresh");
+                            });
+                        }
+                        catch { }
                     }
                     catch (TaskCanceledException) { }
                     catch (Exception ex) { _logger.LogError(ex, "ModDeleted debounce task failed"); }
