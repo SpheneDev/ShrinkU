@@ -400,7 +400,7 @@ public sealed partial class ConversionUI
         {
             if (anyBackup)
             {
-                if (hasPmpBackup)
+                if (hasPmpBackup && !isOrphan)
                 {
                     ImGui.PushStyleColor(ImGuiCol.Button, ShrinkUColors.ReinstallButton);
                     ImGui.PushStyleColor(ImGuiCol.ButtonHovered, ShrinkUColors.ReinstallButtonHovered);
@@ -412,7 +412,6 @@ public sealed partial class ConversionUI
                     {
                         _running = true;
                         ResetBothProgress();
-                        
                         var progress = new Progress<(string, int, int)>(e => { _currentTexture = e.Item1; _backupIndex = e.Item2; _backupTotal = e.Item3; });
                         _ = _backupService.ReinstallModFromLatestPmpAsync(mod, progress, CancellationToken.None)
                             .ContinueWith(t =>
@@ -426,7 +425,6 @@ public sealed partial class ConversionUI
                                     ClearModCaches(mod);
                                     RefreshModState(mod, "reinstall-completed-flat");
                                 });
-                                
                                 ResetBothProgress();
                                 _uiThreadActions.Enqueue(() => { _running = false; });
                             }, TaskScheduler.Default);
@@ -435,7 +433,7 @@ public sealed partial class ConversionUI
                     }
                     ImGui.PopStyleColor(4);
                 }
-                else
+                else if (!isOrphan)
                 {
                     ImGui.PushStyleColor(ImGuiCol.Button, ShrinkUColors.RestoreButton);
                     ImGui.PushStyleColor(ImGuiCol.ButtonHovered, ShrinkUColors.RestoreButtonHovered);

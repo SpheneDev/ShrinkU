@@ -25,7 +25,7 @@ namespace ShrinkU.Helpers
             var convertVisible = hasTextures;
             var convertDisabled = excluded || (total <= 0) || (converted >= total);
             var restoreVisible = hasTextures || hasAnyBackup;
-            var restoreDisabled = !hasAnyBackup || (excluded) || (automaticMode && !isOrphan);
+            var restoreDisabled = !hasAnyBackup || excluded || isOrphan || (automaticMode && !isOrphan);
             var installVisible = !hasTextures && hasAnyBackup && hasPmpBackup && isOrphan;
             var backupVisible = !hasTextures && !hasAnyBackup;
             return (convertVisible, restoreVisible, installVisible, backupVisible, convertDisabled, restoreDisabled);
