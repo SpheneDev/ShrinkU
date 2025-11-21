@@ -401,7 +401,7 @@ public sealed partial class ConversionUI
                                 _uiThreadActions.Enqueue(() => { _running = false; });
                             }, TaskScheduler.Default);
                     }
-                    ShowTooltip("Reinstalliert den Mod aus dem PMP-Backup.");
+                    ShowTooltip("Reinstall mod from PMP backup.");
                     ImGui.PopStyleColor(4);
                 }
                 else
@@ -434,7 +434,7 @@ public sealed partial class ConversionUI
                                 _uiThreadActions.Enqueue(() => { _running = false; });
                             });
                     }
-                    ShowTooltip("Stellt Texturen aus dem Backup wieder her.");
+                    ShowTooltip("Restore textures from backup.");
                     ImGui.PopStyleColor(4);
                 }
             }
@@ -544,7 +544,7 @@ public sealed partial class ConversionUI
                         _uiThreadActions.Enqueue(() => { _running = false; _needsUIRefresh = true; });
                     }, TaskScheduler.Default);
             }
-            ShowTooltip("Installiert den Mod aus dem Backup, falls Penumbra ihn entfernt hat.");
+            ShowTooltip("Install mod from PMP backup if Penumbra removed it.");
             ImGui.PopStyleColor(4);
             ImGui.EndDisabled();
             ImGui.SameLine();

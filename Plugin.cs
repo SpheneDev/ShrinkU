@@ -35,6 +35,7 @@ public sealed class Plugin : IDalamudPlugin
     private readonly ReleaseChangelogUI _releaseChangelogUi;
     private readonly DebugTraceService _debugTrace;
     private readonly DebugUI _debugUi;
+    private readonly StartupProgressUI _startupProgressUi;
     private System.Threading.CancellationTokenSource? _initRefreshCts;
 
     public Plugin(IDalamudPluginInterface pluginInterface, IFramework framework, ICommandManager commandManager, IPluginLog pluginLog)
@@ -74,6 +75,7 @@ public sealed class Plugin : IDalamudPlugin
         _debugUi = new DebugUI(_logger, _configService, _debugTrace);
         _settingsUi = new SettingsUI(_logger, _configService, _conversionService, _backupService, () => _releaseChangelogUi.IsOpen = true, _debugTrace, () => _debugUi.IsOpen = true);
         _conversionUi = new ConversionUI(_logger, _configService, _conversionService, _backupService, () => _settingsUi.IsOpen = true, _modStateService, cacheService, _debugTrace);
+        _startupProgressUi = new StartupProgressUI(_logger, _configService, _conversionService, _backupService);
         _firstRunUi = new FirstRunSetupUI(_logger, _configService)
         {
             OnCompleted = () =>
@@ -90,6 +92,7 @@ public sealed class Plugin : IDalamudPlugin
         _windowSystem.AddWindow(_settingsUi);
         _windowSystem.AddWindow(_firstRunUi);
         _windowSystem.AddWindow(_releaseChangelogUi);
+        _windowSystem.AddWindow(_startupProgressUi);
         _windowSystem.AddWindow(_debugUi);
 
         _pluginInterface.UiBuilder.Draw += DrawUi;
@@ -158,23 +161,31 @@ public sealed class Plugin : IDalamudPlugin
                     _initRefreshCts?.Dispose();
                     _initRefreshCts = new System.Threading.CancellationTokenSource();
                     var token = _initRefreshCts.Token;
+                    try { _startupProgressUi.ResetAll(); _startupProgressUi.IsOpen = true; } catch { }
                     _ = Task.Run(async () =>
                     {
                         try
                         {
+                            try { _startupProgressUi.SetStep(1); } catch { }
                             
                             await _backupService.RefreshAllBackupStateAsync().ConfigureAwait(false);
+                            try { _startupProgressUi.MarkBackupDone(); _startupProgressUi.SetStep(2); } catch { }
                             await _backupService.PopulateMissingOriginalBytesAsync(token).ConfigureAwait(false);
+                            try { _startupProgressUi.SetStep(3); } catch { }
                             var threads = Math.Max(1, _configService.Current.MaxStartupThreads);
                             await _conversionService.RunInitialParallelUpdateAsync(threads, token).ConfigureAwait(false);
+                            try { _startupProgressUi.SetStep(4); } catch { }
                             await _conversionService.UpdateAllModUsedTextureFilesAsync().ConfigureAwait(false);
+                            try { _startupProgressUi.MarkUsedDone(); _startupProgressUi.SetStep(5); } catch { }
                             
                             try { _modStateService.Save(); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to save mod state"); }
+                            try { _startupProgressUi.MarkSaveDone(); } catch { }
                         }
                         catch (Exception ex) { _logger.LogError(ex, "Initial refresh failed"); }
                         finally
                         {
                             try { _conversionUi.SetStartupRefreshInProgress(false); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to clear startup refresh flag"); }
+                            try { _startupProgressUi.IsOpen = false; } catch { }
                         }
                     }, token);
                 }

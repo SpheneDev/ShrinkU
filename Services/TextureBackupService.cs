@@ -23,6 +23,7 @@ public sealed class TextureBackupService
     private readonly PenumbraIpc _penumbraIpc;
     private readonly ModStateService _modStateService;
     private static readonly SemaphoreSlim s_backupLock = new(1, 1);
+    public event Action<(int processed, int total, int etaSeconds)>? OnPopulateOriginalBytesProgress;
 
     public TextureBackupService(ILogger logger, ShrinkUConfigService configService, PenumbraIpc penumbraIpc, ModStateService modStateService)
     {
@@ -3316,6 +3317,7 @@ public sealed class TextureBackupService
             try
             {
                 int updated = 0;
+                var start = DateTime.UtcNow;
                 int threads = Math.Max(1, _configService.Current.MaxStartupThreads);
                 using var sem = new SemaphoreSlim(threads);
                 var tasks = new List<Task>(candidates.Count);
@@ -3335,6 +3337,7 @@ public sealed class TextureBackupService
                                 var stats = await ComputeSavingsForModAsync(mod).ConfigureAwait(false);
                                 try { _logger.LogDebug("[ShrinkU] PopulateMissingOriginalBytes: stats mod={mod} original={orig} current={cur} comparedFiles={cmp}", mod, stats.OriginalBytes, stats.CurrentBytes, stats.ComparedFiles); } catch { }
                                 System.Threading.Interlocked.Increment(ref updated);
+                                try { var elapsed = DateTime.UtcNow - start; var remaining = Math.Max(0, candidates.Count - updated); var eta = updated > 0 ? (int)Math.Round(elapsed.TotalSeconds / updated * remaining) : 0; OnPopulateOriginalBytesProgress?.Invoke((updated, candidates.Count, eta)); } catch { }
                                 return;
                             }
                             var list = grouped.TryGetValue(mod, out var files) && files != null ? files : new List<string>();
@@ -3349,6 +3352,7 @@ public sealed class TextureBackupService
                             try { _modStateService.UpdateSavings(mod, original, current, compared); } catch { }
                             try { _logger.LogDebug("[ShrinkU] PopulateMissingOriginalBytes: stats mod={mod} original={orig} current={cur} comparedFiles={cmp}", mod, original, current, compared); } catch { }
                             System.Threading.Interlocked.Increment(ref updated);
+                            try { var elapsed = DateTime.UtcNow - start; var remaining = Math.Max(0, candidates.Count - updated); var eta = updated > 0 ? (int)Math.Round(elapsed.TotalSeconds / updated * remaining) : 0; OnPopulateOriginalBytesProgress?.Invoke((updated, candidates.Count, eta)); } catch { }
                         }
                         catch { }
                         finally
