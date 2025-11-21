@@ -380,6 +380,19 @@ public sealed class TextureBackupService
             _modStateService.BeginBatch();
             Dictionary<string, string> modPaths = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             try { modPaths = await _penumbraIpc.GetModPathsAsync().ConfigureAwait(false); } catch { }
+            Dictionary<string, string> displayByMod = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                var list = _penumbraIpc.GetModList();
+                foreach (var kv in list)
+                {
+                    var dir = kv.Key ?? string.Empty;
+                    var name = kv.Value ?? string.Empty;
+                    if (!string.IsNullOrWhiteSpace(dir))
+                        displayByMod[dir] = name;
+                }
+            }
+            catch { }
             var mods = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             try
             {
@@ -489,17 +502,7 @@ public sealed class TextureBackupService
                 var root = _penumbraIpc.ModDirectory ?? string.Empty;
                 foreach (var mod in mods)
                 {
-                    string absForMeta = string.Empty;
-                    try
-                    {
-                        if (modPaths.TryGetValue(mod, out var relPath) && !string.IsNullOrWhiteSpace(relPath))
-                        {
-                            var normRel = relPath.Replace('/', System.IO.Path.DirectorySeparatorChar).TrimStart(System.IO.Path.DirectorySeparatorChar);
-                            if (!string.IsNullOrWhiteSpace(root))
-                                absForMeta = System.IO.Path.Combine(root, normRel);
-                        }
-                    }
-                    catch { absForMeta = string.Empty; }
+                    var absForMeta = string.IsNullOrWhiteSpace(root) ? string.Empty : System.IO.Path.Combine(root, mod);
                     if (string.IsNullOrWhiteSpace(absForMeta) || !Directory.Exists(absForMeta))
                         continue;
                     var existing = _modStateService.Get(mod);
@@ -560,24 +563,25 @@ public sealed class TextureBackupService
                         var abs = string.Empty;
                         try
                         {
-                            if (modPaths.TryGetValue(mod, out var relPath) && !string.IsNullOrWhiteSpace(relPath))
-                            {
-                                var root = _penumbraIpc.ModDirectory ?? string.Empty;
-                                if (!string.IsNullOrWhiteSpace(root))
-                                {
-                                    var normRel = relPath.Replace('/', System.IO.Path.DirectorySeparatorChar).TrimStart(System.IO.Path.DirectorySeparatorChar);
-                                    abs = System.IO.Path.Combine(root, normRel);
-                                }
-                            }
+                            var root = _penumbraIpc.ModDirectory ?? string.Empty;
+                            if (!string.IsNullOrWhiteSpace(root))
+                                abs = System.IO.Path.Combine(root, mod);
                             if (string.IsNullOrWhiteSpace(abs))
                                 abs = GetModAbsolutePath(mod) ?? string.Empty;
                         }
                         catch { abs = GetModAbsolutePath(mod) ?? string.Empty; }
                         var rel = string.Empty;
-                        try { rel = modPaths.TryGetValue(mod, out var rp) ? (rp ?? string.Empty).Replace('\\', '/').TrimEnd('/') : string.Empty; } catch { rel = string.Empty; }
+                        try { rel = modPaths.TryGetValue(mod, out var rp) ? (rp ?? string.Empty).Replace('\\', '/').TrimEnd('/') : mod; } catch { rel = mod; }
                         var ver = versionByMod.TryGetValue(mod, out var vv) ? vv : string.Empty;
                         var auth = authorByMod.TryGetValue(mod, out var aa) ? aa : string.Empty;
                         _modStateService.UpdateCurrentModInfo(mod, abs, rel, ver, auth);
+                        try
+                        {
+                            var dn = displayByMod.TryGetValue(mod, out var disp) ? disp : string.Empty;
+                            if (!string.IsNullOrWhiteSpace(dn))
+                                _modStateService.UpdateDisplayAndTags(mod, dn, Array.Empty<string>());
+                        }
+                        catch { }
                         string zipName = string.Empty, zipVer = string.Empty;
                         DateTime zipCreated = DateTime.MinValue;
                         string pmpName = string.Empty, pmpVer = string.Empty;
