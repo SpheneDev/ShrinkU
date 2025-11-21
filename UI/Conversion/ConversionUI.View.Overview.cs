@@ -329,18 +329,13 @@ public sealed partial class ConversionUI
             if (ImGui.MenuItem("Mods that can be converted"))
             {
                 var snapPopup = _modStateService.Snapshot();
-                var sourceKeys = _scannedByMod.Count > 0
-                    ? _scannedByMod.Keys.Union(snapPopup.Keys, StringComparer.OrdinalIgnoreCase).ToList()
-                    : snapPopup.Keys.ToList();
+                var sourceKeys = mods;
                 foreach (var mod in sourceKeys)
                 {
-                    if (IsModExcludedByTags(mod)) continue;
-                    var canConvert = false;
-                    if (snapPopup.TryGetValue(mod, out var ms) && ms != null && ms.TotalTextures > 0)
-                        canConvert = true;
-                    else if (_scannedByMod.TryGetValue(mod, out var all) && all != null && all.Count > 0)
-                        canConvert = true;
-                    if (!canConvert) continue;
+                    var caps = EvaluateModCapabilities(mod);
+                    if (caps.Excluded) continue;
+                    if (caps.HasAnyBackup) continue;
+                    if (!caps.CanConvert) continue;
                     var files = visibleByMod.TryGetValue(mod, out var v) && v != null ? v : new List<string>();
                     List<string>? allFilesForMod = null;
                     if (_scannedByMod.TryGetValue(mod, out var allFiles) && allFiles != null && allFiles.Count > 0)
@@ -353,11 +348,6 @@ public sealed partial class ConversionUI
                         for (int i = 0; i < totalAll; i++) _selectedTextures.Add(allFilesForMod[i]);
                         _selectedCountByMod[mod] = totalAll;
                         _selectedEmptyMods.Remove(mod);
-                    }
-                    else
-                    {
-                        _selectedEmptyMods.Add(mod);
-                        _selectedCountByMod[mod] = 0;
                     }
                 }
             }

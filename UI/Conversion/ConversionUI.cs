@@ -137,26 +137,14 @@ public sealed partial class ConversionUI : Window, IDisposable
     {
         var isOrphan = _orphaned.Any(x => string.Equals(x.ModFolderName, mod, StringComparison.OrdinalIgnoreCase));
         var snap = _modStateSnapshot ?? _modStateService.Snapshot();
-        int totalTextures = 0;
-        if (snap.TryGetValue(mod, out var ms) && ms != null)
-            totalTextures = ms.TotalTextures;
-        else if (_scannedByMod.TryGetValue(mod, out var list) && list != null)
-            totalTextures = list.Count;
+        int totalTextures = GetTotalTexturesForMod(mod, _visibleByMod.TryGetValue(mod, out var vis) ? vis : null);
         var hasTexBackup = GetOrQueryModTextureBackup(mod);
         var hasPmpBackup = GetOrQueryModPmp(mod);
         var hasModBackup = GetOrQueryModBackup(mod);
         var hasAnyBackup = hasTexBackup || hasPmpBackup || hasModBackup;
         var excluded = !hasModBackup && !isOrphan && IsModExcludedByTags(mod);
         var autoMode = _configService.Current.TextureProcessingMode == TextureProcessingMode.Automatic;
-        int convertedAll = 0;
-        if (totalTextures > 0)
-        {
-            if (_cachedPerModSavings.TryGetValue(mod, out var s2) && s2 != null && s2.ComparedFiles > 0)
-                convertedAll = Math.Min(s2.ComparedFiles, totalTextures);
-            else if (snap.TryGetValue(mod, out var ms2) && ms2 != null && ms2.ComparedFiles > 0)
-                convertedAll = Math.Min(ms2.ComparedFiles, totalTextures);
-        }
-        var canConvert = totalTextures > 0 && !hasModBackup && convertedAll < totalTextures;
+        var canConvert = totalTextures > 0 && !hasAnyBackup && !excluded;
         var canBackup = totalTextures == 0 && !hasAnyBackup;
         var canRestore = hasAnyBackup;
         if (autoMode && !isOrphan)
@@ -165,9 +153,7 @@ public sealed partial class ConversionUI : Window, IDisposable
                 canRestore = false;
         }
         var canReinstall = isOrphan && hasPmpBackup;
-        int visibleCount = 0;
-        if (_visibleByMod.TryGetValue(mod, out var vis) && vis != null)
-            visibleCount = vis.Count;
+        int visibleCount = _visibleByMod.TryGetValue(mod, out var vlist) && vlist != null ? vlist.Count : 0;
         return new ModCapabilities
         {
             CanConvert = canConvert,
