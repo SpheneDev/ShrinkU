@@ -519,11 +519,6 @@ public sealed class TextureBackupService
                     var absForMeta = string.IsNullOrWhiteSpace(root) ? string.Empty : System.IO.Path.Combine(root, mod);
                     if (string.IsNullOrWhiteSpace(absForMeta) || !Directory.Exists(absForMeta))
                         continue;
-                    var existing = _modStateService.Get(mod);
-                    var needVer = string.IsNullOrWhiteSpace(existing.CurrentVersion);
-                    var needAuth = string.IsNullOrWhiteSpace(existing.CurrentAuthor);
-                    if (!needVer && !needAuth)
-                        continue;
                     var metaPath = System.IO.Path.Combine(absForMeta, "meta.json");
                     if (!File.Exists(metaPath))
                         continue;
@@ -586,8 +581,9 @@ public sealed class TextureBackupService
                         catch { abs = GetModAbsolutePath(mod) ?? string.Empty; }
                         var rel = string.Empty;
                         try { rel = GetModPenumbraRelativePath(mod); } catch { rel = string.Empty; }
-                        var ver = versionByMod.TryGetValue(mod, out var vv) ? vv : string.Empty;
-                        var auth = authorByMod.TryGetValue(mod, out var aa) ? aa : string.Empty;
+                        var existingForMod = _modStateService.Get(mod);
+                        var ver = versionByMod.TryGetValue(mod, out var vv) ? vv : (existingForMod.CurrentVersion ?? string.Empty);
+                        var auth = authorByMod.TryGetValue(mod, out var aa) ? aa : (existingForMod.CurrentAuthor ?? string.Empty);
                         _modStateService.UpdateCurrentModInfo(mod, abs, rel, ver, auth);
                         try
                         {
