@@ -274,7 +274,18 @@ public TextureConversionService(ILogger logger, PenumbraIpc penumbraIpc, Texture
                             abs = (!string.IsNullOrWhiteSpace(defaultAbs) && Directory.Exists(defaultAbs)) ? defaultAbs : (_backupService.GetModAbsolutePath(key) ?? string.Empty);
                         }
                         catch { abs = _backupService.GetModAbsolutePath(key) ?? string.Empty; }
-                        var rel = ComputeRelativePathFromAbs(root, abs);
+                        string rel = string.Empty;
+                        try
+                        {
+                            var (ec, fullPath, _, _) = _penumbraIpc.GetModPath(key);
+                            var p = (fullPath ?? string.Empty).Replace('\\', '/');
+                            try { _logger.LogDebug("PenumbraRelativePath Startup: mod={mod} ec={ec} path={path}", key, ec, p); } catch { }
+                            if (ec == Penumbra.Api.Enums.PenumbraApiEc.Success && !string.IsNullOrWhiteSpace(p))
+                                rel = p;
+                            else
+                                rel = ComputeRelativePathFromAbs(root, abs);
+                        }
+                        catch { rel = ComputeRelativePathFromAbs(root, abs); }
                         var existing = snap.TryGetValue(key, out var e) && e != null ? e : null;
                         var ver = existing?.CurrentVersion ?? string.Empty;
                         var auth = existing?.CurrentAuthor ?? string.Empty;
