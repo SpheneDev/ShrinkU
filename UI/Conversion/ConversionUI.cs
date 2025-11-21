@@ -338,7 +338,13 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
         _modStateService = modStateService ?? new ModStateService(_logger, _configService);
         try { _modStateService.OnStateSaved += () => { _needsUIRefresh = true; }; }
         catch (Exception ex) { _logger.LogError(ex, "Subscribe OnStateSaved failed"); }
-        _onModStateEntryChanged = m => { try { RefreshModState(m, "mod-state-changed"); } catch (Exception ex) { _logger.LogError(ex, "RefreshModState failed for {mod}", m); } };
+        _onModStateEntryChanged = m =>
+        {
+            try { RefreshModState(m, "mod-state-changed"); }
+            catch (Exception ex) { _logger.LogError(ex, "RefreshModState failed for {mod}", m); }
+            try { _uiThreadActions.Enqueue(() => { _modStateSnapshot = _modStateService.Snapshot(); _footerTotalsDirty = true; _needsUIRefresh = true; }); }
+            catch (Exception ex) { _logger.LogError(ex, "Snapshot refresh failed for {mod}", m); }
+        };
         try { _modStateService.OnEntryChanged += _onModStateEntryChanged; }
         catch (Exception ex) { _logger.LogError(ex, "Subscribe OnEntryChanged failed"); }
         _cacheService = cacheService ?? new ConversionCacheService(_logger, _configService, _backupService, _modStateService);
@@ -496,6 +502,26 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
                 try { ReloadPenumbraUsedFiles("conversion-completed"); } catch { }
             }
             _uiThreadActions.Enqueue(() => { _perModSavingsRevision++; _footerTotalsDirty = true; _needsUIRefresh = true; });
+            _ = Task.Run(async () =>
+            {
+                var mods = _modsTouchedLastRun.Keys.ToList();
+                foreach (var m in mods)
+                {
+                    try
+                    {
+                        var stats = await _backupService.ComputeSavingsForModAsync(m).ConfigureAwait(false);
+                        _uiThreadActions.Enqueue(() =>
+                        {
+                            try { _cachedPerModSavings[m] = stats; } catch { }
+                            _perModSavingsRevision++;
+                            _footerTotalsDirty = true;
+                            _needsUIRefresh = true;
+                        });
+                    }
+                    catch { }
+                    await Task.Yield();
+                }
+            });
             _modsTouchedLastRun.Clear();
             _uiThreadActions.Enqueue(() =>
             {
@@ -506,7 +532,7 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
         };
         _conversionService.OnConversionCompleted += _onConversionCompleted;
 
-        _onModProgress = e => { if (e.current == 1) { try { _modsTouchedLastRun.Clear(); } catch { } } _currentModName = e.modName; _currentModIndex = e.current; _totalMods = e.total; _currentModTotalFiles = e.fileTotal; try { _modsTouchedLastRun[e.modName] = true; } catch { } RefreshModState(e.modName, "conversion-progress"); };
+        _onModProgress = e => { if (e.current == 1) { try { _modsTouchedLastRun.Clear(); } catch { } } _currentModName = e.modName; _currentModIndex = e.current; _totalMods = e.total; _currentModTotalFiles = e.fileTotal; try { _modsTouchedLastRun[e.modName] = true; } catch { } RefreshModState(e.modName, "conversion-progress"); try { _uiThreadActions.Enqueue(() => { _footerTotalsDirty = true; }); } catch { } };
         _conversionService.OnModProgress += _onModProgress;
 
         // Generic ModsChanged only marks UI for refresh; heavy scan is driven by add/delete.
@@ -1712,6 +1738,7 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                         _texturesToConvert[f] = Array.Empty<string>();
                     _modDisplayNames[mod] = display ?? string.Empty;
                     _modTags[mod] = tagList ?? new List<string>();
+                    _modStateSnapshot = _modStateService.Snapshot();
                     _needsUIRefresh = true;
                 });
             }

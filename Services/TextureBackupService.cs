@@ -693,6 +693,7 @@ public sealed class TextureBackupService
     {
         try
         {
+            await Task.Yield();
             var backupDirectory = _configService.Current.BackupFolderPath;
             var modAbs = GetModAbsolutePath(modFolderName);
             if (string.IsNullOrWhiteSpace(backupDirectory) || string.IsNullOrWhiteSpace(modAbs) || !Directory.Exists(modAbs))
@@ -704,16 +705,17 @@ public sealed class TextureBackupService
             try { Directory.CreateDirectory(backupDirectory); } catch { }
             var modBackupDir = Path.Combine(backupDirectory, modFolderName);
             try { Directory.CreateDirectory(modBackupDir); } catch { }
-
-            // Clean old PMPs to keep latest only
-            try
+            await Task.Run(() =>
             {
-                foreach (var p in Directory.EnumerateFiles(modBackupDir, "mod_backup_*.pmp"))
+                try
                 {
-                    try { File.Delete(p); } catch { }
+                    foreach (var p in Directory.EnumerateFiles(modBackupDir, "mod_backup_*.pmp"))
+                    {
+                        try { File.Delete(p); } catch { }
+                    }
                 }
-            }
-            catch { }
+                catch { }
+            }, token).ConfigureAwait(false);
 
             var stamp = DateTime.UtcNow.ToString("yyyyMMdd_HHmmss");
             var pmpPath = Path.Combine(modBackupDir, $"mod_backup_{stamp}.pmp");

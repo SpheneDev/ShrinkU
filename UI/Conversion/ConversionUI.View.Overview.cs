@@ -465,7 +465,7 @@ public sealed partial class ConversionUI
             long totalUncompressedCalc = 0;
             long totalCompressedCalc = 0;
             long savedBytesCalc = 0;
-            var snap = _modStateSnapshot ?? _modStateService.Snapshot();
+            var snap = _modStateService.Snapshot();
             foreach (var m in mods)
             {
                 if (!visibleByMod.TryGetValue(m, out var files) || files == null)
@@ -554,105 +554,107 @@ public sealed partial class ConversionUI
         bool hasOnlyRestorableMods = hasRestorableMods && !hasConvertableMods;
 
         ImGui.BeginDisabled(ActionsDisabled() || hasOnlyRestorableMods || !hasConvertableMods);
+        var selectedEmptyModsBtn = _selectedEmptyMods.Where(m => !IsModExcludedByTags(m)).ToList();
+        var modsWithSelectionsBtn = _selectedCountByMod.Where(kv => kv.Value > 0 && !IsModExcludedByTags(kv.Key)).Select(kv => kv.Key).ToList();
+        var selectedModsAll = new HashSet<string>(modsWithSelectionsBtn, StringComparer.OrdinalIgnoreCase);
+        foreach (var m in selectedEmptyModsBtn) selectedModsAll.Add(m);
+        var convertibleSelectedMods = new List<string>();
+        var nonConvertibleSelectedMods = new List<string>();
+        foreach (var m in selectedModsAll)
+        {
+            List<string> list = null;
+            if (_scannedByMod.TryGetValue(m, out var all) && all != null)
+                list = all;
+            else
+                list = _modStateService.ReadDetailTextures(m);
+            if (list != null && list.Count > 0) convertibleSelectedMods.Add(m); else nonConvertibleSelectedMods.Add(m);
+        }
+
         ImGui.PushStyleColor(ImGuiCol.Button, ShrinkUColors.Accent);
         ImGui.PushStyleColor(ImGuiCol.ButtonHovered, ShrinkUColors.AccentHovered);
         ImGui.PushStyleColor(ImGuiCol.ButtonActive, ShrinkUColors.AccentActive);
         ImGui.PushStyleColor(ImGuiCol.Text, ShrinkUColors.ButtonTextOnAccent);
-        if (ImGui.Button("Backup and Convert"))
+        ImGui.BeginDisabled(ActionsDisabled() || nonConvertibleSelectedMods.Count == 0);
+        if (ImGui.Button("Backup"))
         {
             _running = true;
-            var toConvert = GetConvertableTextures();
             ResetBothProgress();
             var progress = new Progress<(string,int,int)>(e => { _currentTexture = e.Item1; _backupIndex = e.Item2; _backupTotal = e.Item3; });
-            var selectedEmptyMods = _selectedEmptyMods.Where(m => !GetOrQueryModBackup(m)).ToList();
-            var backupTasks = new List<Task<bool>>();
-            foreach (var m in selectedEmptyMods)
+            var modsQueue = nonConvertibleSelectedMods.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+            _ = Task.Run(async () =>
             {
-                try { backupTasks.Add(_backupService.CreateFullModBackupAsync(m, progress, CancellationToken.None)); }
-                catch (Exception ex) { _logger.LogError(ex, "Queue backup task failed for {mod}", m); }
-            }
-            if (toConvert.Count == 0 && backupTasks.Count == 0)
+                foreach (var m in modsQueue)
+                {
+                    try { await _backupService.CreateFullModBackupAsync(m, progress, CancellationToken.None).ConfigureAwait(false); }
+                    catch (Exception ex) { _logger.LogError(ex, "Backup task failed for {mod}", m); }
+                    await Task.Yield();
+                }
+                foreach (var m in modsQueue)
+                {
+                    try { await _backupService.ComputeSavingsForModAsync(m).ConfigureAwait(false); } catch { }
+                    await Task.Yield();
+                }
+                _uiThreadActions.Enqueue(() => { _perModSavingsRevision++; _footerTotalsDirty = true; });
+            }).ContinueWith(_ =>
             {
-                var modsToConvert = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                foreach (var (mod, count) in _selectedCountByMod)
+                try { _backupService.RedrawPlayer(); } catch { }
+                _uiThreadActions.Enqueue(() => { _running = false; ResetBothProgress(); });
+            }, TaskScheduler.Default);
+        }
+        ImGui.EndDisabled();
+        ImGui.PopStyleColor(4);
+
+        ImGui.SameLine();
+
+        ImGui.PushStyleColor(ImGuiCol.Button, ShrinkUColors.Accent);
+        ImGui.PushStyleColor(ImGuiCol.ButtonHovered, ShrinkUColors.AccentHovered);
+        ImGui.PushStyleColor(ImGuiCol.ButtonActive, ShrinkUColors.AccentActive);
+        ImGui.PushStyleColor(ImGuiCol.Text, ShrinkUColors.ButtonTextOnAccent);
+        ImGui.BeginDisabled(ActionsDisabled() || (convertibleSelectedMods.Count == 0 && GetConvertableTextures().Count == 0));
+        if (ImGui.Button("Convert"))
+        {
+            _running = true;
+            ResetConversionProgress();
+            var toConvert = GetConvertableTextures();
+            var modsToConvert = new HashSet<string>(convertibleSelectedMods, StringComparer.OrdinalIgnoreCase);
+            _uiThreadActions.Enqueue(() => { _totalMods = modsToConvert.Count; _currentModIndex = 0; _currentModTotalFiles = 0; _needsUIRefresh = true; });
+            _ = Task.Run(async () =>
+            {
+                try
                 {
-                    if (count > 0 && !GetOrQueryModBackup(mod) && !IsModExcludedByTags(mod))
-                        modsToConvert.Add(mod);
-                }
-                foreach (var m in _selectedEmptyMods)
-                {
-                    if (!GetOrQueryModBackup(m) && !IsModExcludedByTags(m))
-                        modsToConvert.Add(m);
-                }
-                if (modsToConvert.Count == 0)
-                {
-                    SetStatus("Nothing selected to backup or convert.");
-                    _running = false;
-                    ResetBothProgress();
-                }
-                else
-                {
-                    _ = Task.Run(async () =>
+                    foreach (var m in modsToConvert)
                     {
-                        try
+                        List<string>? list = null;
+                        if (_scannedByMod.TryGetValue(m, out var all) && all != null && all.Count > 0)
+                            list = all;
+                        if (list == null)
                         {
-                            foreach (var m in modsToConvert)
+                            var fetched = await _conversionService.GetModTextureFilesAsync(m).ConfigureAwait(false);
+                            if (fetched != null && fetched.Count > 0)
                             {
-                                var list = await _conversionService.GetModTextureFilesAsync(m).ConfigureAwait(false);
-                                if (list != null && list.Count > 0)
-                                {
-                                    foreach (var f in list)
-                                        toConvert[f] = Array.Empty<string>();
-                                    _uiThreadActions.Enqueue(() => { _scannedByMod[m] = list; _needsUIRefresh = true; });
-                                }
-                                await Task.Yield();
-                            }
-                            if (toConvert.Count == 0)
-                            {
-                                _uiThreadActions.Enqueue(() => { SetStatus("Nothing selected to convert."); _running = false; ResetBothProgress(); });
-                            }
-                            else
-                            {
-                                await _conversionService.StartConversionAsync(toConvert).ConfigureAwait(false);
-                                _uiThreadActions.Enqueue(() => { _running = false; });
+                                list = fetched;
+                                _uiThreadActions.Enqueue(() => { _scannedByMod[m] = fetched; _needsUIRefresh = true; });
                             }
                         }
-                        catch (Exception ex)
+                        if (list != null)
                         {
-                            _logger.LogError(ex, "On-demand scan for selected mods failed");
-                            _uiThreadActions.Enqueue(() => { _running = false; ResetBothProgress(); });
+                            foreach (var f in list)
+                                toConvert[f] = Array.Empty<string>();
                         }
-                    });
-                }
-            }
-            else
-            {
-                if (backupTasks.Count > 0)
-                {
-                    var modsQueue = selectedEmptyMods.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
-                    _ = Task.Run(async () =>
-                    {
-                        foreach (var m in modsQueue)
-                        {
-                            try { await _backupService.CreateFullModBackupAsync(m, progress, CancellationToken.None).ConfigureAwait(false); }
-                            catch (Exception ex) { _logger.LogError(ex, "Backup task failed for {mod}", m); }
-                            await Task.Yield();
-                        }
-                        foreach (var m in modsQueue)
-                        {
-                            try { await _backupService.ComputeSavingsForModAsync(m).ConfigureAwait(false); } catch { }
-                            await Task.Yield();
-                        }
-                        _uiThreadActions.Enqueue(() => { _perModSavingsRevision++; _footerTotalsDirty = true; if (toConvert.Count == 0) { _running = false; ResetBothProgress(); } });
-                    });
-                }
-                if (toConvert.Count > 0)
-                {
+                        await Task.Yield();
+                    }
                     try { _modsTouchedLastRun.Clear(); } catch { }
-                    _ = _conversionService.StartConversionAsync(toConvert)
-                        .ContinueWith(_ => { _uiThreadActions.Enqueue(() => { _running = false; }); }, TaskScheduler.Default);
+                    await _conversionService.StartConversionAsync(toConvert).ConfigureAwait(false);
                 }
-            }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Convert task failed");
+                }
+                finally
+                {
+                    _uiThreadActions.Enqueue(() => { _running = false; });
+                }
+            });
         }
         ImGui.EndDisabled();
         ImGui.PopStyleColor(4);

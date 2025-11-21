@@ -23,7 +23,14 @@ public sealed partial class ConversionUI
             var width = ImGui.GetContentRegionAvail().X;
             ImGui.ProgressBar(frac, new Vector2(width, 0), "");
         }
-        else if (!string.IsNullOrEmpty(_currentModName) || _conversionService.IsConverting)
+        else if (_backupTotal > 0 && string.IsNullOrEmpty(_currentRestoreMod) && !_conversionService.IsConverting)
+        {
+            ImGui.TextColored(new Vector4(0.40f, 0.60f, 0.90f, 1f), "Backing up");
+            var width = ImGui.GetContentRegionAvail().X;
+            float frac = (_backupTotal > 0) ? (float)_backupIndex / _backupTotal : 0f;
+            ImGui.ProgressBar(frac, new Vector2(width, 0), "");
+        }
+        else if (_conversionService.IsConverting || _totalMods > 0 || !string.IsNullOrEmpty(_currentModName))
         {
             var modName = string.IsNullOrEmpty(_currentModName) ? string.Empty : _currentModName;
             var dn2 = !string.IsNullOrEmpty(modName) && _modDisplayNames.TryGetValue(modName, out var nm) ? nm : modName;
