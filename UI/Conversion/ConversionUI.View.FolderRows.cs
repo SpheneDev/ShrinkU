@@ -20,41 +20,55 @@ public sealed partial class ConversionUI
         {
             if (folderSelected)
             {
-                var automaticMode = _configService.Current.TextureProcessingMode == TextureProcessingMode.Automatic;
-                foreach (var mod in child.Mods)
+                var filesAll = CollectFilesRecursive(child, visibleByMod);
+                for (int i = 0; i < filesAll.Count; i++)
+                    _selectedTextures.Add(filesAll[i]);
+                var stack = new Stack<TableCatNode>();
+                stack.Push(child);
+                while (stack.Count > 0)
                 {
-                    if (!visibleByMod.TryGetValue(mod, out var files))
-                        continue;
-                    var isOrphan = _orphaned.Any(x => string.Equals(x.ModFolderName, mod, StringComparison.OrdinalIgnoreCase));
-                    var hasBackup = GetOrQueryModBackup(mod);
-                    var excluded = (!hasBackup && !isOrphan && IsModExcludedByTags(mod));
-                    var convertedAll = 0;
-                    List<string>? allFilesForMod = null;
-                    if (_scannedByMod.TryGetValue(mod, out var all) && all != null && all.Count > 0)
-                        allFilesForMod = all;
-                    else
-                        allFilesForMod = files;
-                    var totalAll = allFilesForMod.Count;
-                    var disableCheckbox = excluded || (automaticMode && !isOrphan && (convertedAll >= totalAll));
-                    if (!disableCheckbox)
+                    var cur = stack.Pop();
+                    foreach (var mod in cur.Mods)
                     {
-                        foreach (var f in allFilesForMod)
-                            _selectedTextures.Add(f);
-                        _selectedCountByMod[mod] = totalAll;
+                        List<string>? src = null;
+                        if (_scannedByMod.TryGetValue(mod, out var all) && all != null && all.Count > 0)
+                            src = all;
+                        else if (visibleByMod.TryGetValue(mod, out var vis) && vis != null)
+                            src = vis;
+                        var cnt = src?.Count ?? 0;
+                        if (cnt > 0)
+                        {
+                            _selectedCountByMod[mod] = cnt;
+                        }
+                        else
+                        {
+                            _selectedEmptyMods.Add(mod);
+                            _selectedCountByMod[mod] = 0;
+                        }
                     }
-                    else if (!isOrphan)
-                    {
-                        _selectedEmptyMods.Add(mod);
-                    }
+                    foreach (var ch in cur.Children.Values)
+                        stack.Push(ch);
                 }
             }
             else
             {
                 var folderFiles = CollectFilesRecursive(child, visibleByMod);
-                foreach (var f in folderFiles) _selectedTextures.Remove(f);
-                foreach (var mod in child.Mods) _selectedEmptyMods.Remove(mod);
-                foreach (var mod in child.Mods)
-                    _selectedCountByMod[mod] = 0;
+                for (int i = 0; i < folderFiles.Count; i++)
+                    _selectedTextures.Remove(folderFiles[i]);
+                var stack = new Stack<TableCatNode>();
+                stack.Push(child);
+                while (stack.Count > 0)
+                {
+                    var cur = stack.Pop();
+                    foreach (var mod in cur.Mods)
+                    {
+                        _selectedEmptyMods.Remove(mod);
+                        if (visibleByMod.ContainsKey(mod) || _scannedByMod.ContainsKey(mod))
+                            _selectedCountByMod[mod] = 0;
+                    }
+                    foreach (var ch in cur.Children.Values)
+                        stack.Push(ch);
+                }
             }
         }
         ImGui.EndDisabled();

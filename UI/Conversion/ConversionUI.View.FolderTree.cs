@@ -42,61 +42,54 @@ public sealed partial class ConversionUI
             {
                 if (folderSelected)
                 {
-                    var automaticMode = _configService.Current.TextureProcessingMode == TextureProcessingMode.Automatic;
-                    foreach (var mod in child.Mods)
+                    var filesAll = CollectFilesRecursive(child, visibleByMod);
+                    for (int i = 0; i < filesAll.Count; i++)
+                        _selectedTextures.Add(filesAll[i]);
+                    var stackSel = new Stack<TableCatNode>();
+                    stackSel.Push(child);
+                    while (stackSel.Count > 0)
                     {
-                        if (!visibleByMod.TryGetValue(mod, out var files))
-                            continue;
-                        var isOrphan = _orphaned.Any(x => string.Equals(x.ModFolderName, mod, StringComparison.OrdinalIgnoreCase));
-                        var totalAll = _scannedByMod.TryGetValue(mod, out var allModFiles2) && allModFiles2 != null ? allModFiles2.Count : files.Count;
-                        var convertedAll = 0;
-                        var hasBackupM = GetOrQueryModBackup(mod);
-                        if (hasBackupM && totalAll > 0)
+                        var cur = stackSel.Pop();
+                        foreach (var mod in cur.Mods)
                         {
-                            if (_modPaths.TryGetValue(mod, out var modRoot2) && !string.IsNullOrWhiteSpace(modRoot2))
-                            {
-                                if (_cachedPerModOriginalSizes.TryGetValue(mod, out var map2) && map2 != null && map2.Count > 0 && allModFiles2 != null)
-                                {
-                                    foreach (var f in allModFiles2)
-                                    {
-                                        try
-                                        {
-                                            var rel = Path.GetRelativePath(modRoot2, f).Replace('\\', '/');
-                                            if (map2.ContainsKey(rel)) convertedAll++;
-                                        }
-                                        catch { }
-                                    }
-                                }
-                            }
-                            if (convertedAll == 0 && _cachedPerModSavings.TryGetValue(mod, out var s2) && s2 != null && s2.ComparedFiles > 0)
-                                convertedAll = Math.Min(s2.ComparedFiles, totalAll);
-                        }
-                        var disableCheckbox = automaticMode && !isOrphan && (convertedAll >= totalAll);
-                        if (totalAll == 0)
-                        {
-                            _selectedEmptyMods.Add(mod);
-                            continue;
-                        }
-                        if (!disableCheckbox)
-                        {
-                            List<string>? allFilesForMod = null;
+                            List<string>? src = null;
                             if (_scannedByMod.TryGetValue(mod, out var all) && all != null && all.Count > 0)
-                                allFilesForMod = all;
+                                src = all;
+                            else if (visibleByMod.TryGetValue(mod, out var vis) && vis != null)
+                                src = vis;
+                            var cnt = src?.Count ?? 0;
+                            if (cnt > 0)
+                            {
+                                _selectedCountByMod[mod] = cnt;
+                            }
                             else
-                                allFilesForMod = files;
-                            foreach (var f in allFilesForMod) _selectedTextures.Add(f);
-                            _selectedCountByMod[mod] = totalAll;
+                            {
+                                _selectedEmptyMods.Add(mod);
+                                _selectedCountByMod[mod] = 0;
+                            }
                         }
+                        foreach (var ch in cur.Children.Values)
+                            stackSel.Push(ch);
                     }
                 }
                 else
                 {
                     var folderFiles2 = CollectFilesRecursive(child, visibleByMod);
-                    foreach (var f in folderFiles2) _selectedTextures.Remove(f);
-                    foreach (var mod in child.Mods) _selectedEmptyMods.Remove(mod);
-                    foreach (var mod in child.Mods)
+                    for (int i = 0; i < folderFiles2.Count; i++)
+                        _selectedTextures.Remove(folderFiles2[i]);
+                    var stackDes = new Stack<TableCatNode>();
+                    stackDes.Push(child);
+                    while (stackDes.Count > 0)
                     {
-                        if (visibleByMod.ContainsKey(mod)) _selectedCountByMod[mod] = 0;
+                        var cur = stackDes.Pop();
+                        foreach (var mod in cur.Mods)
+                        {
+                            _selectedEmptyMods.Remove(mod);
+                            if (visibleByMod.ContainsKey(mod) || _scannedByMod.ContainsKey(mod))
+                                _selectedCountByMod[mod] = 0;
+                        }
+                        foreach (var ch in cur.Children.Values)
+                            stackDes.Push(ch);
                     }
                 }
             }
