@@ -640,6 +640,7 @@ public sealed partial class ConversionUI
         foreach (var m in selectedEmptyModsBtn) selectedModsAll.Add(m);
         var convertibleSelectedMods = new List<string>();
         var nonConvertibleSelectedMods = new List<string>();
+        var reinstallSelectedMods = new List<string>();
         var convertibleSelectedModsNoBackup = new List<string>();
         var snapGating = _modStateService.Snapshot();
         foreach (var m in selectedModsAll)
@@ -649,7 +650,20 @@ public sealed partial class ConversionUI
                 hasAny = true;
             else if (_scannedByMod.TryGetValue(m, out var all) && all != null && all.Count > 0)
                 hasAny = true;
-            if (hasAny) convertibleSelectedMods.Add(m); else nonConvertibleSelectedMods.Add(m);
+            if (hasAny)
+                convertibleSelectedMods.Add(m);
+            else
+            {
+                var isOrphanSel = _orphaned.Any(x => string.Equals(x.ModFolderName, m, StringComparison.OrdinalIgnoreCase));
+                var hasPmpSel = GetOrQueryModPmp(m);
+                var visFilesSel = visibleByMod.TryGetValue(m, out var vsel) && vsel != null ? vsel : new List<string>();
+                var totalAllSel = GetTotalTexturesForMod(m, visFilesSel);
+                var isReinstallSel = hasPmpSel && !isOrphanSel && totalAllSel == 0;
+                if (isReinstallSel)
+                    reinstallSelectedMods.Add(m);
+                else
+                    nonConvertibleSelectedMods.Add(m);
+            }
         }
         foreach (var m in convertibleSelectedMods)
         {
@@ -662,7 +676,7 @@ public sealed partial class ConversionUI
         ImGui.PushStyleColor(ImGuiCol.ButtonHovered, ShrinkUColors.AccentHovered);
         ImGui.PushStyleColor(ImGuiCol.ButtonActive, ShrinkUColors.AccentActive);
         ImGui.PushStyleColor(ImGuiCol.Text, ShrinkUColors.ButtonTextOnAccent);
-        using (var _d = ImRaii.Disabled(ActionsDisabled() || nonConvertibleSelectedMods.Count == 0))
+        using (var _d = ImRaii.Disabled(ActionsDisabled() || nonConvertibleSelectedMods.Count == 0 || reinstallSelectedMods.Count > 0))
         if (ImGui.Button("Backup"))
         {
             _running = true;
