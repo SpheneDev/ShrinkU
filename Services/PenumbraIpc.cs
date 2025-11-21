@@ -631,9 +631,10 @@ public sealed class PenumbraIpc : IDisposable
             foreach (var kv in list)
             {
                 var modDir = kv.Key;
+                var modName = kv.Value ?? string.Empty;
                 try
                 {
-                    var tuple = _penumbraGetModPath.Invoke(modDir, "");
+                    var tuple = _penumbraGetModPath.Invoke(modDir, modName);
                     var fullPath = tuple.Item2 ?? string.Empty;
                     paths[modDir] = fullPath;
                 }
