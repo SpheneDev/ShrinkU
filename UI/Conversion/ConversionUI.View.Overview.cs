@@ -458,16 +458,17 @@ public sealed partial class ConversionUI
             if (visibleByMod.TryGetValue(m, out var files) && files != null && files.Count > 0)
                 visibleModsWithTextures++;
         }
-        var sigFooter = string.Concat(showFiles ? "1" : "0", "|", visibleModsWithTextures.ToString(), "|", _perModSavingsRevision.ToString(), "|", _scanFilter, "|", _filterPenumbraUsedOnly ? "1" : "0", "|", _filterNonConvertibleMods ? "1" : "0", "|", _filterInefficientMods ? "1" : "0");
+        var sigFooter = string.Concat(showFiles ? "1" : "0", "|", visibleModsWithTextures.ToString(), "|", visibleByMod.Count.ToString(), "|", _perModSavingsRevision.ToString(), "|", _scanFilter, "|", _filterPenumbraUsedOnly ? "1" : "0", "|", _filterNonConvertibleMods ? "1" : "0", "|", _filterInefficientMods ? "1" : "0");
 
         if (_footerTotalsDirty || !string.Equals(sigFooter, _footerTotalsSignature, StringComparison.Ordinal))
         {
             long totalUncompressedCalc = 0;
             long totalCompressedCalc = 0;
             long savedBytesCalc = 0;
+            var snap = _modStateSnapshot ?? _modStateService.Snapshot();
             foreach (var m in mods)
             {
-                if (!visibleByMod.TryGetValue(m, out var files) || files == null || files.Count == 0)
+                if (!visibleByMod.TryGetValue(m, out var files) || files == null)
                     continue;
 
                 long modOrig = 0;
@@ -480,11 +481,15 @@ public sealed partial class ConversionUI
                 }
                 if (modOrig <= 0)
                 {
-                    var snap = _modStateSnapshot ?? _modStateService.Snapshot();
-                    if (snap.TryGetValue(m, out var st) && st != null && st.ComparedFiles > 0)
+                    if (snap.TryGetValue(m, out var st) && st != null && st.OriginalBytes > 0)
                         modOrig = st.OriginalBytes;
                     else
                         modOrig = GetOrQueryModOriginalTotal(m);
+                }
+                if (modCur <= 0)
+                {
+                    if (snap.TryGetValue(m, out var st2) && st2 != null && st2.CurrentBytes > 0)
+                        modCur = st2.CurrentBytes;
                 }
 
                 if (modOrig > 0) totalUncompressedCalc += modOrig;
