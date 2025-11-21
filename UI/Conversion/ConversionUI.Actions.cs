@@ -50,14 +50,12 @@ public sealed partial class ConversionUI
                     _uiThreadActions.Enqueue(() => { SetStatus(success ? $"PMP restore completed for {mod}: {display}" : $"PMP restore failed for {mod}: {display}"); });
                 }
                 RefreshScanResults(true, refreshReason);
-                TriggerMetricsRefresh();
-                _perModSavingsTask = _backupService.ComputePerModSavingsAsync();
-                _perModSavingsTask.ContinueWith(ps =>
+                _ = _backupService.ComputeSavingsForModAsync(mod).ContinueWith(ps =>
                 {
-                    if (ps.Status == TaskStatus.RanToCompletion && ps.Result != null)
+                    if (ps.Status == TaskStatus.RanToCompletion)
                     {
-                        _cachedPerModSavings = ps.Result;
-                        _needsUIRefresh = true;
+                        try { _cachedPerModSavings[mod] = ps.Result; } catch { }
+                        _uiThreadActions.Enqueue(() => { _perModSavingsRevision++; _footerTotalsDirty = true; _needsUIRefresh = true; });
                     }
                 }, TaskScheduler.Default);
                 _ = _backupService.HasBackupForModAsync(mod).ContinueWith(bt =>

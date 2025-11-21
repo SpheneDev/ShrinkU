@@ -236,7 +236,14 @@ public sealed partial class ConversionUI
                                     var success = t.Status == TaskStatus.RanToCompletion && t.Result;
                                     _uiThreadActions.Enqueue(() => { SetStatus(success ? $"Backup completed for {mod}" : $"Backup failed for {mod}"); });
                                     try { RefreshModState(mod, "manual-pmp-backup"); } catch { }
-                                    TriggerMetricsRefresh();
+                                    _ = _backupService.ComputeSavingsForModAsync(mod).ContinueWith(ps =>
+                                    {
+                                        if (ps.Status == TaskStatus.RanToCompletion)
+                                        {
+                                            try { _cachedPerModSavings[mod] = ps.Result; } catch { }
+                                            _uiThreadActions.Enqueue(() => { _perModSavingsRevision++; _footerTotalsDirty = true; _needsUIRefresh = true; });
+                                        }
+                                    }, TaskScheduler.Default);
                                     _ = _backupService.HasBackupForModAsync(mod).ContinueWith(bt =>
                                     {
                                         if (bt.Status == TaskStatus.RanToCompletion)
@@ -569,8 +576,14 @@ public sealed partial class ConversionUI
                                         catch (Exception ex) { _logger.LogError(ex, "Update ExternalConvertedMods after install failed for {mod}", mod); }
                                         try { RefreshModState(mod, "orphan-install"); }
                                         catch (Exception ex) { _logger.LogError(ex, "RefreshModState after install failed for {mod}", mod); }
-                                        try { TriggerMetricsRefresh(); }
-                                        catch (Exception ex) { _logger.LogError(ex, "TriggerMetricsRefresh after install failed for {mod}", mod); }
+                                        _ = _backupService.ComputeSavingsForModAsync(mod).ContinueWith(ps =>
+                                        {
+                                            if (ps.Status == TaskStatus.RanToCompletion)
+                                            {
+                                                try { _cachedPerModSavings[mod] = ps.Result; } catch { }
+                                                _uiThreadActions.Enqueue(() => { _perModSavingsRevision++; _footerTotalsDirty = true; _needsUIRefresh = true; });
+                                            }
+                                        }, TaskScheduler.Default);
                                         _uiThreadActions.Enqueue(() => { _running = false; _needsUIRefresh = true; });
                                     }, TaskScheduler.Default);
                             }
@@ -616,8 +629,14 @@ public sealed partial class ConversionUI
                                         });
                                         try { RefreshModState(mod, "reinstall-folder-view"); }
                                         catch (Exception ex) { _logger.LogError(ex, "RefreshModState after reinstall failed for {mod}", mod); }
-                                        try { TriggerMetricsRefresh(); }
-                                        catch (Exception ex) { _logger.LogError(ex, "TriggerMetricsRefresh after reinstall failed for {mod}", mod); }
+                                        _ = _backupService.ComputeSavingsForModAsync(mod).ContinueWith(ps =>
+                                        {
+                                            if (ps.Status == TaskStatus.RanToCompletion)
+                                            {
+                                                try { _cachedPerModSavings[mod] = ps.Result; } catch { }
+                                                _uiThreadActions.Enqueue(() => { _perModSavingsRevision++; _footerTotalsDirty = true; _needsUIRefresh = true; });
+                                            }
+                                        }, TaskScheduler.Default);
                                         _reinstallInProgress = false;
                                         _reinstallMod = string.Empty;
                                         ResetBothProgress();
@@ -649,10 +668,13 @@ public sealed partial class ConversionUI
                                             catch (Exception ex) { _logger.LogError(ex, "RedrawPlayer after restore failed for {mod}", mod); }
                                             _logger.LogDebug("Restore completed (mod button in folder view)");
                                             RefreshModState(mod, "restore-folder-view");
-                                            TriggerMetricsRefresh();
                                             _ = _backupService.ComputeSavingsForModAsync(mod).ContinueWith(ps =>
                                             {
-                                                try { _needsUIRefresh = true; } catch { }
+                                                if (ps.Status == TaskStatus.RanToCompletion)
+                                                {
+                                                    try { _cachedPerModSavings[mod] = ps.Result; } catch { }
+                                                    _uiThreadActions.Enqueue(() => { _perModSavingsRevision++; _footerTotalsDirty = true; _needsUIRefresh = true; });
+                                                }
                                             }, TaskScheduler.Default);
                                             _ = _backupService.HasBackupForModAsync(mod).ContinueWith(bt =>
                                             {
@@ -756,14 +778,12 @@ public sealed partial class ConversionUI
                                                 : "Restore failed for {mod}", mod);
                                             _uiThreadActions.Enqueue(() => { SetStatus(success ? $"Restore completed for {mod}" : $"Restore failed for {mod}"); });
                                             RefreshModState(mod, "restore-folder-view-context");
-                                            TriggerMetricsRefresh();
-                                            _perModSavingsTask = _backupService.ComputePerModSavingsAsync();
-                                            _perModSavingsTask.ContinueWith(ps =>
+                                            _ = _backupService.ComputeSavingsForModAsync(mod).ContinueWith(ps =>
                                             {
-                                                if (ps.Status == TaskStatus.RanToCompletion && ps.Result != null)
+                                                if (ps.Status == TaskStatus.RanToCompletion)
                                                 {
-                                                    _cachedPerModSavings = ps.Result;
-                                                    _needsUIRefresh = true;
+                                                    try { _cachedPerModSavings[mod] = ps.Result; } catch { }
+                                                    _uiThreadActions.Enqueue(() => { _perModSavingsRevision++; _footerTotalsDirty = true; _needsUIRefresh = true; });
                                                 }
                                             }, TaskScheduler.Default);
                                             _ = _backupService.HasBackupForModAsync(mod).ContinueWith(bt =>
@@ -812,7 +832,14 @@ public sealed partial class ConversionUI
                                     _uiThreadActions.Enqueue(() => { SetStatus(success ? $"Backup completed for {mod}" : $"Backup failed for {mod}"); });
                                     try { RefreshModState(mod, "manual-pmp-backup-button"); }
                                     catch (Exception ex) { _logger.LogError(ex, "RefreshModState after manual PMP backup failed for {mod}", mod); }
-                                    TriggerMetricsRefresh();
+                                    _ = _backupService.ComputeSavingsForModAsync(mod).ContinueWith(ps =>
+                                    {
+                                        if (ps.Status == TaskStatus.RanToCompletion)
+                                        {
+                                            try { _cachedPerModSavings[mod] = ps.Result; } catch { }
+                                            _uiThreadActions.Enqueue(() => { _perModSavingsRevision++; _footerTotalsDirty = true; _needsUIRefresh = true; });
+                                        }
+                                    }, TaskScheduler.Default);
                                     _ = _backupService.HasBackupForModAsync(mod).ContinueWith(bt =>
                                     {
                                         if (bt.Status == TaskStatus.RanToCompletion)

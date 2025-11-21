@@ -633,11 +633,17 @@ public sealed partial class ConversionUI
                             catch (Exception ex) { _logger.LogError(ex, "Backup task failed for {mod}", m); }
                             await Task.Yield();
                         }
-                        _uiThreadActions.Enqueue(() => { TriggerMetricsRefresh(); if (toConvert.Count == 0) { _running = false; ResetBothProgress(); } });
+                        foreach (var m in modsQueue)
+                        {
+                            try { await _backupService.ComputeSavingsForModAsync(m).ConfigureAwait(false); } catch { }
+                            await Task.Yield();
+                        }
+                        _uiThreadActions.Enqueue(() => { _perModSavingsRevision++; _footerTotalsDirty = true; if (toConvert.Count == 0) { _running = false; ResetBothProgress(); } });
                     });
                 }
                 if (toConvert.Count > 0)
                 {
+                    try { _modsTouchedLastRun.Clear(); } catch { }
                     _ = _conversionService.StartConversionAsync(toConvert)
                         .ContinueWith(_ => { _uiThreadActions.Enqueue(() => { _running = false; }); }, TaskScheduler.Default);
                 }
@@ -721,12 +727,12 @@ public sealed partial class ConversionUI
                 try { _backupService.RedrawPlayer(); }
                 catch (Exception ex) { _logger.LogError(ex, "RedrawPlayer after bulk restore failed"); }
                 _logger.LogDebug("Restore completed (bulk action)");
+                RefreshScanResults(true, "restore-bulk-completed");
                 foreach (var m in restorableFiltered)
                 {
                     try { RefreshModState(m, "restore-bulk"); }
                     catch (Exception ex) { _logger.LogError(ex, "RefreshModState after bulk restore failed for {mod}", m); }
                 }
-                TriggerMetricsRefresh();
                 _ = Task.Run(async () =>
                 {
                     foreach (var m in restorableFiltered)

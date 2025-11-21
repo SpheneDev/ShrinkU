@@ -118,6 +118,7 @@ public sealed partial class ConversionUI : Window, IDisposable
     private readonly ConcurrentDictionary<string, bool> _modsWithBackupCache = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, bool> _modsWithTexBackupCache = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, DateTime> _lastModRefreshAt = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, bool> _modsTouchedLastRun = new(StringComparer.OrdinalIgnoreCase);
     private DateTime _disableActionsUntilUtc = DateTime.MinValue;
     private readonly Dictionary<string, string> _fileOwnerMod = new(StringComparer.OrdinalIgnoreCase);
     private void ClearModCaches(string mod)
@@ -387,14 +388,12 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
                             _modsWithBackupCache[mod] = true;
                             _modsWithPmpCache[mod] = true;
                             RefreshModState(mod, "backup-progress-pmp");
-                            TriggerMetricsRefresh();
-                            _perModSavingsTask = _backupService.ComputePerModSavingsAsync();
-                            _perModSavingsTask.ContinueWith(ps =>
+                            _ = _backupService.ComputeSavingsForModAsync(mod).ContinueWith(ps =>
                             {
-                                if (ps.Status == TaskStatus.RanToCompletion && ps.Result != null)
+                                if (ps.Status == TaskStatus.RanToCompletion)
                                 {
-                                    _cachedPerModSavings = ps.Result;
-                                    _needsUIRefresh = true;
+                                    try { _cachedPerModSavings[mod] = ps.Result; } catch { }
+                                    _uiThreadActions.Enqueue(() => { _perModSavingsRevision++; _footerTotalsDirty = true; _needsUIRefresh = true; });
                                 }
                             }, TaskScheduler.Default);
                             // Warm original sizes cache for this mod from PMP so tooltips reflect immediately
@@ -473,15 +472,12 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
                             catch { }
                         }
                         RefreshScanResults(true, success ? "restore-after-cancel-success" : "restore-after-cancel-fail");
-                        TriggerMetricsRefresh();
-                        // Recompute per-mod savings after restore to refresh Uncompressed/Compressed sizes
-                        _perModSavingsTask = _backupService.ComputePerModSavingsAsync();
-                        _perModSavingsTask.ContinueWith(ps =>
+                        _ = _backupService.ComputeSavingsForModAsync(target).ContinueWith(ps =>
                         {
-                            if (ps.Status == TaskStatus.RanToCompletion && ps.Result != null)
+                            if (ps.Status == TaskStatus.RanToCompletion)
                             {
-                                _cachedPerModSavings = ps.Result;
-                                _needsUIRefresh = true;
+                                try { _cachedPerModSavings[target] = ps.Result; } catch { }
+                                _uiThreadActions.Enqueue(() => { _perModSavingsRevision++; _footerTotalsDirty = true; _needsUIRefresh = true; });
                             }
                         }, TaskScheduler.Default);
                         _ = _backupService.HasBackupForModAsync(target).ContinueWith(bt =>
@@ -510,8 +506,12 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
 
             // Normal completion path: refresh UI without global savings scan
             _cacheService.ClearAll();
-            _logger.LogDebug("Heavy scan triggered: conversion completed");
-            RefreshScanResults(false, "conversion-completed");
+            if (_filterPenumbraUsedOnly)
+            {
+                try { ReloadPenumbraUsedFiles("conversion-completed"); } catch { }
+            }
+            _uiThreadActions.Enqueue(() => { _perModSavingsRevision++; _footerTotalsDirty = true; _needsUIRefresh = true; });
+            _modsTouchedLastRun.Clear();
             _uiThreadActions.Enqueue(() =>
             {
                 _running = false;
@@ -521,7 +521,7 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
         };
         _conversionService.OnConversionCompleted += _onConversionCompleted;
 
-        _onModProgress = e => { _currentModName = e.modName; _currentModIndex = e.current; _totalMods = e.total; _currentModTotalFiles = e.fileTotal; RefreshModState(e.modName, "conversion-progress"); };
+        _onModProgress = e => { if (e.current == 1) { try { _modsTouchedLastRun.Clear(); } catch { } } _currentModName = e.modName; _currentModIndex = e.current; _totalMods = e.total; _currentModTotalFiles = e.fileTotal; try { _modsTouchedLastRun[e.modName] = true; } catch { } RefreshModState(e.modName, "conversion-progress"); };
         _conversionService.OnModProgress += _onModProgress;
 
         // Generic ModsChanged only marks UI for refresh; heavy scan is driven by add/delete.
@@ -596,7 +596,26 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
                         var now = DateTime.UtcNow;
                         if (candidates != null && candidates.Count > 0)
                         {
-                            foreach (var mod in candidates.Keys)
+                            var modsToMark = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                            foreach (var file in candidates.Keys)
+                            {
+                                try
+                                {
+                                    string mod = string.Empty;
+                                    if (!_fileOwnerMod.TryGetValue(file, out mod) || string.IsNullOrWhiteSpace(mod))
+                                    {
+                                        foreach (var kvp in _modPaths)
+                                        {
+                                            var abs = kvp.Value ?? string.Empty;
+                                            if (string.IsNullOrWhiteSpace(abs)) continue;
+                                            if (file.StartsWith(abs, StringComparison.OrdinalIgnoreCase)) { mod = kvp.Key; break; }
+                                        }
+                                    }
+                                    if (!string.IsNullOrWhiteSpace(mod)) modsToMark.Add(mod);
+                                }
+                                catch { }
+                            }
+                            foreach (var mod in modsToMark)
                             {
                                 try
                                 {
@@ -1301,7 +1320,7 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                 var since = now - _lastHeavyScanAt;
                 var allowHeavy = !skipHeavy || force;
                 _logger.LogDebug("Scan decision: origin={origin} skipHeavy={skip} sinceMs={ms} allowHeavyPreLimit={allow}", origin, skipHeavy, (int)since.TotalMilliseconds, allowHeavy);
-                if (allowHeavy && since < TimeSpan.FromSeconds(3))
+                if (allowHeavy && since < TimeSpan.FromSeconds(3) && !force)
                 {
                     _logger.LogDebug("Suppressed heavy scan: rate limit active ({ms} ms since last heavy)", (int)since.TotalMilliseconds);
                     allowHeavy = false;
