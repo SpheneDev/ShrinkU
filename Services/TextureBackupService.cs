@@ -484,7 +484,67 @@ public sealed class TextureBackupService
             catch { }
             indexTrace.Dispose();
 
-            var concurrency = Math.Max(4, Environment.ProcessorCount);
+            var metaTrace = PerfTrace.Step(_logger, "RefreshAllBackupState meta-index");
+            var versionByMod = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            var authorByMod = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                var root = _penumbraIpc.ModDirectory ?? string.Empty;
+                foreach (var mod in mods)
+                {
+                    string absForMeta = string.Empty;
+                    try
+                    {
+                        if (modPaths.TryGetValue(mod, out var relPath) && !string.IsNullOrWhiteSpace(relPath))
+                        {
+                            var normRel = relPath.Replace('/', System.IO.Path.DirectorySeparatorChar).TrimStart(System.IO.Path.DirectorySeparatorChar);
+                            if (!string.IsNullOrWhiteSpace(root))
+                                absForMeta = System.IO.Path.Combine(root, normRel);
+                        }
+                    }
+                    catch { absForMeta = string.Empty; }
+                    if (string.IsNullOrWhiteSpace(absForMeta) || !Directory.Exists(absForMeta))
+                        continue;
+                    var existing = _modStateService.Get(mod);
+                    var needVer = string.IsNullOrWhiteSpace(existing.CurrentVersion);
+                    var needAuth = string.IsNullOrWhiteSpace(existing.CurrentAuthor);
+                    if (!needVer && !needAuth)
+                        continue;
+                    var metaPath = System.IO.Path.Combine(absForMeta, "meta.json");
+                    if (!File.Exists(metaPath))
+                        continue;
+                    try
+                    {
+                        using var fs = new FileStream(metaPath, FileMode.Open, FileAccess.Read, FileShare.Read, 4096, FileOptions.SequentialScan);
+                        using var doc = JsonDocument.Parse(fs);
+                        if (doc.RootElement.TryGetProperty("Version", out var vers) && vers.ValueKind == JsonValueKind.String)
+                        {
+                            var v = vers.GetString() ?? string.Empty;
+                            if (!string.IsNullOrWhiteSpace(v)) versionByMod[mod] = v;
+                        }
+                        else if (doc.RootElement.TryGetProperty("FileVersion", out var fvers) && fvers.ValueKind == JsonValueKind.String)
+                        {
+                            var v = fvers.GetString() ?? string.Empty;
+                            if (!string.IsNullOrWhiteSpace(v)) versionByMod[mod] = v;
+                        }
+                        else if (doc.RootElement.TryGetProperty("VersionString", out var vstr) && vstr.ValueKind == JsonValueKind.String)
+                        {
+                            var v = vstr.GetString() ?? string.Empty;
+                            if (!string.IsNullOrWhiteSpace(v)) versionByMod[mod] = v;
+                        }
+                        if (doc.RootElement.TryGetProperty("Author", out var author) && author.ValueKind == JsonValueKind.String)
+                        {
+                            var a = author.GetString() ?? string.Empty;
+                            if (!string.IsNullOrWhiteSpace(a)) authorByMod[mod] = a;
+                        }
+                    }
+                    catch { }
+                }
+            }
+            catch { }
+            metaTrace.Dispose();
+
+            var concurrency = Math.Min(4, Environment.ProcessorCount);
             using var gate = new SemaphoreSlim(concurrency, concurrency);
             var tasks = new List<Task>(mods.Count);
             foreach (var mod in mods)
@@ -494,6 +554,7 @@ public sealed class TextureBackupService
                     await gate.WaitAsync().ConfigureAwait(false);
                     try
                     {
+                        await Task.Yield();
                         var sw = Stopwatch.StartNew();
                         var modTrace = PerfTrace.Step(_logger, "RefreshAllBackupState mod " + mod);
                         var hasTex = modsWithZip.Contains(mod) || modsInSessions.Contains(mod);
@@ -515,9 +576,10 @@ public sealed class TextureBackupService
                                 abs = GetModAbsolutePath(mod) ?? string.Empty;
                         }
                         catch { abs = GetModAbsolutePath(mod) ?? string.Empty; }
-                        var rel = GetModPenumbraRelativePath(mod);
-                        var ver = GetModVersion(mod) ?? string.Empty;
-                        var auth = GetModAuthor(mod) ?? string.Empty;
+                        var rel = string.Empty;
+                        try { rel = modPaths.TryGetValue(mod, out var rp) ? (rp ?? string.Empty).Replace('\\', '/').TrimEnd('/') : string.Empty; } catch { rel = string.Empty; }
+                        var ver = versionByMod.TryGetValue(mod, out var vv) ? vv : string.Empty;
+                        var auth = authorByMod.TryGetValue(mod, out var aa) ? aa : string.Empty;
                         _modStateService.UpdateCurrentModInfo(mod, abs, rel, ver, auth);
                         string zipName = string.Empty, zipVer = string.Empty;
                         DateTime zipCreated = DateTime.MinValue;
