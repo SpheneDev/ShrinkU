@@ -221,13 +221,13 @@ public sealed partial class ConversionUI
                     var headerHoveredText = ImGui.IsItemHovered();
 
                     if (drawModRow) ImGui.TableSetColumnIndex(0);
-                    bool modSelected = isNonConvertible
+                    bool modSelected = (files.Count == 0)
                         ? _selectedEmptyMods.Contains(mod)
                         : ((_selectedCountByMod.TryGetValue(mod, out var sc) ? sc : 0) >= files.Count);
                     var automaticMode = _configService.Current.TextureProcessingMode == TextureProcessingMode.Automatic;
                     var disableCheckbox = false;
                     if (drawModRow)
-                        disableCheckbox = excluded || (automaticMode && !isOrphan && (convertedAll >= totalAll));
+                        disableCheckbox = ((!isNonConvertible) && files.Count == 0) || excluded || (automaticMode && !isOrphan && (convertedAll >= totalAll));
                     if (drawModRow) ImGui.BeginDisabled(disableCheckbox);
                     if (drawModRow && ImGui.Checkbox($"##modsel-{mod}", ref modSelected))
                     {

@@ -1,4 +1,5 @@
 using Dalamud.Bindings.ImGui;
+using Dalamud.Interface.Utility.Raii;
 using Dalamud.Interface;
 using System;
 using System.Collections.Generic;
@@ -636,7 +637,7 @@ public sealed partial class ConversionUI
         bool hasRestorableMods = restorableMods > 0;
         bool hasOnlyRestorableMods = hasRestorableMods && !hasConvertableMods;
 
-        ImGui.BeginDisabled(ActionsDisabled() || hasOnlyRestorableMods || !hasConvertableMods);
+        
         var selectedEmptyModsBtn = _selectedEmptyMods.Where(m => !IsModExcludedByTags(m)).ToList();
         var modsWithSelectionsBtn = _selectedCountByMod.Where(kv => kv.Value > 0 && !IsModExcludedByTags(kv.Key)).Select(kv => kv.Key).ToList();
         var selectedModsAll = new HashSet<string>(modsWithSelectionsBtn, StringComparer.OrdinalIgnoreCase);
@@ -658,7 +659,7 @@ public sealed partial class ConversionUI
         ImGui.PushStyleColor(ImGuiCol.ButtonHovered, ShrinkUColors.AccentHovered);
         ImGui.PushStyleColor(ImGuiCol.ButtonActive, ShrinkUColors.AccentActive);
         ImGui.PushStyleColor(ImGuiCol.Text, ShrinkUColors.ButtonTextOnAccent);
-        ImGui.BeginDisabled(ActionsDisabled() || nonConvertibleSelectedMods.Count == 0);
+        using (var _d = ImRaii.Disabled(ActionsDisabled() || nonConvertibleSelectedMods.Count == 0))
         if (ImGui.Button("Backup"))
         {
             _running = true;
@@ -685,7 +686,7 @@ public sealed partial class ConversionUI
                 _uiThreadActions.Enqueue(() => { _running = false; ResetBothProgress(); });
             }, TaskScheduler.Default);
         }
-        ImGui.EndDisabled();
+        
         ImGui.PopStyleColor(4);
 
         ImGui.SameLine();
@@ -694,7 +695,7 @@ public sealed partial class ConversionUI
         ImGui.PushStyleColor(ImGuiCol.ButtonHovered, ShrinkUColors.AccentHovered);
         ImGui.PushStyleColor(ImGuiCol.ButtonActive, ShrinkUColors.AccentActive);
         ImGui.PushStyleColor(ImGuiCol.Text, ShrinkUColors.ButtonTextOnAccent);
-        ImGui.BeginDisabled(ActionsDisabled() || (convertibleSelectedMods.Count == 0 && GetConvertableTextures().Count == 0));
+        using (var _d2 = ImRaii.Disabled(ActionsDisabled() || (convertibleSelectedMods.Count == 0 && GetConvertableTextures().Count == 0)))
         if (ImGui.Button("Convert"))
         {
             _running = true;
@@ -740,7 +741,7 @@ public sealed partial class ConversionUI
                 }
             });
         }
-        ImGui.EndDisabled();
+        
         ImGui.PopStyleColor(4);
 
         ImGui.SameLine();
@@ -760,7 +761,7 @@ public sealed partial class ConversionUI
         bool canRestore = restorableFiltered.Count > 0;
         bool someSkippedByAuto = automaticMode && restorableFiltered.Count < restorableModsForAction.Count;
 
-        ImGui.BeginDisabled(ActionsDisabled() || !canRestore);
+        using (var _d3 = ImRaii.Disabled(ActionsDisabled() || !canRestore))
         ImGui.PushStyleColor(ImGuiCol.Button, ShrinkUColors.Accent);
         ImGui.PushStyleColor(ImGuiCol.ButtonHovered, ShrinkUColors.AccentHovered);
         ImGui.PushStyleColor(ImGuiCol.ButtonActive, ShrinkUColors.AccentActive);
@@ -876,7 +877,7 @@ public sealed partial class ConversionUI
             });
         }
         ImGui.PopStyleColor(4);
-        ImGui.EndDisabled();
+        
 
         if (ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
         {

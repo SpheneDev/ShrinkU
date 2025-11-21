@@ -88,8 +88,8 @@ public sealed class Plugin : IDalamudPlugin
                 catch (Exception ex) { _logger.LogError(ex, "Failed to open conversion UI after first run"); }
             }
         };
-        _windowSystem.AddWindow(_conversionUi);
         _windowSystem.AddWindow(_settingsUi);
+        _windowSystem.AddWindow(_conversionUi);
         _windowSystem.AddWindow(_firstRunUi);
         _windowSystem.AddWindow(_releaseChangelogUi);
         _windowSystem.AddWindow(_startupProgressUi);

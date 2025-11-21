@@ -9,6 +9,7 @@ using System.Threading.Tasks;
 using System.Linq;
 using Microsoft.Extensions.Logging;
 using Dalamud.Interface;
+using Dalamud.Interface.Utility.Raii;
 using ShrinkU.Configuration;
 using ShrinkU.Services;
 namespace ShrinkU.UI;
@@ -64,7 +65,8 @@ public sealed partial class ConversionUI
                 catch (Exception ex) { _logger.LogError(ex, "OpenModInPenumbra failed for {mod}", mod); }
             }
             var hasTexBk = GetOrQueryModTextureBackup(mod);
-            ImGui.BeginDisabled(!hasTexBk);
+            using (var _d = ImRaii.Disabled(!hasTexBk))
+            {
             if (ImGui.MenuItem("Restore textures"))
             {
                 _running = true;
@@ -99,7 +101,7 @@ public sealed partial class ConversionUI
                         _uiThreadActions.Enqueue(() => { _running = false; });
                     });
             }
-            ImGui.EndDisabled();
+            }
             if (!hasTexBk) ShowTooltip("No texture backups available for this mod.");
             if (ImGui.MenuItem("Restore PMP"))
             {
@@ -110,12 +112,13 @@ public sealed partial class ConversionUI
         
 
         ImGui.TableSetColumnIndex(0);
-        bool modSelected = isNonConvertible
+        bool modSelected = (files.Count == 0)
             ? _selectedEmptyMods.Contains(mod)
             : ((_selectedCountByMod.TryGetValue(mod, out var sc) ? sc : 0) >= files.Count);
         var automaticMode = _configService.Current.TextureProcessingMode == TextureProcessingMode.Automatic;
-        var disableCheckbox = excluded || (automaticMode && !isOrphan && (convertedAll >= totalAll));
-        ImGui.BeginDisabled(disableCheckbox);
+        var disableCheckbox = ((!isNonConvertible) && files.Count == 0) || excluded || (automaticMode && !isOrphan && (convertedAll >= totalAll));
+        using (var _d = ImRaii.Disabled(disableCheckbox))
+        {
         if (ImGui.Checkbox($"##modsel-{mod}", ref modSelected))
         {
             if (isNonConvertible)
@@ -136,7 +139,7 @@ public sealed partial class ConversionUI
                 }
             }
         }
-        ImGui.EndDisabled();
+        }
         if (disableCheckbox && ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
             ImGui.SetTooltip(automaticMode ? "Automatic mode: mod cannot be selected for conversion." : "Mod excluded by tags");
         else
@@ -263,7 +266,6 @@ public sealed partial class ConversionUI
         var hasTexBackup = GetOrQueryModTextureBackup(mod);
         var hasPmpBackup = GetOrQueryModPmp(mod);
         var anyBackup = hasBackup || hasTexBackup || hasPmpBackup;
-        ImGui.BeginDisabled(ActionsDisabled());
         if (totalAll > 0)
         {
             var autoMode = _configService.Current.TextureProcessingMode == TextureProcessingMode.Automatic;
@@ -275,7 +277,8 @@ public sealed partial class ConversionUI
                 ImGui.PushStyleColor(ImGuiCol.ButtonActive, ShrinkUColors.ConvertButtonActive);
                 ImGui.PushStyleColor(ImGuiCol.Text, ShrinkUColors.ButtonTextOnAccent);
                 var convertDisabled = excluded || (hasBackup && (convertedAll >= totalAll));
-                ImGui.BeginDisabled(convertDisabled);
+                using (var _d = ImRaii.Disabled(ActionsDisabled() || convertDisabled))
+                {
                 if (ImGui.Button($"Convert##convert-{mod}", new Vector2(60, 0)))
                 {
                     var allFilesForMod = files;
@@ -307,13 +310,13 @@ public sealed partial class ConversionUI
                 if (convertDisabled && ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
                     ShowTooltip(convertedAll >= totalAll ? "All textures already converted." : (excluded ? "Mod excluded by tags." : "Processing in progress."));
                 ImGui.PopStyleColor(4);
-                ImGui.EndDisabled();
                 if (!convertDisabled)
                 {
                     var msg = _configService.Current.IncludeHiddenModTexturesOnConvert
                         ? "Convert all textures for this mod."
                         : "Convert all visible textures for this mod.";
                     ShowTooltip(msg);
+                }
                 }
             }
             else
@@ -323,7 +326,8 @@ public sealed partial class ConversionUI
                 ImGui.PushStyleColor(ImGuiCol.ButtonActive, ShrinkUColors.RestoreButtonActive);
                 ImGui.PushStyleColor(ImGuiCol.Text, ShrinkUColors.ButtonTextOnAccent);
                 var restoreDisabledByAuto = autoMode && !isOrphan;
-                ImGui.BeginDisabled(excluded || restoreDisabledByAuto);
+                using (var _d = ImRaii.Disabled(ActionsDisabled() || excluded || restoreDisabledByAuto))
+                {
                 if (ImGui.Button($"Restore##restore-{mod}", new Vector2(60, 0)))
                 {
                     var hasPmpForClick = GetOrQueryModPmp(mod);
@@ -373,9 +377,9 @@ public sealed partial class ConversionUI
                 if ((excluded || restoreDisabledByAuto) && ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
                     ShowTooltip(excluded ? "Mod excluded by tags." : "Automatic mode: restore disabled for installed mods.");
                 ImGui.PopStyleColor(4);
-                ImGui.EndDisabled();
                 if (!(excluded || restoreDisabledByAuto))
                     ShowTooltip("Restore backups for this mod.");
+                }
             }
         }
 
@@ -389,6 +393,8 @@ public sealed partial class ConversionUI
                     ImGui.PushStyleColor(ImGuiCol.ButtonHovered, ShrinkUColors.ReinstallButtonHovered);
                     ImGui.PushStyleColor(ImGuiCol.ButtonActive, ShrinkUColors.ReinstallButtonActive);
                     ImGui.PushStyleColor(ImGuiCol.Text, ShrinkUColors.ButtonTextOnAccent);
+                    using (var _d = ImRaii.Disabled(ActionsDisabled()))
+                    {
                     if (ImGui.Button($"Reinstall##reinstall-{mod}", new Vector2(80, 0)))
                     {
                         _running = true;
@@ -415,6 +421,7 @@ public sealed partial class ConversionUI
                             }, TaskScheduler.Default);
                     }
                     ShowTooltip("Reinstall mod from PMP backup.");
+                    }
                     ImGui.PopStyleColor(4);
                 }
                 else
@@ -423,6 +430,8 @@ public sealed partial class ConversionUI
                     ImGui.PushStyleColor(ImGuiCol.ButtonHovered, ShrinkUColors.RestoreButtonHovered);
                     ImGui.PushStyleColor(ImGuiCol.ButtonActive, ShrinkUColors.RestoreButtonActive);
                     ImGui.PushStyleColor(ImGuiCol.Text, ShrinkUColors.ButtonTextOnAccent);
+                    using (var _d = ImRaii.Disabled(ActionsDisabled()))
+                    {
                     if (ImGui.Button($"Restore##restore-{mod}", new Vector2(60, 0)))
                     {
                         _running = true;
@@ -448,6 +457,7 @@ public sealed partial class ConversionUI
                             });
                     }
                     ShowTooltip("Restore textures from backup.");
+                    }
                     ImGui.PopStyleColor(4);
                 }
             }
@@ -458,7 +468,8 @@ public sealed partial class ConversionUI
                 ImGui.PushStyleColor(ImGuiCol.ButtonActive, ShrinkUColors.AccentActive);
                 ImGui.PushStyleColor(ImGuiCol.Text, ShrinkUColors.ButtonTextOnAccent);
                 var backupLabel = $"Backup##backup-{mod}";
-                ImGui.BeginDisabled(isOrphan || ActionsDisabled());
+                using (var _d = ImRaii.Disabled(isOrphan || ActionsDisabled()))
+                {
                 if (ImGui.Button(backupLabel, new Vector2(60, 0)))
                 {
                     _running = true;
@@ -494,13 +505,12 @@ public sealed partial class ConversionUI
                             _uiThreadActions.Enqueue(() => { _running = false; ResetBothProgress(); });
                         }, TaskScheduler.Default);
                 }
-                ImGui.EndDisabled();
                 if (ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
                     ShowTooltip("Create a full mod backup (PMP).");
                 ImGui.PopStyleColor(4);
+                }
             }
         }
-        ImGui.EndDisabled();
 
         var canInstall = false;
         if (isOrphan && hasPmpBackup)
@@ -518,7 +528,7 @@ public sealed partial class ConversionUI
             ImGui.PushStyleColor(ImGuiCol.ButtonHovered, ShrinkUColors.AccentHovered);
             ImGui.PushStyleColor(ImGuiCol.ButtonActive, ShrinkUColors.AccentActive);
             ImGui.PushStyleColor(ImGuiCol.Text, ShrinkUColors.ButtonTextOnAccent);
-            ImGui.BeginDisabled(!canInstall);
+            using (var _d = ImRaii.Disabled(ActionsDisabled() || !canInstall))
             if (ImGui.Button($"Install##install-{mod}", new Vector2(60, 0)))
             {
                 _running = true;
@@ -559,7 +569,6 @@ public sealed partial class ConversionUI
             }
             ShowTooltip("Install mod from PMP backup if Penumbra removed it.");
             ImGui.PopStyleColor(4);
-            ImGui.EndDisabled();
             ImGui.SameLine();
         }
 
