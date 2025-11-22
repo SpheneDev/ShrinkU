@@ -400,7 +400,7 @@ public sealed partial class ConversionUI
                     _cachedPerModSavings.TryGetValue(mod, out var modStats);
                     var stateSnap = _modStateSnapshot ?? _modStateService.Snapshot();
                     stateSnap.TryGetValue(mod, out var modState);
-                    long modOriginalBytes = modState != null && modState.ComparedFiles > 0 ? modState.OriginalBytes : GetOrQueryModOriginalTotal(mod);
+                    long modOriginalBytes = modState != null && modState.OriginalBytes > 0 ? modState.OriginalBytes : GetOrQueryModOriginalTotal(mod);
                     var hideStatsForNoTextures = totalAll == 0;
                     if (drawModRow && hideStatsForNoTextures)
                         ImGui.TextUnformatted("");

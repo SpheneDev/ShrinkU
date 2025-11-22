@@ -42,19 +42,9 @@ public sealed partial class ConversionUI
 
             if (!_modPaths.TryGetValue(mod, out var fullPath) || string.IsNullOrWhiteSpace(fullPath))
             {
-                var hasBackupAny = GetOrQueryModBackup(mod) || GetOrQueryModTextureBackup(mod) || GetOrQueryModPmp(mod);
-                if (hasBackupAny)
-                {
-                    if (!root.Children.TryGetValue("Uninstalled", out var uninst2))
-                        root.Children["Uninstalled"] = uninst2 = new TableCatNode("Uninstalled");
-                    uninst2.Mods.Add(mod);
-                }
-                else
-                {
-                    if (!root.Children.TryGetValue("(Uncategorized)", out var unc))
-                        root.Children["(Uncategorized)"] = unc = new TableCatNode("(Uncategorized)");
-                    unc.Mods.Add(mod);
-                }
+                if (!root.Children.TryGetValue("(Uncategorized)", out var unc))
+                    root.Children["(Uncategorized)"] = unc = new TableCatNode("(Uncategorized)");
+                unc.Mods.Add(mod);
                 continue;
             }
 

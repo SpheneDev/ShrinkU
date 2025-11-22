@@ -241,7 +241,7 @@ public sealed partial class ConversionUI
             }
             _visibleByModSig = visibleSig;
             _modStateSnapshot = snap;
-            _modPaths = snap.ToDictionary(
+            var paths = snap.ToDictionary(
                 kv => kv.Key,
                 kv => {
                     var folder = kv.Value?.PenumbraRelativePath ?? string.Empty;
@@ -251,6 +251,23 @@ public sealed partial class ConversionUI
                     return string.Concat(folder, "/", leaf);
                 },
                 StringComparer.OrdinalIgnoreCase);
+            try { paths.Remove("mod_state"); } catch { }
+            foreach (var kvp in paths)
+            {
+                var key = kvp.Key;
+                var val = kvp.Value ?? string.Empty;
+                if (!string.IsNullOrWhiteSpace(val))
+                    _modPathsStable[key] = val;
+            }
+            _modPaths = new Dictionary<string, string>(_modPathsStable, StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                var sb = new System.Text.StringBuilder();
+                foreach (var kv in _modPaths.OrderBy(k => k.Key, StringComparer.OrdinalIgnoreCase))
+                    sb.Append(kv.Key).Append('=').Append(kv.Value).Append(';');
+                _modPathsSig = sb.ToString();
+            }
+            catch { _modPathsSig = _modPaths.Count.ToString(); }
             _modDisplayNames = snap.ToDictionary(kv => kv.Key, kv => kv.Value?.DisplayName ?? string.Empty, StringComparer.OrdinalIgnoreCase);
             _selectedCountByMod.Clear();
             var sourceKeysCount = _scannedByMod.Count > 0

@@ -47,6 +47,7 @@ public sealed partial class ConversionUI : Window, IDisposable
 
     // Folder structure and collection state
     private Dictionary<string, string> _modPaths = new(StringComparer.OrdinalIgnoreCase);
+    private Dictionary<string, string> _modPathsStable = new(StringComparer.OrdinalIgnoreCase);
     private string _modPathsSig = string.Empty;
     private bool _loadingModPaths = false;
     private Dictionary<Guid, string> _collections = new();
@@ -617,18 +618,28 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
                 _loadingModPaths = true;
                 _uiThreadActions.Enqueue(() =>
                 {
-                    var snap = _modStateService.Snapshot();
-                    _modPaths = snap.ToDictionary(
-                        kv => kv.Key,
-                        kv => {
-                            var folder = kv.Value?.PenumbraRelativePath ?? string.Empty;
-                            var leaf = kv.Value?.RelativeModName ?? string.Empty;
-                            if (string.IsNullOrWhiteSpace(folder)) return leaf ?? string.Empty;
-                            if (string.IsNullOrWhiteSpace(leaf)) return folder ?? string.Empty;
-                            return string.Concat(folder, "/", leaf);
-                        },
-                        StringComparer.OrdinalIgnoreCase);
-                    try { _modPaths.Remove("mod_state"); } catch { }
+                var snap = _modStateService.Snapshot();
+                var paths = snap.ToDictionary(
+                    kv => kv.Key,
+                    kv => {
+                        var folder = kv.Value?.PenumbraRelativePath ?? string.Empty;
+                        var leaf = kv.Value?.RelativeModName ?? string.Empty;
+                        if (string.IsNullOrWhiteSpace(folder)) return leaf ?? string.Empty;
+                        if (string.IsNullOrWhiteSpace(leaf)) return folder ?? string.Empty;
+                        return string.Concat(folder, "/", leaf);
+                    },
+                    StringComparer.OrdinalIgnoreCase);
+                    try { paths.Remove("mod_state"); } catch { }
+                    foreach (var kvp in paths)
+                    {
+                        var key = kvp.Key;
+                        var val = kvp.Value ?? string.Empty;
+                        if (!string.IsNullOrWhiteSpace(val))
+                            _modPathsStable[key] = val;
+                        else if (_modPathsStable.TryGetValue(key, out var prev) && !string.IsNullOrWhiteSpace(prev))
+                            _modPathsStable[key] = prev;
+                    }
+                    _modPaths = new Dictionary<string, string>(_modPathsStable, StringComparer.OrdinalIgnoreCase);
                     try
                     {
                         var sb = new System.Text.StringBuilder();
@@ -1083,7 +1094,7 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
         {
             _loadingModPaths = true;
             var snap = _modStateService.Snapshot();
-            _modPaths = snap.ToDictionary(
+            var paths2 = snap.ToDictionary(
                 kv => kv.Key,
                 kv => {
                     var folder = kv.Value?.PenumbraRelativePath ?? string.Empty;
@@ -1093,7 +1104,15 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
                     return string.Concat(folder, "/", leaf);
                 },
                 StringComparer.OrdinalIgnoreCase);
-            try { _modPaths.Remove("mod_state"); } catch { }
+            try { paths2.Remove("mod_state"); } catch { }
+            foreach (var kvp in paths2)
+            {
+                var key = kvp.Key;
+                var val = kvp.Value ?? string.Empty;
+                if (!string.IsNullOrWhiteSpace(val))
+                    _modPathsStable[key] = val;
+            }
+            _modPaths = new Dictionary<string, string>(_modPathsStable, StringComparer.OrdinalIgnoreCase);
             try
             {
                 var sb = new System.Text.StringBuilder();
@@ -1619,7 +1638,14 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                     }
                     if (paths != null)
                     {
-                        _modPaths = paths;
+                        foreach (var kvp in paths)
+                        {
+                            var key = kvp.Key;
+                            var val = kvp.Value ?? string.Empty;
+                            if (!string.IsNullOrWhiteSpace(val))
+                                _modPathsStable[key] = val;
+                        }
+                        _modPaths = new Dictionary<string, string>(_modPathsStable, StringComparer.OrdinalIgnoreCase);
                         try { _modPaths.Remove("mod_state"); } catch { }
                         try
                         {
