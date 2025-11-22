@@ -266,7 +266,7 @@ public sealed partial class ConversionUI
 
         ImGui.TableSetColumnIndex(3);
         _cachedPerModSavings.TryGetValue(mod, out var modStats);
-        long modOriginalBytes = modState != null && modState.ComparedFiles > 0 ? modState.OriginalBytes : GetOrQueryModOriginalTotal(mod);
+        long modOriginalBytes = modState != null && modState.OriginalBytes > 0 ? modState.OriginalBytes : GetOrQueryModOriginalTotal(mod);
         var hideStatsForNoTextures = totalAll == 0;
         if (hideStatsForNoTextures)
             ImGui.TextUnformatted("");

@@ -106,7 +106,8 @@ public sealed class ModStateService
         lock (_lock)
         {
             var e = Get(mod);
-            e.OriginalBytes = originalBytes;
+            if (e.OriginalBytes <= 0)
+                e.OriginalBytes = originalBytes;
             e.CurrentBytes = currentBytes;
             e.ComparedFiles = comparedFiles;
             e.LastUpdatedUtc = DateTime.UtcNow;

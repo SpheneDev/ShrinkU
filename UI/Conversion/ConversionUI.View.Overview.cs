@@ -554,18 +554,12 @@ public sealed partial class ConversionUI
                 long modOrig = 0;
                 long modCur = 0;
 
-                if (_cachedPerModSavings.TryGetValue(m, out var stats) && stats != null)
-                {
-                    if (stats.OriginalBytes > 0) modOrig = stats.OriginalBytes;
-                    if (stats.CurrentBytes > 0) modCur = stats.CurrentBytes;
-                }
-                if (modOrig <= 0)
-                {
-                    if (snap.TryGetValue(m, out var st) && st != null && st.OriginalBytes > 0)
-                        modOrig = st.OriginalBytes;
-                    else
-                        modOrig = GetOrQueryModOriginalTotal(m);
-                }
+                if (snap.TryGetValue(m, out var st) && st != null && st.OriginalBytes > 0)
+                    modOrig = st.OriginalBytes;
+                else
+                    modOrig = GetOrQueryModOriginalTotal(m);
+                if (_cachedPerModSavings.TryGetValue(m, out var stats) && stats != null && stats.CurrentBytes > 0)
+                    modCur = stats.CurrentBytes;
                 if (modCur <= 0)
                 {
                     if (snap.TryGetValue(m, out var st2) && st2 != null && st2.CurrentBytes > 0)

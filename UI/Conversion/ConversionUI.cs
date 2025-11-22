@@ -1858,13 +1858,14 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
         ImGui.PopStyleColor();
     }
 
-    // Get per-mod original total bytes, preferring computed savings; fallback to latest backup manifest.
+    // Get per-mod original total bytes, preferring ModState; fallback to computed or backup manifest.
     private long GetOrQueryModOriginalTotal(string mod)
     {
         try
         {
-            if (_cachedPerModSavings.TryGetValue(mod, out var modStats) && modStats != null && modStats.OriginalBytes > 0)
-                return modStats.OriginalBytes;
+            var snap = _modStateSnapshot ?? _modStateService.Snapshot();
+            if (snap.TryGetValue(mod, out var e) && e != null && e.OriginalBytes > 0)
+                return e.OriginalBytes;
 
             if (_cachedPerModOriginalSizes.TryGetValue(mod, out var map) && map != null && map.Count > 0)
                 return map.Values.Sum();
