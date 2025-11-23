@@ -31,7 +31,36 @@ public sealed class TextureBackupService
         _configService = configService;
         _penumbraIpc = penumbraIpc;
         _modStateService = modStateService;
+        try
+        {
+            _penumbraIpc.ModPathChanged += OnPenumbraModPathChanged;
+        }
+        catch { }
     }
+
+    private void OnPenumbraModPathChanged(string modDir, string fullPath)
+    {
+        try
+        {
+            var e = _modStateService.Get(modDir);
+            var norm = (fullPath ?? string.Empty).Replace('\\', '/').Trim('/');
+            string relFolder = string.Empty;
+            string relLeaf = string.Empty;
+            var idx = norm.LastIndexOf('/');
+            if (idx >= 0)
+            {
+                relFolder = norm.Substring(0, idx);
+                relLeaf = norm.Substring(idx + 1);
+            }
+            else
+            {
+                relLeaf = norm;
+            }
+            _modStateService.UpdateCurrentModInfo(modDir, e.ModAbsolutePath ?? string.Empty, relFolder, e.CurrentVersion ?? string.Empty, e.CurrentAuthor ?? string.Empty, relLeaf);
+        }
+        catch { }
+    }
+
 
     // Verification result for restore operations
     public sealed class RestoreVerificationResult
@@ -163,6 +192,85 @@ public sealed class TextureBackupService
         {
             return null;
         }
+    }
+
+    public void SetSavingEnabled(bool enabled)
+    {
+        try { _modStateService.SetSavingEnabled(enabled); } catch { }
+    }
+
+    public void SaveModState()
+    {
+        try { _modStateService.Save(); } catch { }
+    }
+
+    public async Task PopulateModPathsForMissingModsAsync(CancellationToken token = default)
+    {
+        try
+        {
+            var snapshot = _modStateService.Snapshot();
+            var mods = new List<string>();
+            try
+            {
+                var list = _penumbraIpc.GetModList();
+                if (list != null && list.Count > 0)
+                    mods.AddRange(list.Keys.Where(k => !string.IsNullOrWhiteSpace(k)));
+            }
+            catch { }
+            if (mods.Count == 0)
+                return;
+
+            var missing = mods.Where(m =>
+            {
+                var e = snapshot.TryGetValue(m, out var s) ? s : null;
+                if (e == null) return true;
+                var rel = e.PenumbraRelativePath ?? string.Empty;
+                var leaf = e.RelativeModName ?? string.Empty;
+                return string.IsNullOrWhiteSpace(rel) || string.IsNullOrWhiteSpace(leaf);
+            }).ToList();
+            if (missing.Count == 0)
+                return;
+
+            _modStateService.BeginBatch();
+            try
+            {
+                foreach (var mod in missing)
+                {
+                    if (token.IsCancellationRequested) break;
+                    try
+                    {
+                        var abs = GetModAbsolutePath(mod) ?? string.Empty;
+                        var disp = await _penumbraIpc.GetModDisplayNameAsync(mod).ConfigureAwait(false);
+                        var (ec, fullRel, _, _) = _penumbraIpc.GetModPath(mod);
+                        var norm = (fullRel ?? string.Empty).Replace('\\', '/').Trim('/');
+                        string relFolder = string.Empty;
+                        string relLeaf = string.Empty;
+                        var idx = norm.LastIndexOf('/');
+                        if (idx >= 0)
+                        {
+                            relFolder = norm.Substring(0, idx);
+                            relLeaf = norm.Substring(idx + 1);
+                        }
+                        else
+                        {
+                            relLeaf = norm;
+                        }
+                        var ver = GetModVersion(mod) ?? string.Empty;
+                        var auth = GetModAuthor(mod) ?? string.Empty;
+                        _modStateService.UpdateCurrentModInfo(mod, abs, relFolder, ver, auth, relLeaf);
+                        if (!string.IsNullOrWhiteSpace(disp))
+                            _modStateService.UpdateDisplayAndTags(mod, disp, Array.Empty<string>());
+                    }
+                    catch { }
+                    await Task.Yield();
+                }
+            }
+            finally
+            {
+                _modStateService.EndBatch();
+            }
+        }
+        catch { }
     }
 
     private string GetModPenumbraRelativePath(string modFolder)

@@ -126,15 +126,15 @@ public sealed class ModStateService
         {
             var e = Get(mod);
             var abs = absolutePath ?? string.Empty;
-            var rel = relativePath ?? string.Empty;
+            var rel = string.IsNullOrWhiteSpace(relativePath) ? (e.PenumbraRelativePath ?? string.Empty) : relativePath;
             var ver = version ?? string.Empty;
             var auth = author ?? string.Empty;
-            var rname = relativeModName ?? string.Empty;
-            bool changed = !string.Equals(e.ModAbsolutePath, abs, StringComparison.Ordinal)
-                || !string.Equals(e.PenumbraRelativePath, rel, StringComparison.Ordinal)
-                || !string.Equals(e.CurrentVersion, ver, StringComparison.Ordinal)
-                || !string.Equals(e.CurrentAuthor, auth, StringComparison.Ordinal)
-                || !string.Equals(e.RelativeModName, rname, StringComparison.Ordinal);
+            var rname = string.IsNullOrWhiteSpace(relativeModName) ? (e.RelativeModName ?? string.Empty) : relativeModName;
+            bool changed = !string.Equals(e.ModAbsolutePath ?? string.Empty, abs ?? string.Empty, StringComparison.Ordinal)
+                || !string.Equals(e.PenumbraRelativePath ?? string.Empty, rel ?? string.Empty, StringComparison.Ordinal)
+                || !string.Equals(e.CurrentVersion ?? string.Empty, ver ?? string.Empty, StringComparison.Ordinal)
+                || !string.Equals(e.CurrentAuthor ?? string.Empty, auth ?? string.Empty, StringComparison.Ordinal)
+                || !string.Equals(e.RelativeModName ?? string.Empty, rname ?? string.Empty, StringComparison.Ordinal);
             if (!changed) return;
             e.ModAbsolutePath = abs;
             e.PenumbraRelativePath = rel;
@@ -435,17 +435,47 @@ public sealed class ModStateService
                 JsonSerializer.Serialize(writer, _state, new JsonSerializerOptions { WriteIndented = true });
                 writer.Flush();
             }
-            try
+            var moved = false;
+            for (int i = 0; i < 8 && !moved; i++)
             {
-                if (File.Exists(path))
-                    File.Replace(tmp, path, null);
-                else
-                    File.Move(tmp, path);
+                try
+                {
+                    if (File.Exists(path))
+                        File.Replace(tmp, path, null);
+                    else
+                        File.Move(tmp, path);
+                    moved = true;
+                }
+                catch
+                {
+                    try { if (File.Exists(path)) File.Delete(path); } catch { }
+                    try
+                    {
+                        File.Move(tmp, path);
+                        moved = true;
+                    }
+                    catch
+                    {
+                        try { System.Threading.Thread.Sleep(50); } catch { }
+                    }
+                }
             }
-            catch
+            if (!moved)
             {
-                try { if (File.Exists(path)) File.Delete(path); } catch { }
-                File.Move(tmp, path);
+                try
+                {
+                    using (var fs = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.ReadWrite, 65536, FileOptions.SequentialScan))
+                    {
+                        using var writer = new Utf8JsonWriter(fs, new JsonWriterOptions { Indented = true });
+                        JsonSerializer.Serialize(writer, _state, new JsonSerializerOptions { WriteIndented = true });
+                        writer.Flush();
+                    }
+                }
+                catch
+                {
+                    try { if (File.Exists(path)) File.Delete(path); } catch { }
+                    File.Move(tmp, path);
+                }
             }
             var elapsedMs = (int)Math.Round(sw.Elapsed.TotalMilliseconds);
             try
