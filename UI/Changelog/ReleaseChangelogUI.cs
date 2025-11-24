@@ -65,6 +65,14 @@ public sealed class ReleaseChangelogUI : Window
         _ = LoadAsync();
     }
 
+    public void OpenLatest()
+    {
+        _loading = true;
+        _entries = new List<ReleaseChangelogViewEntry>();
+        IsOpen = true;
+        _ = LoadAsync();
+    }
+
     private async Task LoadAsync()
     {
         try
