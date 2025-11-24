@@ -7,6 +7,7 @@ using System;
 using System.IO;
 using System.Linq;
 using System.Collections.Generic;
+using ShrinkU.Helpers;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Text.Json;
@@ -224,6 +225,7 @@ public sealed class PenumbraIpc : IDisposable
 
     // Event surface for consumers
     public event Action? ModsChanged;
+    public event Action<string, string>? ModPathChanged;
     public event Action<string>? ModAdded;
     public event Action<string>? ModDeleted;
     public event Action<string, string>? ModMoved;
@@ -265,6 +267,7 @@ public sealed class PenumbraIpc : IDisposable
                 }
                 catch { _lastPaths = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase); }
 
+                DateTime lastBroadcastUtc = DateTime.MinValue;
                 while (!token.IsCancellationRequested)
                 {
                     try
@@ -280,20 +283,22 @@ public sealed class PenumbraIpc : IDisposable
                         foreach (var kv in current)
                         {
                             var dir = kv.Key;
-                            var path = kv.Value ?? string.Empty;
+                            var path = (kv.Value ?? string.Empty).Replace('\\', '/').TrimEnd('/');
                             if (_lastPaths.TryGetValue(dir, out var oldPath))
                             {
-                                if (!string.Equals(oldPath, path, StringComparison.Ordinal))
+                                var oldNorm = (oldPath ?? string.Empty).Replace('\\', '/').TrimEnd('/');
+                                if (!string.Equals(oldNorm, path, StringComparison.Ordinal))
                                 {
                                     anyChange = true;
                                     _logger.LogDebug("Penumbra mod path changed (watcher): {dir} : {old} -> {new}", dir, oldPath, path);
+                                    try { ModPathChanged?.Invoke(dir, path); } catch { }
                                 }
                             }
                             else
                             {
-                                // Newly discovered mod
                                 anyChange = true;
                                 _logger.LogDebug("Penumbra mod path discovered (watcher): {dir} : {new}", dir, path);
+                                try { ModPathChanged?.Invoke(dir, path); } catch { }
                             }
                         }
 
@@ -309,10 +314,33 @@ public sealed class PenumbraIpc : IDisposable
 
                         if (anyChange)
                         {
-                            _lastPaths = current;
-                            // Broadcast a single ModsChanged to refresh UI
-                            _logger.LogDebug("Penumbra ModsChanged broadcast: source=PathWatcher");
-                            try { ModsChanged?.Invoke(); } catch { }
+                            var confirm = await GetModPathsAsync().ConfigureAwait(false);
+                            bool confirmed = true;
+                            try
+                            {
+                                if (confirm.Count == current.Count)
+                                {
+                                    confirmed = confirm.Any(kv =>
+                                        {
+                                            var p1 = (kv.Value ?? string.Empty).Replace('\\', '/').TrimEnd('/');
+                                            var p0 = current.TryGetValue(kv.Key, out var v0) ? (v0 ?? string.Empty).Replace('\\', '/').TrimEnd('/') : string.Empty;
+                                            return !string.Equals(p1, p0, StringComparison.Ordinal);
+                                        });
+                                }
+                            }
+                            catch { confirmed = true; }
+                            var now = DateTime.UtcNow;
+                            if (confirmed && (now - lastBroadcastUtc) > TimeSpan.FromSeconds(5))
+                            {
+                                _lastPaths = confirm;
+                                _logger.LogDebug("Penumbra ModsChanged broadcast: source=PathWatcher");
+                                try { ModsChanged?.Invoke(); } catch { }
+                                lastBroadcastUtc = now;
+                            }
+                            else
+                            {
+                                _lastPaths = current;
+                            }
                         }
                     }
                     catch (TaskCanceledException) { }
@@ -351,6 +379,7 @@ public sealed class PenumbraIpc : IDisposable
             return;
         }
 
+        var traceTotal = PerfTrace.Step(_logger, "Penumbra Convert total");
         int current = 0;
         foreach (var kvp in textures)
         {
@@ -362,8 +391,10 @@ public sealed class PenumbraIpc : IDisposable
 
             try
             {
+                var traceOne = PerfTrace.Step(_logger, $"Penumbra Convert {Path.GetFileName(source)}");
                 var t = _penumbraConvertTextureFile.Invoke(source, source, TextureType.Bc7Tex, mipMaps: true);
                 await t.ConfigureAwait(false);
+                traceOne.Dispose();
 
                 if (t.IsCompletedSuccessfully && kvp.Value.Any())
                 {
@@ -373,7 +404,9 @@ public sealed class PenumbraIpc : IDisposable
                             break;
                         try
                         {
+                            var traceDup = PerfTrace.Step(_logger, $"DupCopy {Path.GetFileName(dup)}");
                             await Task.Run(() => File.Copy(source, dup, overwrite: true), token).ConfigureAwait(false);
+                            traceDup.Dispose();
                             _logger.LogDebug("Migrated duplicate {dup}", dup);
                         }
                         catch (Exception ex)
@@ -400,17 +433,19 @@ public sealed class PenumbraIpc : IDisposable
             }
             catch { }
         }
+        traceTotal.Dispose();
     }
 
     public Task<Dictionary<string, string[]>> ScanModTexturesAsync()
     {
         return Task.Run(() =>
         {
+            var trace = PerfTrace.Step(_logger, "Penumbra ScanModTextures total");
             var result = new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase);
             try
             {
                 if (string.IsNullOrWhiteSpace(ModDirectory) || !Directory.Exists(ModDirectory))
-                    return result;
+                    { trace.Dispose(); return result; }
 
                 foreach (var file in Directory.EnumerateFiles(ModDirectory!, "*.*", SearchOption.AllDirectories)
                                                .Where(f => f.EndsWith(".tex", StringComparison.OrdinalIgnoreCase)
@@ -425,6 +460,7 @@ public sealed class PenumbraIpc : IDisposable
             {
                 // Ignore scan errors
             }
+            trace.Dispose();
             return result;
         });
     }
@@ -433,7 +469,9 @@ public sealed class PenumbraIpc : IDisposable
     {
         return Task.Run(() =>
         {
+            var start = DateTime.UtcNow;
             var result = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+            int fileCount = 0;
             try
             {
                 if (string.IsNullOrWhiteSpace(ModDirectory) || !Directory.Exists(ModDirectory))
@@ -454,12 +492,19 @@ public sealed class PenumbraIpc : IDisposable
                         result[modName] = list;
                     }
                     list.Add(file);
+                    fileCount++;
                 }
             }
             catch
             {
                 // Ignore scan errors
             }
+            try
+            {
+                var elapsedMs = (int)Math.Round((DateTime.UtcNow - start).TotalMilliseconds);
+                _logger.LogDebug("Grouped texture scan: mods={mods}, files={files}, elapsedMs={elapsed}", result.Count, fileCount, elapsedMs);
+            }
+            catch { }
             return result;
         });
     }
@@ -588,9 +633,10 @@ public sealed class PenumbraIpc : IDisposable
             foreach (var kv in list)
             {
                 var modDir = kv.Key;
+                var modName = kv.Value ?? string.Empty;
                 try
                 {
-                    var tuple = _penumbraGetModPath.Invoke(modDir, "");
+                    var tuple = _penumbraGetModPath.Invoke(modDir, modName);
                     var fullPath = tuple.Item2 ?? string.Empty;
                     paths[modDir] = fullPath;
                 }
@@ -607,6 +653,74 @@ public sealed class PenumbraIpc : IDisposable
         }
 
         return Task.FromResult(paths);
+    }
+
+    public Task<string> GetModDisplayNameAsync(string modDirectory)
+    {
+        var name = modDirectory ?? string.Empty;
+        try
+        {
+            if (string.IsNullOrWhiteSpace(ModDirectory) || !Directory.Exists(ModDirectory))
+                return Task.FromResult(name);
+            var root = Path.GetFullPath(ModDirectory!);
+            var dir = Path.Combine(root, modDirectory ?? string.Empty);
+            if (!Directory.Exists(dir))
+                return Task.FromResult(name);
+            var metaPath = Path.Combine(dir, "meta.json");
+            if (!File.Exists(metaPath))
+                return Task.FromResult(name);
+            try
+            {
+                using var s = File.OpenRead(metaPath);
+                using var doc = JsonDocument.Parse(s);
+                if (doc.RootElement.TryGetProperty("Name", out var nameProp) && nameProp.ValueKind == JsonValueKind.String)
+                {
+                    var display = nameProp.GetString() ?? name;
+                    return Task.FromResult(display);
+                }
+            }
+            catch { }
+            return Task.FromResult(name);
+        }
+        catch { return Task.FromResult(name); }
+    }
+
+    public Task<List<string>> GetModTagsAsync(string modDirectory)
+    {
+        var list = new List<string>();
+        try
+        {
+            if (string.IsNullOrWhiteSpace(ModDirectory) || !Directory.Exists(ModDirectory))
+                return Task.FromResult(list);
+            var root = Path.GetFullPath(ModDirectory!);
+            var dir = Path.Combine(root, modDirectory ?? string.Empty);
+            if (!Directory.Exists(dir))
+                return Task.FromResult(list);
+            var metaPath = Path.Combine(dir, "meta.json");
+            if (File.Exists(metaPath))
+            {
+                try
+                {
+                    using var s = File.OpenRead(metaPath);
+                    using var doc = JsonDocument.Parse(s);
+                    if (doc.RootElement.TryGetProperty("ModTags", out var tagsProp) && tagsProp.ValueKind == JsonValueKind.Array)
+                    {
+                        foreach (var e in tagsProp.EnumerateArray())
+                        {
+                            if (e.ValueKind == JsonValueKind.String)
+                            {
+                                var tag = e.GetString();
+                                if (!string.IsNullOrWhiteSpace(tag))
+                                    list.Add(tag);
+                            }
+                        }
+                    }
+                }
+                catch { }
+            }
+        }
+        catch { }
+        return Task.FromResult(list);
     }
 
     // Get all collections and their names.
@@ -676,6 +790,7 @@ public sealed class PenumbraIpc : IDisposable
 
     public Task<List<string>> GetAllModFoldersAsync()
     {
+        var start = DateTime.UtcNow;
         var folders = new List<string>();
         try
         {
@@ -691,6 +806,12 @@ public sealed class PenumbraIpc : IDisposable
                         if (!string.IsNullOrWhiteSpace(modDir))
                             folders.Add(modDir);
                     }
+                    try
+                    {
+                        var elapsedMs = (int)Math.Round((DateTime.UtcNow - start).TotalMilliseconds);
+                        _logger.LogDebug("GetAllModFolders via IPC: count={count}, elapsedMs={elapsed}", folders.Count, elapsedMs);
+                    }
+                    catch { }
                     return Task.FromResult(folders);
                 }
                 catch
@@ -715,6 +836,12 @@ public sealed class PenumbraIpc : IDisposable
         {
             // Ignore errors
         }
+        try
+        {
+            var elapsedMs = (int)Math.Round((DateTime.UtcNow - start).TotalMilliseconds);
+            _logger.LogDebug("GetAllModFolders via FS: count={count}, elapsedMs={elapsed}", folders.Count, elapsedMs);
+        }
+        catch { }
         return Task.FromResult(folders);
     }
 
@@ -851,7 +978,15 @@ public sealed class PenumbraIpc : IDisposable
     {
         try
         {
-            var tuple = _penumbraGetModPath.Invoke(modDirectory, "");
+            var modName = string.Empty;
+            try
+            {
+                var list = _penumbraGetModList.Invoke();
+                if (list != null && list.TryGetValue(modDirectory, out var name))
+                    modName = name ?? string.Empty;
+            }
+            catch { }
+            var tuple = _penumbraGetModPath.Invoke(modDirectory, modName);
             return tuple;
         }
         catch

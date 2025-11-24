@@ -21,19 +21,16 @@ public sealed class SettingsUI : Window
     private readonly TextureConversionService _conversionService;
     private readonly TextureBackupService _backupService;
     private readonly Action? _openReleaseNotes;
+    private readonly DebugTraceService _debugTrace;
+    private readonly Action? _openDebugUi;
 
     // Tag filtering input state (persisted via config on Apply)
     private string _excludedTagsInput = string.Empty;
     private List<string> _excludedTagsEditable = new();
-    private volatile bool _reinstallInProgress = false;
-    private string _reinstallStatus = string.Empty;
-    private int _reinstallCurrent = 0;
-    private int _reinstallTotal = 0;
-    private string _reinstallModName = string.Empty;
     private volatile bool _orphanScanInFlight = false;
     private DateTime _lastOrphanScanUtc = DateTime.MinValue;
 
-    public SettingsUI(ILogger logger, ShrinkUConfigService configService, TextureConversionService conversionService, TextureBackupService backupService, Action? openReleaseNotes = null)
+    public SettingsUI(ILogger logger, ShrinkUConfigService configService, TextureConversionService conversionService, TextureBackupService backupService, Action? openReleaseNotes = null, DebugTraceService? debugTrace = null, Action? openDebugUi = null)
     : base("ShrinkU Settings###ShrinkUSettingsUI")
     {
         _logger = logger;
@@ -41,6 +38,8 @@ public sealed class SettingsUI : Window
         _conversionService = conversionService;
         _backupService = backupService;
         _openReleaseNotes = openReleaseNotes;
+        _debugTrace = debugTrace ?? new DebugTraceService();
+        _openDebugUi = openDebugUi;
 
         SizeConstraints = new WindowSizeConstraints
         {
@@ -82,7 +81,7 @@ public sealed class SettingsUI : Window
                 });
             };
         }
-        catch { }
+        catch (Exception ex) { _logger.LogError(ex, "Subscribe OnPenumbraModsChanged failed"); }
     }
 
     
@@ -103,7 +102,8 @@ public sealed class SettingsUI : Window
                 // Open Release Notes button
                 if (ImGui.Button("Open Release Notes"))
                 {
-                    try { _openReleaseNotes?.Invoke(); } catch { }
+                    try { _openReleaseNotes?.Invoke(); }
+                    catch (Exception ex) { _logger.LogError(ex, "OpenReleaseNotes failed"); }
                 }
                 UiTooltip.Show("Open recent changes and highlights for ShrinkU.");
                 ImGui.Spacing();
@@ -224,13 +224,7 @@ public sealed class SettingsUI : Window
                     _configService.Save();
                 }
                 UiTooltip.Show("Display individual files under each mod in the overview table.");
-                bool includeHiddenOnConvert = _configService.Current.IncludeHiddenModTexturesOnConvert;
-                if (ImGui.Checkbox("Include hidden mod textures on Convert (UI)", ref includeHiddenOnConvert))
-                {
-                    _configService.Current.IncludeHiddenModTexturesOnConvert = includeHiddenOnConvert;
-                    _configService.Save();
-                }
-                UiTooltip.Show("When converting via ShrinkU UI, include non-visible mod textures even if filters hide them. Sphene automatic behavior remains unchanged.");
+                
 
                 ImGui.Separator();
                 ImGui.TextColored(ShrinkUColors.Accent, "Storage");
@@ -258,15 +252,16 @@ public sealed class SettingsUI : Window
                         var path = _configService.Current.BackupFolderPath;
                         if (!string.IsNullOrWhiteSpace(path))
                         {
-                            try { Directory.CreateDirectory(path); } catch { }
+                            try { Directory.CreateDirectory(path); }
+                            catch (Exception ex) { _logger.LogError(ex, "CreateDirectory failed for {path}", path); }
                             try
                             {
                                 Process.Start(new ProcessStartInfo("explorer.exe", path) { UseShellExecute = true });
                             }
-                            catch { }
+                            catch (Exception ex) { _logger.LogError(ex, "Open backup folder failed for {path}", path); }
                         }
                     }
-                    catch { }
+                    catch (Exception ex) { _logger.LogError(ex, "Open backup folder outer failed"); }
                 }
                 ImGui.PopStyleColor(4);
 
@@ -283,8 +278,8 @@ public sealed class SettingsUI : Window
                 ImGui.Text($"PMP Backups: {_backupPmpCount} ({FormatSize(_backupPmpBytes)})");
                 ImGui.Spacing();
 
-                ImGui.EndTabItem();
-            }
+            ImGui.EndTabItem();
+        }
 
             if (ImGui.BeginTabItem("Filters"))
             {
@@ -397,6 +392,49 @@ public sealed class SettingsUI : Window
                 ImGui.EndTabItem();
             }
 
+            if (ImGui.BeginTabItem("Debug"))
+            {
+                ImGui.SetWindowFontScale(1.15f);
+                ImGui.TextColored(ShrinkUColors.Accent, "Debug");
+                ImGui.Dummy(new Vector2(0, 6f));
+                ImGui.SetWindowFontScale(1.0f);
+
+                bool modState = _configService.Current.DebugTraceModStateChanges;
+                if (ImGui.Checkbox("Trace mod_state.json saves", ref modState))
+                {
+                    _configService.Current.DebugTraceModStateChanges = modState;
+                    _configService.Save();
+                }
+                bool uiRefresh = _configService.Current.DebugTraceUiRefresh;
+                if (ImGui.Checkbox("Trace UI refresh triggers", ref uiRefresh))
+                {
+                    _configService.Current.DebugTraceUiRefresh = uiRefresh;
+                    _configService.Save();
+                }
+
+                bool actions = _configService.Current.DebugTraceActions;
+                if (ImGui.Checkbox("Trace actions/events", ref actions))
+                {
+                    _configService.Current.DebugTraceActions = actions;
+                    _configService.Save();
+                }
+
+                ImGui.Spacing();
+                if (ImGui.Button("Open Debug UI"))
+                {
+                    try { _openDebugUi?.Invoke(); }
+                    catch (Exception ex) { _logger.LogError(ex, "OpenDebugUi failed"); }
+                }
+                ImGui.SameLine();
+                if (ImGui.Button("Clear Traces"))
+                {
+                    try { _debugTrace.Clear(); }
+                    catch (Exception ex) { _logger.LogError(ex, "DebugTrace.Clear failed"); }
+                }
+
+                ImGui.EndTabItem();
+            }
+
             ImGui.EndTabBar();
         }
     }
@@ -476,7 +514,8 @@ public sealed class SettingsUI : Window
                     {
                         var name = Path.GetFileName(file) ?? string.Empty;
                         long len = 0;
-                        try { len = new FileInfo(file).Length; } catch { len = 0; }
+                        try { len = new FileInfo(file).Length; }
+                        catch (Exception ex) { _logger.LogError(ex, "FileInfo length read failed for {file}", file); len = 0; }
                         if (name.StartsWith("backup_", StringComparison.OrdinalIgnoreCase) && name.EndsWith(".zip", StringComparison.OrdinalIgnoreCase))
                         {
                             zipCount++;
@@ -489,7 +528,7 @@ public sealed class SettingsUI : Window
                         }
                     }
                 }
-                catch { }
+                catch (Exception ex) { _logger.LogError(ex, "Backup summary scan failed"); }
                 _backupZipCount = zipCount;
                 _backupZipBytes = zipBytes;
                 _backupPmpCount = pmpCount;
@@ -498,6 +537,6 @@ public sealed class SettingsUI : Window
                 _backupSummaryScanInFlight = false;
             });
         }
-        catch { }
+        catch (Exception ex) { _logger.LogError(ex, "EnsureBackupSummary scheduling failed"); }
     }
 }

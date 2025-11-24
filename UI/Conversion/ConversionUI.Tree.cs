@@ -31,6 +31,15 @@ public sealed partial class ConversionUI
         var root = new TableCatNode("/");
         foreach (var mod in mods)
         {
+            var isOrphan = _orphaned.Any(x => string.Equals(x.ModFolderName, mod, StringComparison.OrdinalIgnoreCase));
+            if (isOrphan)
+            {
+                if (!root.Children.TryGetValue("Uninstalled", out var uninst))
+                    root.Children["Uninstalled"] = uninst = new TableCatNode("Uninstalled");
+                uninst.Mods.Add(mod);
+                continue;
+            }
+
             if (!_modPaths.TryGetValue(mod, out var fullPath) || string.IsNullOrWhiteSpace(fullPath))
             {
                 if (!root.Children.TryGetValue("(Uncategorized)", out var unc))
@@ -42,23 +51,12 @@ public sealed partial class ConversionUI
             string folderOnly;
             try
             {
-                var fpNorm = fullPath.Replace('\\', '/');
-                if (_modDisplayNames.TryGetValue(mod, out var dn) && !string.IsNullOrWhiteSpace(dn))
-                {
-                    var dnNorm = dn.Replace('\\', '/');
-                    if (fpNorm.EndsWith(dnNorm, StringComparison.Ordinal))
-                        folderOnly = fpNorm.Substring(0, fpNorm.Length - dnNorm.Length).TrimEnd('/');
-                    else
-                        folderOnly = fpNorm;
-                }
-                else
-                {
-                    folderOnly = fpNorm;
-                }
+                int lastSlash = fullPath.LastIndexOf('/');
+                folderOnly = lastSlash >= 0 ? fullPath.Substring(0, lastSlash) : string.Empty;
             }
             catch
             {
-                folderOnly = fullPath.Replace('\\', '/');
+                folderOnly = string.Empty;
             }
 
             var parts = folderOnly.Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
@@ -89,7 +87,8 @@ public sealed partial class ConversionUI
     private IEnumerable<KeyValuePair<string, TableCatNode>> OrderedChildrenPairs(TableCatNode node)
     {
         return node.Children
-            .OrderBy(kv => kv.Key.Equals("(Uncategorized)", StringComparison.OrdinalIgnoreCase) ? 1 : 0)
+            .OrderBy(kv => kv.Key.Equals("Uninstalled", StringComparison.OrdinalIgnoreCase) ? -1
+                             : kv.Key.Equals("(Uncategorized)", StringComparison.OrdinalIgnoreCase) ? 1 : 0)
             .ThenBy(kv => kv.Key, StringComparer.OrdinalIgnoreCase);
     }
 
@@ -128,19 +127,23 @@ public sealed partial class ConversionUI
             if (!catOpen)
                 continue;
             BuildFlatRows(child, visibleByMod, fullPath, depth + 1);
-            foreach (var mod in child.Mods)
+        }
+        foreach (var mod in node.Mods)
+        {
+            if (!visibleByMod.ContainsKey(mod))
+                continue;
+            _flatRows.Add(new FlatRow { Kind = FlatRowKind.Mod, Node = node, Mod = mod, Depth = depth });
+            if (_configService.Current.ShowModFilesInOverview && _expandedMods.Contains(mod))
             {
-                if (!visibleByMod.ContainsKey(mod))
-                    continue;
-                _flatRows.Add(new FlatRow { Kind = FlatRowKind.Mod, Node = child, Mod = mod, Depth = depth + 1 });
-                if (_configService.Current.ShowModFilesInOverview && _expandedMods.Contains(mod))
+                List<string>? files = null;
+                if (_scannedByMod.TryGetValue(mod, out var all) && all != null && all.Count > 0)
+                    files = all;
+                else if (visibleByMod.TryGetValue(mod, out var vis) && vis != null)
+                    files = vis;
+                if (files != null)
                 {
-                    var files = visibleByMod[mod];
-                    if (files != null)
-                    {
-                        for (int i = 0; i < files.Count; i++)
-                            _flatRows.Add(new FlatRow { Kind = FlatRowKind.File, Node = child, Mod = mod, File = files[i], Depth = depth + 2 });
-                    }
+                    for (int i = 0; i < files.Count; i++)
+                        _flatRows.Add(new FlatRow { Kind = FlatRowKind.File, Node = node, Mod = mod, File = files[i], Depth = depth + 1 });
                 }
             }
         }
@@ -167,7 +170,7 @@ public sealed partial class ConversionUI
                         texturesConverted += s.ComparedFiles;
                     else
                     {
-                        var snap = _modStateService.Snapshot();
+                        var snap = _modStateSnapshot ?? _modStateService.Snapshot();
                         if (snap.TryGetValue(m, out var st) && st != null && st.ComparedFiles > 0)
                             texturesConverted += st.ComparedFiles;
                     }
@@ -269,10 +272,15 @@ public sealed partial class ConversionUI
         var files = new List<string>();
         foreach (var mod in node.Mods)
         {
-            if (visibleByMod.TryGetValue(mod, out var modFiles) && modFiles != null && modFiles.Count > 0)
+            List<string>? src = null;
+            if (_scannedByMod.TryGetValue(mod, out var all) && all != null && all.Count > 0)
+                src = all;
+            else if (visibleByMod.TryGetValue(mod, out var modFiles) && modFiles != null && modFiles.Count > 0)
+                src = modFiles;
+            if (src != null)
             {
-                for (int i = 0; i < modFiles.Count; i++)
-                    files.Add(modFiles[i]);
+                for (int i = 0; i < src.Count; i++)
+                    files.Add(src[i]);
             }
         }
         foreach (var child in node.Children.Values)
@@ -291,10 +299,12 @@ public sealed partial class ConversionUI
     {
         foreach (var mod in node.Mods)
         {
-            if (visibleByMod.TryGetValue(mod, out var files) && files != null && files.Count > 0)
+            var filesGuess = visibleByMod.TryGetValue(mod, out var files) ? files : null;
+            int totalAll = GetTotalTexturesForMod(mod, filesGuess);
+            var sc = _selectedCountByMod.TryGetValue(mod, out var c) ? c : 0;
+            if (totalAll > 0)
             {
-                var sc = _selectedCountByMod.TryGetValue(mod, out var c) ? c : 0;
-                if (sc < files.Count)
+                if (sc < totalAll)
                     return false;
             }
             else

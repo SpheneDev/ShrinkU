@@ -9,6 +9,7 @@ using System.Threading.Tasks;
 using System.Linq;
 using Microsoft.Extensions.Logging;
 using Dalamud.Interface;
+using Dalamud.Interface.Utility.Raii;
 using ShrinkU.Configuration;
 using ShrinkU.Services;
 namespace ShrinkU.UI;
@@ -21,38 +22,60 @@ public sealed partial class ConversionUI
         var isOrphan = _orphaned.Any(x => string.Equals(x.ModFolderName, mod, StringComparison.OrdinalIgnoreCase));
         var hasBackup = GetOrQueryModBackup(mod);
         var excluded = (!hasBackup && !isOrphan && IsModExcludedByTags(mod));
-        var isNonConvertible = files.Count == 0;
-
-        ImGui.TableSetColumnIndex(1);
-        ImGui.SetCursorPosX(ImGui.GetCursorPosX() + row.Depth * 16f);
-        var nodeFlags = ImGuiTreeNodeFlags.SpanFullWidth | ImGuiTreeNodeFlags.NoTreePushOnOpen | ImGuiTreeNodeFlags.FramePadding;
-        if (!_configService.Current.ShowModFilesInOverview)
-            nodeFlags |= ImGuiTreeNodeFlags.Bullet | ImGuiTreeNodeFlags.Leaf;
-        int totalAll = files.Count;
+        int totalAll = GetTotalTexturesForMod(mod, files);
         int convertedAll = 0;
-        if (hasBackup && totalAll > 0)
+        if (totalAll > 0)
         {
             if (_cachedPerModSavings.TryGetValue(mod, out var s2) && s2 != null && s2.ComparedFiles > 0)
                 convertedAll = Math.Min(s2.ComparedFiles, totalAll);
-            else
-            {
-                if (_modStateSnapshot != null && _modStateSnapshot.TryGetValue(mod, out var ms) && ms != null && ms.ComparedFiles > 0)
-                    convertedAll = Math.Min(ms.ComparedFiles, totalAll);
-            }
+            else if (_modStateSnapshot != null && _modStateSnapshot.TryGetValue(mod, out var ms) && ms != null && ms.ComparedFiles > 0)
+                convertedAll = Math.Min(ms.ComparedFiles, totalAll);
         }
-        var header = hasBackup ? $"{ResolveModDisplayName(mod)} ({convertedAll}/{totalAll})" : $"{ResolveModDisplayName(mod)} ({totalAll})";
+        ShrinkU.Services.ModStateEntry? modState = null;
+        if (_modStateSnapshot != null)
+            _modStateSnapshot.TryGetValue(mod, out modState);
+        if (modState != null && modState.InstalledButNotConverted)
+            convertedAll = 0;
+        var isNonConvertible = totalAll == 0;
+
+        ImGui.TableSetColumnIndex(1);
+        ImGui.SetCursorPosX(ImGui.GetCursorPosX() + row.Depth * 16f);
+        var nodeFlags = ImGuiTreeNodeFlags.NoTreePushOnOpen | ImGuiTreeNodeFlags.FramePadding;
+        if (!_configService.Current.ShowModFilesInOverview)
+            nodeFlags |= ImGuiTreeNodeFlags.Bullet | ImGuiTreeNodeFlags.Leaf;
+        string header;
+        if (hasBackup)
+            header = ShrinkU.Helpers.ConversionUiHelpers.FormatHeader(ResolveModDisplayName(mod), convertedAll, totalAll);
+        else
+            header = string.Concat(ResolveModDisplayName(mod), " (", totalAll.ToString(), ")");
         var open = _expandedMods.Contains(mod);
         ImGui.SetNextItemOpen(open, ImGuiCond.Always);
-        open = ImGui.TreeNodeEx($"##mod-{mod}", nodeFlags);
+        ImGui.PushFont(UiBuilder.IconFont);
+        Vector4 iconColor = new Vector4(1f, 1f, 1f, 1f);
+        if (_modStateSnapshot != null && _modStateSnapshot.TryGetValue(mod, out var msEnabledPre) && msEnabledPre != null && msEnabledPre.Enabled)
+            iconColor = new Vector4(0.40f, 0.85f, 0.40f, 1f);
+        ImGui.TextColored(iconColor, FontAwesomeIcon.Cube.ToIconString());
+        ImGui.PopFont();
+        ImGui.SameLine();
+        ImGui.AlignTextToFramePadding();
+        open = ImGui.TreeNodeEx($"{header}##mod-{mod}", nodeFlags);
+        var modToggled = ImGui.IsItemToggledOpen();
+        if (modToggled)
+        {
+            if (open) _expandedMods.Add(mod);
+            else _expandedMods.Remove(mod);
+        }
         var headerHoveredTree = ImGui.IsItemHovered();
         if (ImGui.BeginPopupContextItem($"modctx-{mod}"))
         {
             if (ImGui.MenuItem("Open in Penumbra"))
             {
-                try { _conversionService.OpenModInPenumbra(mod, null); } catch { }
+                try { _conversionService.OpenModInPenumbra(mod, null); }
+                catch (Exception ex) { _logger.LogError(ex, "OpenModInPenumbra failed for {mod}", mod); }
             }
             var hasTexBk = GetOrQueryModTextureBackup(mod);
-            ImGui.BeginDisabled(!hasTexBk);
+            using (var _d = ImRaii.Disabled(!hasTexBk))
+            {
             if (ImGui.MenuItem("Restore textures"))
             {
                 _running = true;
@@ -63,16 +86,15 @@ public sealed partial class ConversionUI
                 _ = _backupService.RestoreLatestForModAsync(mod, progress, CancellationToken.None)
                     .ContinueWith(t => {
                         var success = t.Status == TaskStatus.RanToCompletion && t.Result;
-                        try { _backupService.RedrawPlayer(); } catch { }
+                        try { _backupService.RedrawPlayer(); }
+                        catch (Exception ex) { _logger.LogError(ex, "RedrawPlayer after flat restore failed for {mod}", mod); }
                         RefreshModState(mod, "restore-flat-context");
-                        TriggerMetricsRefresh();
-                        _perModSavingsTask = _backupService.ComputePerModSavingsAsync();
-                        _perModSavingsTask.ContinueWith(ps =>
+                        _ = _backupService.ComputeSavingsForModAsync(mod).ContinueWith(ps =>
                         {
-                            if (ps.Status == TaskStatus.RanToCompletion && ps.Result != null)
+                            if (ps.Status == TaskStatus.RanToCompletion)
                             {
-                                _cachedPerModSavings = ps.Result;
-                                _needsUIRefresh = true;
+                                try { _cachedPerModSavings[mod] = ps.Result; } catch { }
+                                _uiThreadActions.Enqueue(() => { _perModSavingsRevision++; _footerTotalsDirty = true; _needsUIRefresh = true; });
                             }
                         }, TaskScheduler.Default);
                         _ = _backupService.HasBackupForModAsync(mod).ContinueWith(bt =>
@@ -80,14 +102,15 @@ public sealed partial class ConversionUI
                             if (bt.Status == TaskStatus.RanToCompletion)
                             {
                                 bool any = bt.Result;
-                                try { any = any || _backupService.HasPmpBackupForModAsync(mod).GetAwaiter().GetResult(); } catch { }
+                                try { any = any || _backupService.HasPmpBackupForModAsync(mod).GetAwaiter().GetResult(); }
+                                catch (Exception ex) { _logger.LogError(ex, "HasPmpBackup check failed for {mod}", mod); }
                                 _cacheService.SetModHasBackup(mod, any);
                             }
                         });
-                        _running = false;
+                        _uiThreadActions.Enqueue(() => { _running = false; });
                     });
             }
-            ImGui.EndDisabled();
+            }
             if (!hasTexBk) ShowTooltip("No texture backups available for this mod.");
             if (ImGui.MenuItem("Restore PMP"))
             {
@@ -95,29 +118,28 @@ public sealed partial class ConversionUI
             }
             ImGui.EndPopup();
         }
-        ImGui.SameLine();
-        ImGui.AlignTextToFramePadding();
-        ImGui.PushFont(UiBuilder.IconFont);
-        if (_modEnabledStates.TryGetValue(mod, out var stIcon))
-        {
-            var iconColor = stIcon.Enabled ? new Vector4(0.40f, 0.85f, 0.40f, 1f) : new Vector4(1f, 1f, 1f, 1f);
-            ImGui.TextColored(iconColor, FontAwesomeIcon.Cube.ToIconString());
-        }
-        else
-        {
-            ImGui.TextUnformatted(FontAwesomeIcon.Cube.ToIconString());
-        }
-        ImGui.PopFont();
-        ImGui.SameLine();
-        ImGui.TextUnformatted(header);
+        
 
         ImGui.TableSetColumnIndex(0);
         bool modSelected = isNonConvertible
             ? _selectedEmptyMods.Contains(mod)
-            : ((_selectedCountByMod.TryGetValue(mod, out var sc) ? sc : 0) >= files.Count);
+            : ((_selectedCountByMod.TryGetValue(mod, out var sc) ? sc : 0) >= totalAll);
         var automaticMode = _configService.Current.TextureProcessingMode == TextureProcessingMode.Automatic;
         var disableCheckbox = excluded || (automaticMode && !isOrphan && (convertedAll >= totalAll));
-        ImGui.BeginDisabled(disableCheckbox);
+        string disableReason = string.Empty;
+        if (disableCheckbox)
+        {
+            if (excluded)
+                disableReason = "Mod excluded by tags.";
+            else if (automaticMode && !isOrphan && (convertedAll >= totalAll))
+                disableReason = "All textures already converted.";
+            else if (!isNonConvertible && files.Count == 0)
+                disableReason = string.Empty;
+            else if (isNonConvertible)
+                disableReason = "Mod has no textures.";
+        }
+        using (var _d = ImRaii.Disabled(disableCheckbox))
+        {
         if (ImGui.Checkbox($"##modsel-{mod}", ref modSelected))
         {
             if (isNonConvertible)
@@ -128,29 +150,50 @@ public sealed partial class ConversionUI
             {
                 if (modSelected)
                 {
-                    foreach (var f in files) _selectedTextures.Add(f);
-                    _selectedCountByMod[mod] = files.Count;
+                    List<string>? allFilesForMod = null;
+                    if (_scannedByMod.TryGetValue(mod, out var all) && all != null && all.Count > 0)
+                        allFilesForMod = all;
+                    else
+                        allFilesForMod = files;
+                    foreach (var f in allFilesForMod) _selectedTextures.Add(f);
+                    _selectedCountByMod[mod] = totalAll;
                 }
                 else
                 {
+                    if (_scannedByMod.TryGetValue(mod, out var allRem) && allRem != null && allRem.Count > 0)
+                        foreach (var f in allRem) _selectedTextures.Remove(f);
                     foreach (var f in files) _selectedTextures.Remove(f);
                     _selectedCountByMod[mod] = 0;
                 }
             }
         }
-        ImGui.EndDisabled();
+        }
         if (disableCheckbox && ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
-            ImGui.SetTooltip(automaticMode ? "Automatic mode: mod cannot be selected for conversion." : "Mod excluded by tags");
+            ImGui.SetTooltip(string.IsNullOrEmpty(disableReason) ? "Selection disabled." : disableReason);
         else
             ShowTooltip("Toggle selection for all files in this mod.");
 
         if (headerHoveredTree)
         {
-            bool hasPmp = GetOrQueryModPmp(mod);
-            long origBytesTip = GetOrQueryModOriginalTotal(mod);
+            bool hasPmp = false;
+            long origBytesTip = 0;
             long compBytesTip = 0;
-            if (!isOrphan && _cachedPerModSavings.TryGetValue(mod, out var tipStats) && tipStats != null)
-                compBytesTip = Math.Max(0, tipStats.CurrentBytes);
+            int comparedFilesTip = 0;
+            var snap = _modStateSnapshot ?? _modStateService.Snapshot();
+            if (snap.TryGetValue(mod, out var ms) && ms != null)
+            {
+                hasPmp = ms.HasPmpBackup;
+                origBytesTip = ms.OriginalBytes;
+                compBytesTip = ms.CurrentBytes;
+                comparedFilesTip = ms.ComparedFiles;
+            }
+            else
+            {
+                hasPmp = GetOrQueryModPmp(mod);
+                origBytesTip = GetOrQueryModOriginalTotal(mod);
+                if (!isOrphan && _cachedPerModSavings.TryGetValue(mod, out var tipStats) && tipStats != null)
+                    compBytesTip = Math.Max(0, tipStats.CurrentBytes);
+            }
 
             float reductionPctTip = 0f;
             if (origBytesTip > 0 && compBytesTip > 0)
@@ -159,7 +202,10 @@ public sealed partial class ConversionUI
             ImGui.BeginTooltip();
             ImGui.TextUnformatted($"{ResolveModDisplayName(mod)}");
             ImGui.Separator();
-            ImGui.TextUnformatted($"Textures: {(hasBackup ? convertedAll : 0)}/{totalAll} converted");
+            var showConvertedCountTip = hasBackup && !(modState != null && modState.InstalledButNotConverted);
+            ImGui.TextUnformatted($"Textures: {(showConvertedCountTip ? convertedAll : 0)}/{totalAll} converted");
+            if (comparedFilesTip > 0)
+                ImGui.TextUnformatted($"Compared: {comparedFilesTip}");
             ImGui.TextUnformatted($"Uncompressed: {FormatSize(origBytesTip)}");
             var compText = compBytesTip > 0 ? $"{FormatSize(compBytesTip)} ({reductionPctTip:0.00}% reduction)" : "-";
             ImGui.TextUnformatted($"Compressed: {compText}");
@@ -170,13 +216,18 @@ public sealed partial class ConversionUI
 
             string ver = string.Empty;
             string auth = string.Empty;
-            if (hasPmp)
+            if (snap.TryGetValue(mod, out var ms2) && ms2 != null)
+            {
+                ver = ms2.CurrentVersion ?? string.Empty;
+                auth = ms2.CurrentAuthor ?? string.Empty;
+            }
+            if (string.IsNullOrWhiteSpace(ver) || string.IsNullOrWhiteSpace(auth))
             {
                 var meta = GetOrQueryModPmpMeta(mod);
                 if (meta.HasValue)
                 {
-                    ver = meta.Value.version;
-                    auth = meta.Value.author;
+                    if (string.IsNullOrWhiteSpace(ver)) ver = meta.Value.version;
+                    if (string.IsNullOrWhiteSpace(auth)) auth = meta.Value.author;
                 }
             }
             if (string.IsNullOrWhiteSpace(ver) || string.IsNullOrWhiteSpace(auth))
@@ -187,12 +238,6 @@ public sealed partial class ConversionUI
                     if (string.IsNullOrWhiteSpace(ver)) ver = zmeta.Value.version;
                     if (string.IsNullOrWhiteSpace(auth)) auth = zmeta.Value.author;
                 }
-            }
-            if (string.IsNullOrWhiteSpace(ver) || string.IsNullOrWhiteSpace(auth))
-            {
-                var live = _backupService.GetLiveModMeta(mod);
-                if (string.IsNullOrWhiteSpace(ver)) ver = live.version;
-                if (string.IsNullOrWhiteSpace(auth)) auth = live.author;
             }
             if (!string.IsNullOrWhiteSpace(ver)) ImGui.TextUnformatted($"Version: {ver}");
             if (!string.IsNullOrWhiteSpace(auth)) ImGui.TextUnformatted($"Author: {auth}");
@@ -221,10 +266,7 @@ public sealed partial class ConversionUI
 
         ImGui.TableSetColumnIndex(3);
         _cachedPerModSavings.TryGetValue(mod, out var modStats);
-        ShrinkU.Services.ModStateEntry? modState = null;
-        if (_modStateSnapshot != null)
-            _modStateSnapshot.TryGetValue(mod, out modState);
-        long modOriginalBytes = modState != null && modState.ComparedFiles > 0 ? modState.OriginalBytes : GetOrQueryModOriginalTotal(mod);
+        long modOriginalBytes = modState != null && modState.OriginalBytes > 0 ? modState.OriginalBytes : GetOrQueryModOriginalTotal(mod);
         var hideStatsForNoTextures = totalAll == 0;
         if (hideStatsForNoTextures)
             ImGui.TextUnformatted("");
@@ -247,153 +289,62 @@ public sealed partial class ConversionUI
         }
 
         ImGui.TableSetColumnIndex(4);
-        ImGui.BeginDisabled(ActionsDisabled());
-        if (hasBackup || files.Count > 0 || isOrphan)
+        var hasTexBackup = GetOrQueryModTextureBackup(mod);
+        var hasPmpBackup = GetOrQueryModPmp(mod);
+        var anyBackup = hasBackup || hasTexBackup || hasPmpBackup;
+        if (totalAll > 0)
         {
-            var hasTexBackup = GetOrQueryModTextureBackup(mod);
-            var hasPmpBackup = GetOrQueryModPmp(mod);
-            bool doInstall = isOrphan;
-            bool doRestore = false;
-            bool doReinstall = false;
-            bool doConvert = false;
-            if (doInstall)
-            {
-                doRestore = false;
-                doConvert = false;
-            }
-            else
-            {
-                var anyBackup = hasBackup || hasTexBackup || hasPmpBackup;
-                if (isNonConvertible)
-                {
-                    doConvert = false;
-                    if (hasPmpBackup && anyBackup)
-                    {
-                        doReinstall = true;
-                        doRestore = false;
-                    }
-                    else
-                    {
-                        doRestore = anyBackup;
-                    }
-                }
-                else
-                {
-                    doRestore = anyBackup;
-                    doConvert = !anyBackup;
-                    if (modState != null && modState.InstalledButNotConverted)
-                    {
-                        doConvert = true;
-                        doRestore = false;
-                    }
-                }
-            }
-            var actionLabel = doInstall
-                ? $"Install##install-{mod}"
-                : (doReinstall ? $"Reinstall##reinstall-{mod}" : (doRestore ? $"Restore##restore-{mod}" : $"Convert##convert-{mod}"));
-
-            if (doInstall)
-            {
-                ImGui.PushStyleColor(ImGuiCol.Button, ShrinkUColors.Accent);
-                ImGui.PushStyleColor(ImGuiCol.ButtonHovered, ShrinkUColors.AccentHovered);
-                ImGui.PushStyleColor(ImGuiCol.ButtonActive, ShrinkUColors.AccentActive);
-                ImGui.PushStyleColor(ImGuiCol.Text, ShrinkUColors.ButtonTextOnAccent);
-            }
-            else if (doRestore)
-            {
-                ImGui.PushStyleColor(ImGuiCol.Button, ShrinkUColors.RestoreButton);
-                ImGui.PushStyleColor(ImGuiCol.ButtonHovered, ShrinkUColors.RestoreButtonHovered);
-                ImGui.PushStyleColor(ImGuiCol.ButtonActive, ShrinkUColors.RestoreButtonActive);
-                ImGui.PushStyleColor(ImGuiCol.Text, ShrinkUColors.ButtonTextOnAccent);
-            }
-            else if (doReinstall)
-            {
-                ImGui.PushStyleColor(ImGuiCol.Button, ShrinkUColors.ReinstallButton);
-                ImGui.PushStyleColor(ImGuiCol.ButtonHovered, ShrinkUColors.ReinstallButtonHovered);
-                ImGui.PushStyleColor(ImGuiCol.ButtonActive, ShrinkUColors.ReinstallButtonActive);
-                ImGui.PushStyleColor(ImGuiCol.Text, ShrinkUColors.ButtonTextOnAccent);
-            }
-            else
+            var autoMode = _configService.Current.TextureProcessingMode == TextureProcessingMode.Automatic;
+            var showRestore = anyBackup && !(modState != null && modState.InstalledButNotConverted);
+            if (!showRestore)
             {
                 ImGui.PushStyleColor(ImGuiCol.Button, ShrinkUColors.ConvertButton);
                 ImGui.PushStyleColor(ImGuiCol.ButtonHovered, ShrinkUColors.ConvertButtonHovered);
                 ImGui.PushStyleColor(ImGuiCol.ButtonActive, ShrinkUColors.ConvertButtonActive);
                 ImGui.PushStyleColor(ImGuiCol.Text, ShrinkUColors.ButtonTextOnAccent);
-            }
-
-            var autoMode = _configService.Current.TextureProcessingMode == TextureProcessingMode.Automatic;
-            var restoreDisabledByAuto = autoMode && (doRestore || doReinstall);
-            bool canInstall = true;
-            if (doInstall)
-            {
-                try
+                var convertDisabled = excluded || (hasBackup && (convertedAll >= totalAll));
+                using (var _d = ImRaii.Disabled(ActionsDisabled() || convertDisabled))
                 {
-                    var info = _orphaned.FirstOrDefault(x => string.Equals(x.ModFolderName, mod, StringComparison.OrdinalIgnoreCase));
-                    canInstall = info != null && !string.IsNullOrWhiteSpace(info.LatestPmpPath);
-                }
-                catch { canInstall = false; }
-            }
-            ImGui.BeginDisabled(excluded || (!isOrphan && restoreDisabledByAuto) || (isOrphan && !canInstall) || ActionsDisabled());
-            if (ImGui.Button(actionLabel, new Vector2(60, 0)))
-            {
-                if (doInstall)
+                if (ImGui.Button($"Convert##convert-{mod}", new Vector2(60, 0)))
                 {
-                    _running = true;
-                    ResetBothProgress();
-                    var progress = new Progress<(string, int, int)>(e => { _currentTexture = e.Item1; _backupIndex = e.Item2; _backupTotal = e.Item3; });
-                    _ = _backupService.ReinstallModFromLatestPmpAsync(mod, progress, CancellationToken.None)
-                        .ContinueWith(t =>
+                    List<string>? allFilesForMod = null;
+                    if (_scannedByMod.TryGetValue(mod, out var all) && all != null && all.Count > 0)
+                        allFilesForMod = all;
+                    ResetConversionProgress();
+                    ResetRestoreProgress();
+                    _ = Task.Run(async () =>
+                    {
+                        var all = allFilesForMod;
+                        if (all == null || all.Count == 0)
                         {
-                            var success = t.Status == TaskStatus.RanToCompletion && t.Result;
-                            _uiThreadActions.Enqueue(() =>
-                            {
-                                SetStatus(success ? $"Install completed for {mod}" : $"Install failed for {mod}");
-                                _disableActionsUntilUtc = DateTime.UtcNow.AddSeconds(2);
-                                _needsUIRefresh = true;
-                                ClearModCaches(mod);
-                            });
                             try
                             {
-                                var autoMode = _configService.Current.TextureProcessingMode == TextureProcessingMode.Automatic;
-                                if (autoMode)
-                                {
-                                    _ = _conversionService.StartAutomaticConversionForModWithDelayAsync(mod, 2000);
-                                }
+                                var scanned = await _conversionService.GetModTextureFilesAsync(mod).ConfigureAwait(false);
+                                all = scanned ?? new List<string>();
+                                _uiThreadActions.Enqueue(() => { _scannedByMod[mod] = all; _needsUIRefresh = true; });
                             }
-                            catch { }
-                            try { _configService.Current.ExternalConvertedMods.Remove(mod); _configService.Save(); } catch { }
-                            try { RefreshModState(mod, "orphan-install-flat"); } catch { }
-                            try { TriggerMetricsRefresh(); } catch { }
-                            _running = false;
-                            _needsUIRefresh = true;
-                        }, TaskScheduler.Default);
+                            catch (Exception ex) { _logger.LogError(ex, "GetModTextureFilesAsync failed for {mod}", mod); }
+                        }
+                        var toConvert = BuildToConvert(all ?? new List<string>());
+                        await _conversionService.StartConversionAsync(toConvert).ConfigureAwait(false);
+                    });
                 }
-                else if (doReinstall)
+                if (convertDisabled && ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
+                    ShowTooltip(convertedAll >= totalAll ? "All textures already converted." : (excluded ? "Mod excluded by tags." : "Processing in progress."));
+                ImGui.PopStyleColor(4);
+                if (!convertDisabled) ShowTooltip("Convert all textures for this mod.");
+                }
+            }
+            else
+            {
+                ImGui.PushStyleColor(ImGuiCol.Button, ShrinkUColors.RestoreButton);
+                ImGui.PushStyleColor(ImGuiCol.ButtonHovered, ShrinkUColors.RestoreButtonHovered);
+                ImGui.PushStyleColor(ImGuiCol.ButtonActive, ShrinkUColors.RestoreButtonActive);
+                ImGui.PushStyleColor(ImGuiCol.Text, ShrinkUColors.ButtonTextOnAccent);
+                var restoreDisabledByAuto = autoMode && !isOrphan;
+                using (var _d = ImRaii.Disabled(ActionsDisabled() || excluded || restoreDisabledByAuto))
                 {
-                    _running = true;
-                    ResetBothProgress();
-                    _reinstallInProgress = true;
-                    _reinstallMod = mod;
-                    var progress = new Progress<(string, int, int)>(e => { _currentTexture = e.Item1; _backupIndex = e.Item2; _backupTotal = e.Item3; });
-                    _ = _backupService.ReinstallModFromLatestPmpAsync(mod, progress, CancellationToken.None)
-                        .ContinueWith(t =>
-                        {
-                            var success = t.Status == TaskStatus.RanToCompletion && t.Result;
-                            _uiThreadActions.Enqueue(() =>
-                            {
-                                SetStatus(success ? $"Reinstall completed for {mod}" : $"Reinstall failed for {mod}");
-                                _disableActionsUntilUtc = DateTime.UtcNow.AddSeconds(2);
-                                _needsUIRefresh = true;
-                                ClearModCaches(mod);
-                                RefreshModState(mod, "reinstall-completed-flat");
-                            });
-                            _reinstallInProgress = false;
-                            _reinstallMod = string.Empty;
-                            ResetBothProgress();
-                            _running = false;
-                        }, TaskScheduler.Default);
-                }
-                else if (doRestore)
+                if (ImGui.Button($"Restore##restore-{mod}", new Vector2(60, 0)))
                 {
                     var hasPmpForClick = GetOrQueryModPmp(mod);
                     if (hasPmpForClick && _configService.Current.PreferPmpRestoreWhenAvailable)
@@ -414,16 +365,15 @@ public sealed partial class ConversionUI
                         _ = _backupService.RestoreLatestForModAsync(mod, progress, CancellationToken.None)
                             .ContinueWith(t => {
                                 var success = t.Status == TaskStatus.RanToCompletion && t.Result;
-                                try { _backupService.RedrawPlayer(); } catch { }
+                                try { _backupService.RedrawPlayer(); }
+                                catch (Exception ex) { _logger.LogError(ex, "RedrawPlayer after reinstall failed for {mod}", mod); }
                                 RefreshModState(mod, "restore-flat");
-                                TriggerMetricsRefresh();
-                                _perModSavingsTask = _backupService.ComputePerModSavingsAsync();
-                                _perModSavingsTask.ContinueWith(ps =>
+                                _ = _backupService.ComputeSavingsForModAsync(mod).ContinueWith(ps =>
                                 {
-                                    if (ps.Status == TaskStatus.RanToCompletion && ps.Result != null)
+                                    if (ps.Status == TaskStatus.RanToCompletion)
                                     {
-                                        _cachedPerModSavings = ps.Result;
-                                        _needsUIRefresh = true;
+                                        try { _cachedPerModSavings[mod] = ps.Result; } catch { }
+                                        _uiThreadActions.Enqueue(() => { _perModSavingsRevision++; _footerTotalsDirty = true; _needsUIRefresh = true; });
                                     }
                                 }, TaskScheduler.Default);
                                 _ = _backupService.HasBackupForModAsync(mod).ContinueWith(bt =>
@@ -431,31 +381,221 @@ public sealed partial class ConversionUI
                                     if (bt.Status == TaskStatus.RanToCompletion)
                                     {
                                         bool any = bt.Result;
-                                        try { any = any || _backupService.HasPmpBackupForModAsync(mod).GetAwaiter().GetResult(); } catch { }
+                                        try { any = any || _backupService.HasPmpBackupForModAsync(mod).GetAwaiter().GetResult(); }
+                                        catch (Exception ex) { _logger.LogError(ex, "HasPmpBackup check failed for {mod}", mod); }
                                         _cacheService.SetModHasBackup(mod, any);
                                     }
                                 });
-                                _running = false;
+                                _uiThreadActions.Enqueue(() => { _running = false; });
                             });
                     }
                 }
-                else
-                {
-                    var allFilesForMod = files;
-                    try
-                    {
-                        if (_configService.Current.IncludeHiddenModTexturesOnConvert && _scannedByMod.TryGetValue(mod, out var all) && all != null && all.Count > 0)
-                            allFilesForMod = all;
-                    }
-                    catch { }
-                    var toConvert = BuildToConvert(allFilesForMod);
-                    ResetConversionProgress();
-                    ResetRestoreProgress();
-                    _ = _conversionService.StartConversionAsync(toConvert);
+                if ((excluded || restoreDisabledByAuto) && ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
+                    ShowTooltip(excluded ? "Mod excluded by tags." : "Automatic mode: restore disabled for installed mods.");
+                ImGui.PopStyleColor(4);
+                if (!(excluded || restoreDisabledByAuto))
+                    ShowTooltip("Restore backups for this mod.");
                 }
             }
-            ImGui.PopStyleColor(4);
-            ImGui.EndDisabled();
         }
+
+        if (totalAll == 0)
+        {
+            if (anyBackup)
+            {
+                if (hasPmpBackup && !isOrphan)
+                {
+                    ImGui.PushStyleColor(ImGuiCol.Button, ShrinkUColors.ReinstallButton);
+                    ImGui.PushStyleColor(ImGuiCol.ButtonHovered, ShrinkUColors.ReinstallButtonHovered);
+                    ImGui.PushStyleColor(ImGuiCol.ButtonActive, ShrinkUColors.ReinstallButtonActive);
+                    ImGui.PushStyleColor(ImGuiCol.Text, ShrinkUColors.ButtonTextOnAccent);
+                    using (var _d = ImRaii.Disabled(ActionsDisabled()))
+                    {
+                    if (ImGui.Button($"Reinstall##reinstall-{mod}", new Vector2(60, 0)))
+                    {
+                        _running = true;
+                        ResetBothProgress();
+                        var progress = new Progress<(string, int, int)>(e => { _currentTexture = e.Item1; _backupIndex = e.Item2; _backupTotal = e.Item3; });
+                        _ = _backupService.ReinstallModFromLatestPmpAsync(mod, progress, CancellationToken.None)
+                            .ContinueWith(t =>
+                            {
+                                var success = t.Status == TaskStatus.RanToCompletion && t.Result;
+                                _uiThreadActions.Enqueue(() =>
+                                {
+                                    SetStatus(success ? $"Reinstall completed for {mod}" : $"Reinstall failed for {mod}");
+                                    _disableActionsUntilUtc = DateTime.UtcNow.AddSeconds(2);
+                                    _needsUIRefresh = true;
+                                    ClearModCaches(mod);
+                                    RefreshModState(mod, "reinstall-completed-flat");
+                                });
+                                ResetBothProgress();
+                                _uiThreadActions.Enqueue(() => { _running = false; });
+                            }, TaskScheduler.Default);
+                    }
+                    ShowTooltip("Reinstall mod from PMP backup.");
+                    }
+                    ImGui.PopStyleColor(4);
+                }
+                else if (!isOrphan)
+                {
+                    ImGui.PushStyleColor(ImGuiCol.Button, ShrinkUColors.RestoreButton);
+                    ImGui.PushStyleColor(ImGuiCol.ButtonHovered, ShrinkUColors.RestoreButtonHovered);
+                    ImGui.PushStyleColor(ImGuiCol.ButtonActive, ShrinkUColors.RestoreButtonActive);
+                    ImGui.PushStyleColor(ImGuiCol.Text, ShrinkUColors.ButtonTextOnAccent);
+                    using (var _d = ImRaii.Disabled(ActionsDisabled()))
+                    {
+                    if (ImGui.Button($"Restore##restore-{mod}", new Vector2(60, 0)))
+                    {
+                        _running = true;
+                        _modsWithBackupCache.TryRemove(mod, out _);
+                        ResetBothProgress();
+                        _currentRestoreMod = mod;
+                        var progress = new Progress<(string, int, int)>(e => { _currentTexture = e.Item1; _backupIndex = e.Item2; _backupTotal = e.Item3; _currentRestoreModIndex = e.Item2; _currentRestoreModTotal = e.Item3; });
+                        _ = _backupService.RestoreLatestForModAsync(mod, progress, CancellationToken.None)
+                            .ContinueWith(t => {
+                                var success = t.Status == TaskStatus.RanToCompletion && t.Result;
+                                try { _backupService.RedrawPlayer(); }
+                                catch (Exception ex) { _logger.LogError(ex, "RedrawPlayer after reinstall failed for {mod}", mod); }
+                                RefreshModState(mod, "restore-flat-nonconvertible");
+                                _ = _backupService.ComputeSavingsForModAsync(mod).ContinueWith(ps =>
+                                {
+                                    if (ps.Status == TaskStatus.RanToCompletion)
+                                    {
+                                        try { _cachedPerModSavings[mod] = ps.Result; } catch { }
+                                        _uiThreadActions.Enqueue(() => { _perModSavingsRevision++; _footerTotalsDirty = true; _needsUIRefresh = true; });
+                                    }
+                                }, TaskScheduler.Default);
+                                _uiThreadActions.Enqueue(() => { _running = false; });
+                            });
+                    }
+                    ShowTooltip("Restore textures from backup.");
+                    }
+                    ImGui.PopStyleColor(4);
+                }
+            }
+            else
+            {
+                ImGui.PushStyleColor(ImGuiCol.Button, ShrinkUColors.Accent);
+                ImGui.PushStyleColor(ImGuiCol.ButtonHovered, ShrinkUColors.AccentHovered);
+                ImGui.PushStyleColor(ImGuiCol.ButtonActive, ShrinkUColors.AccentActive);
+                ImGui.PushStyleColor(ImGuiCol.Text, ShrinkUColors.ButtonTextOnAccent);
+                var backupLabel = $"Backup##backup-{mod}";
+                using (var _d = ImRaii.Disabled(isOrphan || ActionsDisabled()))
+                {
+                if (ImGui.Button(backupLabel, new Vector2(60, 0)))
+                {
+                    _running = true;
+                    ResetBothProgress();
+                    SetStatus($"Creating full mod backup (PMP) for {mod}");
+                    var progress = new Progress<(string,int,int)>(e => { _currentTexture = e.Item1; _backupIndex = e.Item2; _backupTotal = e.Item3; });
+                    _ = _backupService.CreateFullModBackupAsync(mod, progress, CancellationToken.None)
+                        .ContinueWith(t =>
+                        {
+                            var success = t.Status == TaskStatus.RanToCompletion && t.Result;
+                            _uiThreadActions.Enqueue(() => { SetStatus(success ? $"Backup completed for {mod}" : $"Backup failed for {mod}"); });
+                            try { RefreshModState(mod, "manual-pmp-backup-button"); }
+                            catch (Exception ex) { _logger.LogError(ex, "RefreshModState after manual PMP backup failed for {mod}", mod); }
+                            _ = _backupService.ComputeSavingsForModAsync(mod).ContinueWith(ps =>
+                            {
+                                if (ps.Status == TaskStatus.RanToCompletion)
+                                {
+                                    try { _cachedPerModSavings[mod] = ps.Result; } catch { }
+                                    _uiThreadActions.Enqueue(() => { _perModSavingsRevision++; _footerTotalsDirty = true; _needsUIRefresh = true; });
+                                }
+                            }, TaskScheduler.Default);
+                            _ = _backupService.HasBackupForModAsync(mod).ContinueWith(bt =>
+                            {
+                                if (bt.Status == TaskStatus.RanToCompletion)
+                                {
+                                    bool any = bt.Result;
+                                    try { any = any || _backupService.HasPmpBackupForModAsync(mod).GetAwaiter().GetResult(); }
+                                    catch (Exception ex) { _logger.LogError(ex, "HasPmpBackup check failed for {mod}", mod); }
+                                    _cacheService.SetModHasBackup(mod, any);
+                                    _modsWithPmpCache[mod] = true;
+                                }
+                            });
+                            _uiThreadActions.Enqueue(() => { _running = false; ResetBothProgress(); });
+                        }, TaskScheduler.Default);
+                }
+                if (ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
+                    ShowTooltip("Create a full mod backup (PMP).");
+                ImGui.PopStyleColor(4);
+                }
+            }
+        }
+
+        var canInstall = false;
+        if (isOrphan && hasPmpBackup)
+        {
+            try
+            {
+                var info = _orphaned.FirstOrDefault(x => string.Equals(x.ModFolderName, mod, StringComparison.OrdinalIgnoreCase));
+                canInstall = info != null && !string.IsNullOrWhiteSpace(info.LatestPmpPath);
+            }
+            catch (Exception ex) { _logger.LogError(ex, "Resolve install capability failed for {mod}", mod); canInstall = false; }
+        }
+        if (isOrphan && hasPmpBackup)
+        {
+            ImGui.PushStyleColor(ImGuiCol.Button, ShrinkUColors.Accent);
+            ImGui.PushStyleColor(ImGuiCol.ButtonHovered, ShrinkUColors.AccentHovered);
+            ImGui.PushStyleColor(ImGuiCol.ButtonActive, ShrinkUColors.AccentActive);
+            ImGui.PushStyleColor(ImGuiCol.Text, ShrinkUColors.ButtonTextOnAccent);
+            using (var _d = ImRaii.Disabled(ActionsDisabled() || !canInstall))
+            if (ImGui.Button($"Install##install-{mod}", new Vector2(60, 0)))
+            {
+                _running = true;
+                ResetBothProgress();
+                var progress = new Progress<(string, int, int)>(e => { _currentTexture = e.Item1; _backupIndex = e.Item2; _backupTotal = e.Item3; });
+                _ = _backupService.ReinstallModFromLatestPmpAsync(mod, progress, CancellationToken.None)
+                    .ContinueWith(t =>
+                    {
+                        var success = t.Status == TaskStatus.RanToCompletion && t.Result;
+                        _uiThreadActions.Enqueue(() =>
+                        {
+                            SetStatus(success ? $"Install completed for {mod}" : $"Install failed for {mod}");
+                            _disableActionsUntilUtc = DateTime.UtcNow.AddSeconds(2);
+                            _needsUIRefresh = true;
+                            ClearModCaches(mod);
+                        });
+                        try
+                        {
+                            var am = _configService.Current.TextureProcessingMode == TextureProcessingMode.Automatic;
+                            if (am)
+                                _ = _conversionService.StartAutomaticConversionForModWithDelayAsync(mod, 2000);
+                        }
+                        catch (Exception ex) { _logger.LogError(ex, "StartAutomaticConversionForModWithDelayAsync failed for {mod}", mod); }
+                        try { _configService.Current.ExternalConvertedMods.Remove(mod); _configService.Save(); }
+                        catch (Exception ex) { _logger.LogError(ex, "Update ExternalConvertedMods after install failed for {mod}", mod); }
+                        try { RefreshModState(mod, "orphan-install-flat"); }
+                        catch (Exception ex) { _logger.LogError(ex, "RefreshModState after install failed for {mod}", mod); }
+                        try
+                        {
+                            var orphans = _backupService.FindOrphanedBackupsAsync().GetAwaiter().GetResult();
+                            _uiThreadActions.Enqueue(() =>
+                            {
+                                _orphaned = orphans ?? new List<ShrinkU.Services.TextureBackupService.OrphanBackupInfo>();
+                                _orphanRevision++;
+                                _needsUIRefresh = true;
+                                RequestUiRefresh("orphan-refresh-after-install");
+                            });
+                        }
+                        catch (Exception ex) { _logger.LogError(ex, "FindOrphanedBackupsAsync after install failed for {mod}", mod); }
+                        _ = _backupService.ComputeSavingsForModAsync(mod).ContinueWith(ps =>
+                        {
+                            if (ps.Status == TaskStatus.RanToCompletion)
+                            {
+                                try { _cachedPerModSavings[mod] = ps.Result; } catch { }
+                                _uiThreadActions.Enqueue(() => { _perModSavingsRevision++; _footerTotalsDirty = true; _needsUIRefresh = true; });
+                            }
+                        }, TaskScheduler.Default);
+                        _uiThreadActions.Enqueue(() => { _running = false; _needsUIRefresh = true; });
+                    }, TaskScheduler.Default);
+            }
+            ShowTooltip("Install mod from PMP backup if Penumbra removed it.");
+            ImGui.PopStyleColor(4);
+            ImGui.SameLine();
+        }
+
+        // No backup creation button for non-convertible mods without backups
     }
 }

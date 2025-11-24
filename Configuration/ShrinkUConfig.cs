@@ -62,6 +62,17 @@ public sealed class ShrinkUConfig : IPluginConfiguration
     // Release changelog tracking
     public string LastSeenReleaseChangelogVersion { get; set; } = string.Empty;
     public string ReleaseChangelogUrl { get; set; } = "https://sphene.online/shrinku/changelog.json";
+
+    // Debug tracing controls
+    public bool DebugTraceModStateChanges { get; set; } = false;
+    public bool DebugTraceUiRefresh { get; set; } = false;
+    public bool DebugTraceActions { get; set; } = false;
+
+    public int MaxStartupThreads { get; set; } = Math.Max(1, Math.Min(Environment.ProcessorCount, 4));
+    public int StartupMaxDurationSeconds { get; set; } = 30;
+    public int StartupFolderTimeoutSeconds { get; set; } = 10;
+    public int StartupCpuLimitPercent { get; set; } = 80;
+    public bool EnableStartupPriorityQueue { get; set; } = true;
 }
 
 public sealed class ExternalChangeMarker

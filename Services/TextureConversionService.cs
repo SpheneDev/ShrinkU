@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Logging;
 using ShrinkU.Configuration;
+using ShrinkU.Helpers;
 using System;
 using Penumbra.Api.Enums;
 using System.Collections.Generic;
@@ -39,6 +40,8 @@ public sealed class TextureConversionService : IDisposable
     private Dictionary<string, string[]>? _lastAutoCandidates;
     private CancellationTokenSource? _autoPollCts;
     private Task? _autoPollTask;
+    private CancellationTokenSource? _backupRefreshCts;
+    private bool _subscriptionsAttached = false;
 
 public TextureConversionService(ILogger logger, PenumbraIpc penumbraIpc, TextureBackupService backupService, ShrinkUConfigService configService, ModStateService modStateService)
 {
@@ -52,9 +55,62 @@ public TextureConversionService(ILogger logger, PenumbraIpc penumbraIpc, Texture
         _backupProgress.ProgressChanged += (_, e) => OnBackupProgress?.Invoke(e);
 
         // Forward Penumbra change broadcasts to UI consumers, keep delegate refs for unsubscription
-        _onModAdded = dir => OnPenumbraModAdded?.Invoke(dir);
-        _onModDeleted = dir => OnPenumbraModDeleted?.Invoke(dir);
-        _onEnabledChanged = enabled => OnPenumbraEnabledChanged?.Invoke(enabled);
+        _onModAdded = dir => {
+            OnPenumbraModAdded?.Invoke(dir);
+            _ = Task.Run(async () => { try { await UpdateAllModMetadataAsync().ConfigureAwait(false); } catch { } });
+        };
+        _onModDeleted = dir => {
+            OnPenumbraModDeleted?.Invoke(dir);
+            try { _modStateService.RemoveEntry(dir); } catch { }
+            _ = Task.Run(async () => { try { await UpdateAllModUsedTextureFilesAsync().ConfigureAwait(false); } catch { } });
+        };
+        _onModPathChanged = (modDir, newPath) =>
+        {
+            try
+            {
+                var names = _penumbraIpc.GetModList();
+                var disp = names.TryGetValue(modDir, out var dn) ? (dn ?? string.Empty) : string.Empty;
+                var (folder, leaf) = SplitFolderAndLeaf(newPath, string.IsNullOrWhiteSpace(disp) ? (_modStateService.Get(modDir).RelativeModName ?? string.Empty) : disp);
+                var e = _modStateService.Get(modDir);
+                _modStateService.UpdateCurrentModInfo(modDir, e.ModAbsolutePath ?? string.Empty, folder, e.CurrentVersion ?? string.Empty, e.CurrentAuthor ?? string.Empty, string.IsNullOrWhiteSpace(leaf) ? (e.RelativeModName ?? string.Empty) : leaf);
+                _modStateService.Save();
+                try { OnPenumbraModsChanged?.Invoke(); } catch { }
+            }
+            catch { }
+        };
+        _onModMoved = (oldDir, newDir) =>
+        {
+            try
+            {
+                _ = Task.Run(() =>
+                {
+                    try
+                    {
+                        var names = _penumbraIpc.GetModList();
+                        var tuple = _penumbraIpc.GetModPath(newDir);
+                        var disp = names.TryGetValue(newDir, out var dn) ? (dn ?? string.Empty) : string.Empty;
+                        var (folder, leaf) = SplitFolderAndLeaf(tuple.FullPath ?? string.Empty, disp);
+                        var existing = _modStateService.Get(newDir);
+                        _modStateService.UpdateCurrentModInfo(newDir, existing.ModAbsolutePath, folder, existing.CurrentVersion, existing.CurrentAuthor, string.IsNullOrWhiteSpace(leaf) ? (existing.RelativeModName ?? string.Empty) : leaf);
+                        _modStateService.Save();
+                    }
+                    catch { }
+                });
+            }
+            catch { }
+        };
+        _onEnabledChanged = enabled =>
+        {
+            OnPenumbraEnabledChanged?.Invoke(enabled);
+            if (enabled)
+            {
+                _ = Task.Run(async () =>
+                {
+                    try { await UpdateAllModTextureCountsAsync().ConfigureAwait(false); } catch { }
+                    try { await UpdateAllModUsedTextureFilesAsync().ConfigureAwait(false); } catch { }
+                });
+            }
+        };
         _onModSettingChanged = (change, collectionId, modDir, inherited) =>
         {
             _lastModSettingChangedAt = DateTime.UtcNow;
@@ -62,29 +118,437 @@ public TextureConversionService(ILogger logger, PenumbraIpc penumbraIpc, Texture
             // When a mod setting changes (enable/disable, priority, etc.),
             // attempt an automatic conversion run if in Automatic mode.
             TryScheduleAutomaticConversion("mod-setting-changed");
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    var coll = await GetCurrentCollectionAsync().ConfigureAwait(false);
+                    if (coll.HasValue)
+                    {
+                        var states = await GetAllModEnabledStatesAsync(coll.Value.Id).ConfigureAwait(false);
+                        if (states.TryGetValue(modDir, out var st))
+                        {
+                            _modStateService.UpdateEnabledState(modDir, st.Enabled, st.Priority);
+                        }
+                    }
+                }
+                catch { }
+                try { await UpdateAllModUsedTextureFilesAsync().ConfigureAwait(false); } catch { }
+            });
         };
         _onModsChanged = () =>
         {
             OnPenumbraModsChanged?.Invoke();
-            // ModsAdded/Deleted/Path changes may reflect newly used files.
             TryScheduleAutomaticConversion("mods-changed");
+            try
+            {
+                _backupRefreshCts?.Cancel();
+                _backupRefreshCts?.Dispose();
+                _backupRefreshCts = new CancellationTokenSource();
+                var token = _backupRefreshCts.Token;
+                _ = Task.Run(async () =>
+                {
+                    try
+                    {
+                        await Task.Delay(1000, token).ConfigureAwait(false);
+                        if (token.IsCancellationRequested) return;
+                        try { await UpdateAllModPathsAsync().ConfigureAwait(false); } catch { }
+                        await _backupService.RefreshAllBackupStateAsync().ConfigureAwait(false);
+                    }
+                    catch (TaskCanceledException) { }
+                    catch { }
+                });
+            }
+            catch { }
+            try { _ = UpdateAllModTextureCountsAsync(); } catch { }
+            try { _ = UpdateAllModUsedTextureFilesAsync(); } catch { }
         };
 
         _onPlayerResourcesChanged = () =>
         {
             OnPlayerResourcesChanged?.Invoke();
             TryScheduleAutomaticConversion("player-resources-changed");
+            try { _ = UpdateAllModUsedTextureFilesAsync(); } catch { }
         };
 
+        
+    }
+
+    private void AttachPenumbraSubscriptions()
+    {
+        if (_subscriptionsAttached) return;
         _penumbraIpc.ModAdded += _onModAdded;
         _penumbraIpc.ModDeleted += _onModDeleted;
+        _penumbraIpc.ModPathChanged += _onModPathChanged;
+        _penumbraIpc.ModMoved += _onModMoved;
         _penumbraIpc.PenumbraEnabledChanged += _onEnabledChanged;
         _penumbraIpc.ModSettingChanged += _onModSettingChanged;
         _penumbraIpc.ModsChanged += _onModsChanged;
         _penumbraIpc.PlayerResourcesChanged += _onPlayerResourcesChanged;
+        _subscriptionsAttached = true;
+    }
 
-        // Start lightweight auto-conversion watcher for standalone mode
-        StartAutoConversionWatcher();
+    private void DetachPenumbraSubscriptions()
+    {
+        if (!_subscriptionsAttached) return;
+        try { _penumbraIpc.ModAdded -= _onModAdded; } catch { }
+        try { _penumbraIpc.ModDeleted -= _onModDeleted; } catch { }
+        try { _penumbraIpc.ModPathChanged -= _onModPathChanged; } catch { }
+        try { _penumbraIpc.ModMoved -= _onModMoved; } catch { }
+        try { _penumbraIpc.PenumbraEnabledChanged -= _onEnabledChanged; } catch { }
+        try { _penumbraIpc.ModSettingChanged -= _onModSettingChanged; } catch { }
+        try { _penumbraIpc.ModsChanged -= _onModsChanged; } catch { }
+        try { _penumbraIpc.PlayerResourcesChanged -= _onPlayerResourcesChanged; } catch { }
+        _subscriptionsAttached = false;
+    }
+
+    public void SetEnabled(bool enabled)
+    {
+        if (enabled)
+        {
+            AttachPenumbraSubscriptions();
+            StartAutoConversionWatcher();
+        }
+        else
+        {
+            DetachPenumbraSubscriptions();
+            StopAutoConversionWatcher();
+            try { _backupRefreshCts?.Cancel(); } catch { }
+            try { _backupRefreshCts?.Dispose(); } catch { }
+            _backupRefreshCts = null;
+        }
+    }
+
+    public static string NormalizeLeafKey(string mod)
+    {
+        if (string.IsNullOrWhiteSpace(mod)) return string.Empty;
+        var leaf = mod.Replace('/', System.IO.Path.DirectorySeparatorChar).Replace('\\', System.IO.Path.DirectorySeparatorChar).TrimEnd(System.IO.Path.DirectorySeparatorChar);
+        var segs = leaf.Split(System.IO.Path.DirectorySeparatorChar);
+        return segs.Length > 0 ? segs[^1] : leaf;
+    }
+
+    public static string ComputeRelativePathFromAbs(string root, string abs)
+    {
+        if (string.IsNullOrWhiteSpace(root) || string.IsNullOrWhiteSpace(abs)) return string.Empty;
+        try { return System.IO.Path.GetRelativePath(root, abs).Replace('\\', '/'); } catch { return string.Empty; }
+    }
+
+    private static (string folder, string leaf) SplitFolderAndLeaf(string relFull, string dispName)
+    {
+        var p = (relFull ?? string.Empty).Replace('\\', '/').TrimEnd('/');
+        var d = (dispName ?? string.Empty).Replace('\\', '/').TrimEnd('/');
+        if (string.IsNullOrWhiteSpace(p)) return (string.Empty, string.Empty);
+        var pSegs = p.Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (!string.IsNullOrWhiteSpace(d))
+        {
+            var dSegs = d.Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            if (pSegs.Length >= dSegs.Length)
+            {
+                bool match = true;
+                for (int i = 0; i < dSegs.Length; i++)
+                {
+                    if (!string.Equals(pSegs[pSegs.Length - dSegs.Length + i], dSegs[i], StringComparison.OrdinalIgnoreCase))
+                    { match = false; break; }
+                }
+                if (match)
+                {
+                    var folder = string.Join('/', pSegs.Take(pSegs.Length - dSegs.Length));
+                    return (folder, d);
+                }
+            }
+        }
+        var idx = p.LastIndexOf('/');
+        if (idx >= 0) return (p.Substring(0, idx), p.Substring(idx + 1));
+        return (string.Empty, p);
+    }
+
+    public event Action<(int processed, int total, int etaSeconds)>? OnStartupProgress;
+
+    public async Task RunInitialParallelUpdateAsync(int maxThreads, CancellationToken token)
+    {
+        try
+        {
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            var mods = await GetAllModFoldersAsync().ConfigureAwait(false);
+            sw.Stop();
+            try { _logger.LogDebug("Initial update step: GetAllModFolders count={count} elapsedMs={ms}", mods.Count, (int)sw.ElapsedMilliseconds); } catch { }
+            var total = mods.Count;
+            var start = DateTime.UtcNow;
+            sw.Restart();
+            var names = await GetModDisplayNamesAsync().ConfigureAwait(false);
+            sw.Stop();
+            try { _logger.LogDebug("Initial update step: GetModDisplayNames count={count} elapsedMs={ms}", names.Count, (int)sw.ElapsedMilliseconds); } catch { }
+            sw.Restart();
+            var tags = await GetModTagsAsync().ConfigureAwait(false);
+            sw.Stop();
+            try { _logger.LogDebug("Initial update step: GetModTags mods={mods} elapsedMs={ms}", tags.Count, (int)sw.ElapsedMilliseconds); } catch { }
+            sw.Restart();
+            var groupedTextures = await GetGroupedCandidateTexturesAsync().ConfigureAwait(false);
+            sw.Stop();
+            try { _logger.LogDebug("Initial update step: GroupedTextureScan mods={mods} elapsedMs={ms}", groupedTextures.Count, (int)sw.ElapsedMilliseconds); } catch { }
+            Guid? collId = null;
+            sw.Restart();
+            try { var coll = await GetCurrentCollectionAsync().ConfigureAwait(false); collId = coll?.Id; } catch { }
+            sw.Stop();
+            try { _logger.LogDebug("Initial update step: GetCurrentCollection elapsedMs={ms}", (int)sw.ElapsedMilliseconds); } catch { }
+            Dictionary<string, (bool Enabled, int Priority, bool Inherited, bool Temporary)> states = new(StringComparer.OrdinalIgnoreCase);
+            if (collId.HasValue)
+            {
+                sw.Restart();
+                try { states = await GetAllModEnabledStatesAsync(collId.Value).ConfigureAwait(false); } catch { }
+                sw.Stop();
+                try { _logger.LogDebug("Initial update step: GetAllModEnabledStates count={count} elapsedMs={ms}", states.Count, (int)sw.ElapsedMilliseconds); } catch { }
+            }
+            var snap = _modStateService.Snapshot();
+            var root = _penumbraIpc.ModDirectory ?? string.Empty;
+
+            Func<string, int> prio = m =>
+            {
+                var key = NormalizeLeafKey(m);
+                var p = 0;
+                if (snap.TryGetValue(key, out var e) && e != null && e.TotalTextures > 0) p += 2;
+                if (states.TryGetValue(m, out var st) && st.Enabled) p += 3;
+                return p;
+            };
+            var ordered = mods.OrderByDescending(prio).ThenBy(m => m, StringComparer.OrdinalIgnoreCase).ToList();
+
+            using var sem = new SemaphoreSlim(Math.Max(1, maxThreads));
+            int processed = 0;
+            var tasks = new List<Task>(ordered.Count);
+            foreach (var mod in ordered)
+            {
+                await sem.WaitAsync(token).ConfigureAwait(false);
+                tasks.Add(Task.Run(() =>
+                {
+                    try
+                    {
+                        var key = NormalizeLeafKey(mod);
+                        int fileCount = 0;
+                        try
+                        {
+                            if (groupedTextures.TryGetValue(key, out var list) && list != null)
+                                fileCount = list.Count;
+                        }
+                        catch { fileCount = 0; }
+                        _modStateService.UpdateTextureCount(key, fileCount);
+
+                        var display = names.TryGetValue(key, out var dn) ? (dn ?? string.Empty) : string.Empty;
+                        var tagList = tags.TryGetValue(key, out var tl) ? (tl ?? new List<string>()) : new List<string>();
+                        _modStateService.UpdateDisplayAndTags(key, display, tagList);
+
+                        string abs = string.Empty;
+                        try
+                        {
+                            var defaultAbs = string.IsNullOrWhiteSpace(root) ? string.Empty : System.IO.Path.Combine(root, key);
+                            abs = (!string.IsNullOrWhiteSpace(defaultAbs) && Directory.Exists(defaultAbs)) ? defaultAbs : (_backupService.GetModAbsolutePath(key) ?? string.Empty);
+                        }
+                        catch { abs = _backupService.GetModAbsolutePath(key) ?? string.Empty; }
+                        string relFolder = string.Empty;
+                        string relLeaf = string.Empty;
+                        try
+                        {
+                            var (ec, fullPath, _, _) = _penumbraIpc.GetModPath(key);
+                            var p = (fullPath ?? string.Empty).Replace('\\', '/');
+                            try { _logger.LogDebug("PenumbraRelativePath Startup: mod={mod} ec={ec} path={path}", key, ec, p); } catch { }
+                            var relFull = string.Empty;
+                            if (ec == Penumbra.Api.Enums.PenumbraApiEc.Success && !string.IsNullOrWhiteSpace(p))
+                                relFull = p;
+                            else
+                                relFull = ComputeRelativePathFromAbs(root, abs);
+                            relFull = (relFull ?? string.Empty).Replace('\\', '/').TrimEnd('/');
+                            if (!string.IsNullOrWhiteSpace(relFull))
+                            {
+                                var dispName = names.TryGetValue(key, out var dispTmp) ? (dispTmp ?? string.Empty) : string.Empty;
+                                if (!string.IsNullOrWhiteSpace(dispName))
+                                {
+                                    var pSegs = relFull.Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                                    var dSegs = dispName.Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                                    if (pSegs.Length >= dSegs.Length)
+                                    {
+                                        bool tailMatches = true;
+                                        for (int i = 0; i < dSegs.Length; i++)
+                                        {
+                                            var ps = pSegs[pSegs.Length - dSegs.Length + i];
+                                            var ds = dSegs[i];
+                                            if (!string.Equals(ps, ds, StringComparison.OrdinalIgnoreCase))
+                                            {
+                                                tailMatches = false;
+                                                break;
+                                            }
+                                        }
+                                        if (tailMatches)
+                                        {
+                                            relFolder = string.Join('/', pSegs.Take(pSegs.Length - dSegs.Length));
+                                            relLeaf = dispName;
+                                        }
+                                    }
+                                }
+                                if (string.IsNullOrWhiteSpace(relLeaf))
+                                {
+                                    var idx = relFull.LastIndexOf('/');
+                                    if (idx >= 0)
+                                    {
+                                        relFolder = relFull.Substring(0, idx);
+                                        relLeaf = relFull.Substring(idx + 1);
+                                    }
+                                    else
+                                    {
+                                        relFolder = string.Empty;
+                                        relLeaf = relFull;
+                                    }
+                                }
+                            }
+                        }
+                        catch
+                        {
+                            var relFull = ComputeRelativePathFromAbs(root, abs);
+                            relFull = (relFull ?? string.Empty).Replace('\\', '/').TrimEnd('/');
+                            if (!string.IsNullOrWhiteSpace(relFull))
+                            {
+                                var dispName = names.TryGetValue(key, out var dispTmp2) ? (dispTmp2 ?? string.Empty) : string.Empty;
+                                if (!string.IsNullOrWhiteSpace(dispName))
+                                {
+                                    var pSegs = relFull.Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                                    var dSegs = dispName.Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                                    if (pSegs.Length >= dSegs.Length)
+                                    {
+                                        bool tailMatches = true;
+                                        for (int i = 0; i < dSegs.Length; i++)
+                                        {
+                                            var ps = pSegs[pSegs.Length - dSegs.Length + i];
+                                            var ds = dSegs[i];
+                                            if (!string.Equals(ps, ds, StringComparison.OrdinalIgnoreCase))
+                                            {
+                                                tailMatches = false;
+                                                break;
+                                            }
+                                        }
+                                        if (tailMatches)
+                                        {
+                                            relFolder = string.Join('/', pSegs.Take(pSegs.Length - dSegs.Length));
+                                            relLeaf = dispName;
+                                        }
+                                    }
+                                }
+                                if (string.IsNullOrWhiteSpace(relLeaf))
+                                {
+                                    var idx = relFull.LastIndexOf('/');
+                                    if (idx >= 0)
+                                    {
+                                        relFolder = relFull.Substring(0, idx);
+                                        relLeaf = relFull.Substring(idx + 1);
+                                    }
+                                    else
+                                    {
+                                        relFolder = string.Empty;
+                                        relLeaf = relFull;
+                                    }
+                                }
+                            }
+                        }
+                        var existing = snap.TryGetValue(key, out var e) && e != null ? e : null;
+                        var ver = existing?.CurrentVersion ?? string.Empty;
+                        var auth = existing?.CurrentAuthor ?? string.Empty;
+                        _modStateService.UpdateCurrentModInfo(key, abs, relFolder, ver, auth, relLeaf);
+
+                        if (states.TryGetValue(mod, out var st))
+                            _modStateService.UpdateEnabledState(key, st.Enabled, st.Priority);
+                    }
+                    catch { }
+                    finally
+                    {
+                        var done = Interlocked.Increment(ref processed);
+                        var elapsed = DateTime.UtcNow - start;
+                        var remaining = Math.Max(0, total - done);
+                        var eta = done > 0 ? (int)Math.Round(elapsed.TotalSeconds / done * remaining) : 0;
+                        try { OnStartupProgress?.Invoke((done, total, eta)); } catch { }
+                        try { sem.Release(); } catch { }
+                    }
+                }, token));
+            }
+                sw.Restart();
+                try { await Task.WhenAll(tasks).ConfigureAwait(false); } catch { }
+                sw.Stop();
+                try { _logger.LogDebug("Initial update step: Per-mod tasks elapsedMs={ms}", (int)sw.ElapsedMilliseconds); } catch { }
+                try { _modStateService.Save(); } catch { }
+                try { _modStateService.RecomputeInstalledButNotConverted(); } catch { }
+                try
+                {
+                    var elapsedTotal = DateTime.UtcNow - start;
+                    var avgPerModMs = total > 0 ? (int)Math.Round(elapsedTotal.TotalMilliseconds / total) : 0;
+                    var mem = GC.GetTotalMemory(false);
+                    var gc0 = GC.CollectionCount(0);
+                    var gc1 = GC.CollectionCount(1);
+                    var gc2 = GC.CollectionCount(2);
+                    _logger.LogDebug("Initial update completed: mods={mods}, elapsedMs={elapsed}, avgPerModMs={avg}, memKB={mem}, gc0={gc0}, gc1={gc1}, gc2={gc2}", total, (int)Math.Round(elapsedTotal.TotalMilliseconds), avgPerModMs, (int)(mem / 1024), gc0, gc1, gc2);
+                }
+                catch { }
+        }
+        catch { }
+    }
+
+    public async Task RunStartupBenchmarkAsync(int maxThreads, CancellationToken token)
+    {
+        try
+        {
+            var proc = System.Diagnostics.Process.GetCurrentProcess();
+            var cpuStart = proc.TotalProcessorTime;
+            var memStart = GC.GetTotalMemory(false);
+            var swTotal = System.Diagnostics.Stopwatch.StartNew();
+
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            var mods = await GetAllModFoldersAsync().ConfigureAwait(false);
+            sw.Stop();
+            var modsMs = (int)sw.ElapsedMilliseconds;
+
+            sw.Restart();
+            var names = await GetModDisplayNamesAsync().ConfigureAwait(false);
+            sw.Stop();
+            var namesMs = (int)sw.ElapsedMilliseconds;
+
+            sw.Restart();
+            var tags = await GetModTagsAsync().ConfigureAwait(false);
+            sw.Stop();
+            var tagsMs = (int)sw.ElapsedMilliseconds;
+
+            sw.Restart();
+            var grouped = await GetGroupedCandidateTexturesAsync().ConfigureAwait(false);
+            sw.Stop();
+            var groupedMs = (int)sw.ElapsedMilliseconds;
+
+            sw.Restart();
+            await RunInitialParallelUpdateAsync(maxThreads, token).ConfigureAwait(false);
+            sw.Stop();
+            var initialMs = (int)sw.ElapsedMilliseconds;
+
+            sw.Restart();
+            await UpdateAllModUsedTextureFilesAsync().ConfigureAwait(false);
+            sw.Stop();
+            var usedMs = (int)sw.ElapsedMilliseconds;
+
+            sw.Restart();
+            _modStateService.Save();
+            sw.Stop();
+            var saveMs = (int)sw.ElapsedMilliseconds;
+
+            swTotal.Stop();
+            var cpuEnd = proc.TotalProcessorTime;
+            var memEnd = GC.GetTotalMemory(false);
+            var cpuMs = (int)Math.Round((cpuEnd - cpuStart).TotalMilliseconds);
+            var totalMs = (int)swTotal.ElapsedMilliseconds;
+            var gc0 = GC.CollectionCount(0);
+            var gc1 = GC.CollectionCount(1);
+            var gc2 = GC.CollectionCount(2);
+
+            try
+            {
+                _logger.LogDebug(
+                    "Startup benchmark: modsMs={modsMs}, namesMs={namesMs}, tagsMs={tagsMs}, groupedMs={groupedMs}, initialMs={initialMs}, usedMs={usedMs}, saveMs={saveMs}, totalMs={totalMs}, cpuMs={cpuMs}, memDeltaKB={memDelta}, gc0={gc0}, gc1={gc1}, gc2={gc2}",
+                    modsMs, namesMs, tagsMs, groupedMs, initialMs, usedMs, saveMs, totalMs, cpuMs, (int)((memEnd - memStart) / 1024), gc0, gc1, gc2);
+            }
+            catch { }
+        }
+        catch { }
     }
 
     public void Cancel()
@@ -121,6 +585,12 @@ public TextureConversionService(ILogger logger, PenumbraIpc penumbraIpc, Texture
             {
                 try
                 {
+                    var needing = await GetUsedModsNeedingProcessingAsync().ConfigureAwait(false);
+                    if (needing.Count == 0)
+                    {
+                        try { _logger.LogDebug("Auto trigger: no used mods need processing ({reason})", reason); } catch { }
+                        return;
+                    }
                     var candidates = await GetAutomaticCandidateTexturesAsync().ConfigureAwait(false);
                     if (candidates == null || candidates.Count == 0)
                     {
@@ -228,6 +698,7 @@ public TextureConversionService(ILogger logger, PenumbraIpc penumbraIpc, Texture
             return;
         }
 
+        PerfStep traceTotal = default;
         try
         {
             IsConverting = true;
@@ -236,6 +707,7 @@ public TextureConversionService(ILogger logger, PenumbraIpc penumbraIpc, Texture
             _cts = new CancellationTokenSource();
             var token = _cts.Token;
 
+            traceTotal = PerfTrace.Step(_logger, "StartConversion total");
             var root = _penumbraIpc.ModDirectory ?? string.Empty;
             var byMod = new Dictionary<string, Dictionary<string, string[]>>(StringComparer.OrdinalIgnoreCase);
 
@@ -268,7 +740,9 @@ public TextureConversionService(ILogger logger, PenumbraIpc penumbraIpc, Texture
                     try { hasPmp = await _backupService.HasPmpBackupForModAsync(modName).ConfigureAwait(false); } catch { }
                     if (!hasPmp)
                     {
+                        var tracePmp = PerfTrace.Step(_logger, $"Ensure PMP {modName}");
                         await _backupService.CreateFullModBackupAsync(modName, _backupProgress, token).ConfigureAwait(false);
+                        tracePmp.Dispose();
                     }
                 }
 
@@ -281,7 +755,9 @@ public TextureConversionService(ILogger logger, PenumbraIpc penumbraIpc, Texture
                     try { hasBackup = await _backupService.HasBackupForModAsync(modName).ConfigureAwait(false); } catch { }
                     if (!hasBackup)
                     {
+                        var traceBackup = PerfTrace.Step(_logger, $"Ensure Backup {modName}");
                         await _backupService.BackupAsync(modTextures, _backupProgress, token).ConfigureAwait(false);
+                        traceBackup.Dispose();
                     }
                 }
 
@@ -289,7 +765,9 @@ public TextureConversionService(ILogger logger, PenumbraIpc penumbraIpc, Texture
                 var redrawAfter = isLastPlannedMod || _cancelRequested;
 
                 // Convert textures for the current mod; support cancellation between files.
+                var traceConvert = PerfTrace.Step(_logger, $"Convert {modName}");
                 await _penumbraIpc.ConvertTextureFilesAsync(_logger, modTextures, _conversionProgress, token, redrawAfter).ConfigureAwait(false);
+                traceConvert.Dispose();
 
                 if (_cancelRequested || token.IsCancellationRequested)
                 {
@@ -299,9 +777,10 @@ public TextureConversionService(ILogger logger, PenumbraIpc penumbraIpc, Texture
                 // After conversion: evaluate per-mod savings and auto-restore if conversion made it larger.
                 try
                 {
+                    var traceSavings = PerfTrace.Step(_logger, $"Savings {modName}");
                     try { _modStateService.UpdateInstalledButNotConverted(modName, false); } catch { }
-                    var perMod = await _backupService.ComputePerModSavingsAsync().ConfigureAwait(false);
-                    if (perMod.TryGetValue(modName, out var stats) && stats != null && stats.ComparedFiles > 0)
+                    var stats = await _backupService.ComputeSavingsForModAsync(modName).ConfigureAwait(false);
+                    if (stats != null && stats.ComparedFiles > 0)
                     {
                         try { _modStateService.UpdateSavings(modName, stats.OriginalBytes, stats.CurrentBytes, stats.ComparedFiles); } catch { }
                         if (stats.CurrentBytes > stats.OriginalBytes)
@@ -341,6 +820,7 @@ public TextureConversionService(ILogger logger, PenumbraIpc penumbraIpc, Texture
                             }
                         }
                     }
+                    traceSavings.Dispose();
                 }
                 catch (Exception ex)
                 {
@@ -356,6 +836,7 @@ public TextureConversionService(ILogger logger, PenumbraIpc penumbraIpc, Texture
             _cancelRequested = false;
             IsConverting = false;
             OnConversionCompleted?.Invoke();
+            traceTotal.Dispose();
         }
     }
 
@@ -364,15 +845,12 @@ public TextureConversionService(ILogger logger, PenumbraIpc penumbraIpc, Texture
         if (!_penumbraIpc.APIAvailable)
         {
             _logger.LogDebug("Penumbra API not available; auto-scan aborted");
-            return new Dictionary<string, string[]>();
+            return new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase);
         }
-        // Scan all mod textures, then filter to only currently-used textures,
-        // and include only files that are not yet backed up (incremental mode).
-        var all = await _penumbraIpc.ScanModTexturesAsync().ConfigureAwait(false);
-        if (all.Count == 0)
-            return all;
-
+        // Build candidates only from currently-used textures for efficiency
+        var traceUsed = PerfTrace.Step(_logger, "AutoCandidates UsedPaths");
         var used = await _penumbraIpc.GetCurrentlyUsedTextureModPathsAsync().ConfigureAwait(false);
+        traceUsed.Dispose();
         if (used.Count == 0)
             return new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase);
 
@@ -391,11 +869,34 @@ public TextureConversionService(ILogger logger, PenumbraIpc penumbraIpc, Texture
             catch { }
         }
 
+        // Skip mods that already have backup and recorded conversion in mod_state
+        var snap = _modStateService.Snapshot();
+        var modsToScan = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var m in modsToCheck)
+        {
+            try
+            {
+                if (snap.TryGetValue(m, out var ms) && ms != null)
+                {
+                    var hasBackup = ms.HasTextureBackup || ms.HasPmpBackup;
+                    var converted = ms.ComparedFiles > 0 && !ms.InstalledButNotConverted;
+                    var totalTexturesKnown = ms.TotalTextures > 0;
+                    // Consider fully processed when backup exists and conversion stats are present,
+                    // and either all textures compared or the mod is marked not-installed-but-not-converted
+                    if (hasBackup && converted && (!totalTexturesKnown || ms.ComparedFiles >= ms.TotalTextures))
+                        continue;
+                }
+            }
+            catch { }
+            modsToScan.Add(m);
+        }
+
         // Query backed keys per mod to exclude already-backed files while allowing new ones.
         var backedKeysPerMod = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
         try
         {
-            var tasks = modsToCheck
+            var traceKeys = PerfTrace.Step(_logger, "AutoCandidates BackedKeysPerMod");
+            var tasks = modsToScan
                 .Select(m => _backupService.GetBackedKeysForModAsync(m)
                     .ContinueWith(t => (Mod: m, Keys: t.IsCompletedSuccessfully ? t.Result : new HashSet<string>(StringComparer.OrdinalIgnoreCase)), TaskScheduler.Default))
                 .ToArray();
@@ -405,13 +906,15 @@ public TextureConversionService(ILogger logger, PenumbraIpc penumbraIpc, Texture
                 var (mod, keys) = t.Result;
                 backedKeysPerMod[mod] = keys ?? new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             }
+            traceKeys.Dispose();
         }
         catch { }
 
         var pmpConvertedRelByMod = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
         try
         {
-            var tasksPmp = modsToCheck
+            var tracePmpRel = PerfTrace.Step(_logger, "AutoCandidates PmpConvertedRel");
+            var tasksPmp = modsToScan
                 .Select(m => _backupService.GetPmpConvertedRelPathsForModAsync(m)
                     .ContinueWith(t => (Mod: m, Rel: t.IsCompletedSuccessfully ? t.Result : new HashSet<string>(StringComparer.OrdinalIgnoreCase)), TaskScheduler.Default))
                 .ToArray();
@@ -421,33 +924,33 @@ public TextureConversionService(ILogger logger, PenumbraIpc penumbraIpc, Texture
                 var (mod, rel) = t.Result;
                 pmpConvertedRelByMod[mod] = rel ?? new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             }
+            tracePmpRel.Dispose();
         }
         catch { }
 
         var result = new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase);
-        foreach (var kv in all)
+        foreach (var file in used)
         {
-            var file = kv.Key;
             try
             {
                 var rel = !string.IsNullOrWhiteSpace(root) ? Path.GetRelativePath(root, file) : file;
                 var parts = rel.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
                 var modName = parts.Length > 1 ? parts[0] : string.Empty;
                 
-                if (string.IsNullOrWhiteSpace(modName) || !modsToCheck.Contains(modName))
+                if (string.IsNullOrWhiteSpace(modName) || !modsToScan.Contains(modName))
                     continue;
 
-                if (!string.IsNullOrWhiteSpace(_penumbraIpc.ModDirectory))
+                try
                 {
-                    try
+                    var modRoot = string.IsNullOrWhiteSpace(_penumbraIpc.ModDirectory) ? string.Empty : Path.Combine(_penumbraIpc.ModDirectory!, modName);
+                    if (!string.IsNullOrWhiteSpace(modRoot))
                     {
-                        var modRoot = Path.Combine(_penumbraIpc.ModDirectory!, modName);
                         var relToMod = Path.GetRelativePath(modRoot, file).Replace('\\', '/');
                         if (pmpConvertedRelByMod.TryGetValue(modName, out var relSet) && relSet != null && relSet.Contains(relToMod))
                             continue;
                     }
-                    catch { }
                 }
+                catch { }
 
                 // Build a prefixed path like BackupService uses to match keys
                 var prefixed = file;
@@ -463,10 +966,74 @@ public TextureConversionService(ILogger logger, PenumbraIpc penumbraIpc, Texture
             }
             catch { }
 
-            result[file] = kv.Value;
+            result[file] = Array.Empty<string>();
         }
 
         return result;
+    }
+
+    public async Task<HashSet<string>> GetUsedModsProcessedAsync()
+    {
+        var processed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            var used = await _penumbraIpc.GetCurrentlyUsedTextureModPathsAsync().ConfigureAwait(false);
+            var mods = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var root = _penumbraIpc.ModDirectory ?? string.Empty;
+            foreach (var path in used)
+            {
+                try
+                {
+                    var p = path ?? string.Empty;
+                    if (string.IsNullOrWhiteSpace(p)) continue;
+                    var rel = !string.IsNullOrWhiteSpace(root) ? System.IO.Path.GetRelativePath(root, p).Replace('\\', '/') : p.Replace('\\', '/');
+                    var slash = rel.IndexOf('/');
+                    var mod = slash >= 0 ? rel.Substring(0, slash) : rel;
+                    if (!string.IsNullOrWhiteSpace(mod)) mods.Add(mod);
+                }
+                catch { }
+            }
+            var snap = _modStateService.Snapshot();
+            foreach (var m in mods)
+            {
+                if (snap.TryGetValue(m, out var ms) && ms != null)
+                {
+                    var hasBackup = ms.HasTextureBackup || ms.HasPmpBackup;
+                    var converted = ms.ComparedFiles > 0 && !ms.InstalledButNotConverted;
+                    var totalKnown = ms.TotalTextures > 0;
+                    if (hasBackup && converted && (!totalKnown || ms.ComparedFiles >= ms.TotalTextures))
+                        processed.Add(m);
+                }
+            }
+        }
+        catch { }
+        return processed;
+    }
+
+    public async Task<HashSet<string>> GetUsedModsNeedingProcessingAsync()
+    {
+        var needing = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            var usedProcessed = await GetUsedModsProcessedAsync().ConfigureAwait(false);
+            var used = await _penumbraIpc.GetCurrentlyUsedTextureModPathsAsync().ConfigureAwait(false);
+            var root = _penumbraIpc.ModDirectory ?? string.Empty;
+            foreach (var path in used)
+            {
+                try
+                {
+                    var p = path ?? string.Empty;
+                    if (string.IsNullOrWhiteSpace(p)) continue;
+                    var rel = !string.IsNullOrWhiteSpace(root) ? System.IO.Path.GetRelativePath(root, p).Replace('\\', '/') : p.Replace('\\', '/');
+                    var slash = rel.IndexOf('/');
+                    var mod = slash >= 0 ? rel.Substring(0, slash) : rel;
+                    if (!string.IsNullOrWhiteSpace(mod) && !usedProcessed.Contains(mod)) needing.Add(mod);
+                }
+                catch { }
+            }
+        }
+        catch { }
+        return needing;
     }
 
     private static bool SafeBool(Task<bool> t)
@@ -550,6 +1117,118 @@ public TextureConversionService(ILogger logger, PenumbraIpc penumbraIpc, Texture
         return await _penumbraIpc.GetAllModFoldersAsync().ConfigureAwait(false);
     }
 
+    public async Task UpdateAllModTextureCountsAsync()
+    {
+        try
+        {
+            var grouped = await GetGroupedCandidateTexturesAsync().ConfigureAwait(false);
+            var mods = await GetAllModFoldersAsync().ConfigureAwait(false);
+            foreach (var mod in mods)
+            {
+                try
+                {
+                    var leaf = mod.Replace('/', System.IO.Path.DirectorySeparatorChar).Replace('\\', System.IO.Path.DirectorySeparatorChar).TrimEnd(System.IO.Path.DirectorySeparatorChar);
+                    var segs = leaf.Split(System.IO.Path.DirectorySeparatorChar);
+                    var key = segs.Length > 0 ? segs[^1] : mod;
+                    int count = 0;
+                    if (grouped.TryGetValue(key, out var list) && list != null)
+                        count = list.Count;
+                    _modStateService.UpdateTextureCount(key, count);
+                }
+                catch { }
+            }
+        }
+        catch { }
+    }
+
+    public async Task UpdateAllModMetadataAsync()
+    {
+        try
+        {
+            var names = await GetModDisplayNamesAsync().ConfigureAwait(false);
+            var tags = await GetModTagsAsync().ConfigureAwait(false);
+            var allMods = await GetAllModFoldersAsync().ConfigureAwait(false);
+            Guid? collId = null;
+            try { var coll = await GetCurrentCollectionAsync().ConfigureAwait(false); collId = coll?.Id; } catch { }
+            Dictionary<string, (bool Enabled, int Priority, bool Inherited, bool Temporary)> states = new(StringComparer.OrdinalIgnoreCase);
+            if (collId.HasValue)
+            {
+                try { states = await GetAllModEnabledStatesAsync(collId.Value).ConfigureAwait(false); } catch { }
+            }
+
+            var snap = _modStateService.Snapshot();
+            foreach (var mod in allMods)
+            {
+                try
+                {
+                    var leafNorm = mod.Replace('/', System.IO.Path.DirectorySeparatorChar).Replace('\\', System.IO.Path.DirectorySeparatorChar).TrimEnd(System.IO.Path.DirectorySeparatorChar);
+                    var segs = leafNorm.Split(System.IO.Path.DirectorySeparatorChar);
+                    var key = segs.Length > 0 ? segs[^1] : mod;
+                    var display = names.TryGetValue(key, out var dn) ? (dn ?? string.Empty) : string.Empty;
+                    var tagList = tags.TryGetValue(key, out var tl) ? (tl ?? new List<string>()) : new List<string>();
+                    _modStateService.UpdateDisplayAndTags(key, display, tagList);
+
+                    var abs = _backupService.GetModAbsolutePath(key) ?? string.Empty;
+                    if (string.IsNullOrWhiteSpace(abs) || !Directory.Exists(abs))
+                    {
+                        try { _logger.LogDebug("Mod absolute path not found for {mod}", key); } catch { }
+                    }
+                    string rel = string.Empty;
+                    try
+                    {
+                        var root = _penumbraIpc.ModDirectory ?? string.Empty;
+                        if (!string.IsNullOrWhiteSpace(root) && !string.IsNullOrWhiteSpace(abs))
+                            rel = Path.GetRelativePath(root, abs).Replace('\\', '/');
+                    }
+                    catch { rel = string.Empty; }
+                    if (string.IsNullOrWhiteSpace(rel))
+                    {
+                        try { _logger.LogDebug("Relative path not computed for {mod}", key); } catch { }
+                    }
+                    var existing = snap.TryGetValue(key, out var e) && e != null ? e : null;
+                    var ver = existing?.CurrentVersion ?? string.Empty;
+                    var auth = existing?.CurrentAuthor ?? string.Empty;
+                    string relFolder = string.Empty, relLeaf = string.Empty;
+                    try
+                    {
+                        var rf = (rel ?? string.Empty).Replace('\\', '/').TrimEnd('/');
+                        if (!string.IsNullOrWhiteSpace(rf))
+                        {
+                            var idx = rf.LastIndexOf('/');
+                            if (idx >= 0)
+                            {
+                                relFolder = rf.Substring(0, idx);
+                                relLeaf = rf.Substring(idx + 1);
+                            }
+                            else
+                            {
+                                relFolder = string.Empty;
+                                relLeaf = rf;
+                            }
+                        }
+                    }
+                    catch { relFolder = string.Empty; relLeaf = string.Empty; }
+                    _modStateService.UpdateCurrentModInfo(key, abs, relFolder, ver, auth, relLeaf);
+
+                    if (states.TryGetValue(mod, out var st))
+                        _modStateService.UpdateEnabledState(key, st.Enabled, st.Priority);
+                }
+                catch { }
+            }
+        }
+        catch { }
+    }
+
+    public async Task UpdateModTextureFilesAsync(string mod)
+    {
+        try
+        {
+            var files = await GetModTextureFilesAsync(mod).ConfigureAwait(false);
+            _modStateService.UpdateTextureFiles(mod, files);
+        }
+        catch { }
+    }
+
     public async Task<HashSet<string>> GetUsedModTexturePathsAsync()
     {
         if (!_penumbraIpc.APIAvailable)
@@ -560,6 +1239,43 @@ public TextureConversionService(ILogger logger, PenumbraIpc penumbraIpc, Texture
         return await _penumbraIpc.GetCurrentlyUsedTextureModPathsAsync().ConfigureAwait(false);
     }
 
+    public async Task UpdateAllModUsedTextureFilesAsync()
+    {
+        try
+        {
+            var used = await GetUsedModTexturePathsAsync().ConfigureAwait(false);
+            var byMod = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+            var root = _penumbraIpc.ModDirectory ?? string.Empty;
+            foreach (var u in used)
+            {
+                try
+                {
+                    var path = u ?? string.Empty;
+                    if (string.IsNullOrWhiteSpace(path)) continue;
+                    var rel = !string.IsNullOrWhiteSpace(root) ? System.IO.Path.GetRelativePath(root, path) : path;
+                    var parts = rel.Split(System.IO.Path.DirectorySeparatorChar, System.IO.Path.AltDirectorySeparatorChar);
+                    var modName = parts.Length > 1 ? parts[0] : string.Empty;
+                    if (string.IsNullOrWhiteSpace(modName)) continue;
+                    if (!byMod.TryGetValue(modName, out var list)) byMod[modName] = list = new List<string>();
+                    list.Add(path.Replace('/', '\\'));
+                }
+                catch { }
+            }
+            var snap = _modStateService.Snapshot();
+            foreach (var kv in snap)
+            {
+                try
+                {
+                    var key = kv.Key;
+                    var list = byMod.TryGetValue(key, out var l) ? l : new List<string>();
+                    _modStateService.UpdateUsedTextureFiles(key, list);
+                }
+                catch { }
+            }
+        }
+        catch { }
+    }
+
     public async Task<Dictionary<string, List<string>>> GetModTagsAsync()
     {
         if (!_penumbraIpc.APIAvailable)
@@ -568,6 +1284,56 @@ public TextureConversionService(ILogger logger, PenumbraIpc penumbraIpc, Texture
             return new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
         }
         return await _penumbraIpc.GetModTagsAsync().ConfigureAwait(false);
+    }
+
+    public async Task UpdateAllModPathsAsync()
+    {
+        try
+        {
+            var paths = await _penumbraIpc.GetModPathsAsync().ConfigureAwait(false);
+            var names = _penumbraIpc.GetModList();
+            var snap = _modStateService.Snapshot();
+            foreach (var kv in snap)
+            {
+                try
+                {
+                    var mod = kv.Key;
+                    var e = kv.Value;
+                    var pf = paths.TryGetValue(mod, out var val) ? (val ?? string.Empty) : string.Empty;
+                    var disp = names.TryGetValue(mod, out var dn) ? (dn ?? string.Empty) : (e.RelativeModName ?? string.Empty);
+                    var (folder, leaf) = SplitFolderAndLeaf(pf, disp);
+                    if (string.IsNullOrWhiteSpace(pf))
+                    {
+                        var root = _penumbraIpc.ModDirectory ?? string.Empty;
+                        var abs = e.ModAbsolutePath ?? string.Empty;
+                        var rel = ComputeRelativePathFromAbs(root, abs);
+                        (folder, leaf) = SplitFolderAndLeaf(rel, disp);
+                    }
+                    _modStateService.UpdateCurrentModInfo(mod, e.ModAbsolutePath ?? string.Empty, folder, e.CurrentVersion ?? string.Empty, e.CurrentAuthor ?? string.Empty, leaf);
+                }
+                catch { }
+            }
+            _modStateService.Save();
+        }
+        catch { }
+    }
+
+    public async Task<string> GetModDisplayNameAsync(string mod)
+    {
+        if (!_penumbraIpc.APIAvailable)
+        {
+            return mod ?? string.Empty;
+        }
+        return await _penumbraIpc.GetModDisplayNameAsync(mod).ConfigureAwait(false);
+    }
+
+    public async Task<List<string>> GetModTagsAsync(string mod)
+    {
+        if (!_penumbraIpc.APIAvailable)
+        {
+            return new List<string>();
+        }
+        return await _penumbraIpc.GetModTagsAsync(mod).ConfigureAwait(false);
     }
 
     public void OpenModInPenumbra(string modDirectory, string? modName)
@@ -595,6 +1361,12 @@ public TextureConversionService(ILogger logger, PenumbraIpc penumbraIpc, Texture
             return;
         try
         {
+            var needingMods = await GetUsedModsNeedingProcessingAsync().ConfigureAwait(false);
+            if (needingMods.Count == 0)
+            {
+                try { _logger.LogDebug("Automatic conversion skipped: all used mods already processed"); } catch { }
+                return;
+            }
             var candidates = await GetAutomaticCandidateTexturesAsync().ConfigureAwait(false);
             if (candidates == null || candidates.Count == 0)
                 return;
@@ -651,6 +1423,8 @@ public TextureConversionService(ILogger logger, PenumbraIpc penumbraIpc, Texture
 
     private readonly Action<string>? _onModAdded;
     private readonly Action<string>? _onModDeleted;
+    private readonly Action<string, string>? _onModPathChanged;
+    private readonly Action<string, string>? _onModMoved;
     private readonly Action<bool>? _onEnabledChanged;
     private readonly Action<ModSettingChange, Guid, string, bool>? _onModSettingChanged;
     private readonly Action? _onModsChanged;
@@ -658,12 +1432,7 @@ public TextureConversionService(ILogger logger, PenumbraIpc penumbraIpc, Texture
 
     public void Dispose()
     {
-        try { _penumbraIpc.ModAdded -= _onModAdded; } catch { }
-        try { _penumbraIpc.ModDeleted -= _onModDeleted; } catch { }
-        try { _penumbraIpc.PenumbraEnabledChanged -= _onEnabledChanged; } catch { }
-        try { _penumbraIpc.ModSettingChanged -= _onModSettingChanged; } catch { }
-        try { _penumbraIpc.ModsChanged -= _onModsChanged; } catch { }
-        try { _penumbraIpc.PlayerResourcesChanged -= _onPlayerResourcesChanged; } catch { }
+        DetachPenumbraSubscriptions();
         StopAutoConversionWatcher();
         try { _cts.Cancel(); } catch { }
         try { _cts.Dispose(); } catch { }
