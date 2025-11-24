@@ -25,6 +25,12 @@ public sealed class ChangelogService
     public async Task<List<ReleaseChangelogViewEntry>> GetChangelogEntriesAsync(CancellationToken ct = default)
     {
         var url = _configService.Current.ReleaseChangelogUrl ?? "https://sphene.online/shrinku/change_log.json";
+        if (url.EndsWith("changelog.json", StringComparison.OrdinalIgnoreCase))
+        {
+            url = "https://sphene.online/shrinku/change_log.json";
+            _configService.Current.ReleaseChangelogUrl = url;
+            _configService.Save();
+        }
         var result = new List<ReleaseChangelogViewEntry>();
         try
         {

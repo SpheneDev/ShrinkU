@@ -120,27 +120,27 @@ public sealed class ModStateService
         }
     }
 
-    public void UpdateCurrentModInfo(string mod, string absolutePath, string relativePath, string version, string author, string relativeModName)
+    public void UpdateCurrentModInfo(string mod, string? absolutePath, string? relativePath, string? version, string? author, string? relativeModName)
     {
         lock (_lock)
         {
             var e = Get(mod);
-            var abs = absolutePath ?? string.Empty;
-            var rel = string.IsNullOrWhiteSpace(relativePath) ? (e.PenumbraRelativePath ?? string.Empty) : relativePath;
-            var ver = version ?? string.Empty;
-            var auth = author ?? string.Empty;
-            var rname = string.IsNullOrWhiteSpace(relativeModName) ? (e.RelativeModName ?? string.Empty) : relativeModName;
+            string abs = absolutePath ?? string.Empty;
+            string rel = string.IsNullOrWhiteSpace(relativePath) ? (e.PenumbraRelativePath ?? string.Empty) : relativePath ?? string.Empty;
+            string ver = version ?? string.Empty;
+            string auth = author ?? string.Empty;
+            string rname = string.IsNullOrWhiteSpace(relativeModName) ? (e.RelativeModName ?? string.Empty) : relativeModName ?? string.Empty;
             bool changed = !string.Equals(e.ModAbsolutePath ?? string.Empty, abs ?? string.Empty, StringComparison.Ordinal)
                 || !string.Equals(e.PenumbraRelativePath ?? string.Empty, rel ?? string.Empty, StringComparison.Ordinal)
                 || !string.Equals(e.CurrentVersion ?? string.Empty, ver ?? string.Empty, StringComparison.Ordinal)
                 || !string.Equals(e.CurrentAuthor ?? string.Empty, auth ?? string.Empty, StringComparison.Ordinal)
                 || !string.Equals(e.RelativeModName ?? string.Empty, rname ?? string.Empty, StringComparison.Ordinal);
             if (!changed) return;
-            e.ModAbsolutePath = abs;
-            e.PenumbraRelativePath = rel;
-            e.CurrentVersion = ver;
-            e.CurrentAuthor = auth;
-            e.RelativeModName = rname;
+            e.ModAbsolutePath = abs ?? string.Empty;
+            e.PenumbraRelativePath = rel ?? string.Empty;
+            e.CurrentVersion = ver ?? string.Empty;
+            e.CurrentAuthor = auth ?? string.Empty;
+            e.RelativeModName = rname ?? string.Empty;
             e.LastUpdatedUtc = DateTime.UtcNow;
             _lastSaveReason = nameof(UpdateCurrentModInfo);
             ScheduleSave();
@@ -149,7 +149,7 @@ public sealed class ModStateService
         }
     }
 
-    public void UpdateLatestBackupsInfo(string mod, string zipFileName, string zipVersion, DateTime zipCreatedUtc, string pmpFileName, string pmpVersion, DateTime pmpCreatedUtc)
+    public void UpdateLatestBackupsInfo(string mod, string? zipFileName, string? zipVersion, DateTime zipCreatedUtc, string? pmpFileName, string? pmpVersion, DateTime pmpCreatedUtc)
     {
         lock (_lock)
         {
@@ -211,7 +211,7 @@ public sealed class ModStateService
         }
     }
 
-    public void UpdateDisplayAndTags(string mod, string displayName, IReadOnlyList<string> tags)
+    public void UpdateDisplayAndTags(string mod, string? displayName, IReadOnlyList<string>? tags)
     {
         lock (_lock)
         {
@@ -233,7 +233,7 @@ public sealed class ModStateService
         }
     }
 
-    public void UpdateTextureFiles(string mod, IReadOnlyList<string> files)
+    public void UpdateTextureFiles(string mod, IReadOnlyList<string>? files)
     {
         lock (_lock)
         {
@@ -251,7 +251,7 @@ public sealed class ModStateService
         }
     }
 
-    public void UpdateUsedTextureFiles(string mod, IReadOnlyList<string> files)
+    public void UpdateUsedTextureFiles(string mod, IReadOnlyList<string>? files)
     {
         lock (_lock)
         {

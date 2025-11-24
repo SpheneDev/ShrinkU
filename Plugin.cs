@@ -73,7 +73,7 @@ public sealed class Plugin : IDalamudPlugin
 
         // Create UI windows and register
         _debugUi = new DebugUI(_logger, _configService, _debugTrace);
-        _settingsUi = new SettingsUI(_logger, _configService, _conversionService, _backupService, () => _releaseChangelogUi.IsOpen = true, _debugTrace, () => _debugUi.IsOpen = true);
+        _settingsUi = new SettingsUI(_logger, _configService, _conversionService, _backupService, () => _releaseChangelogUi.OpenLatest(), _debugTrace, () => _debugUi.IsOpen = true);
         _conversionUi = new ConversionUI(_logger, _configService, _conversionService, _backupService, () => _settingsUi.IsOpen = true, _modStateService, cacheService, _debugTrace);
         _startupProgressUi = new StartupProgressUI(_logger, _configService, _conversionService, _backupService);
         _firstRunUi = new FirstRunSetupUI(_logger, _configService)

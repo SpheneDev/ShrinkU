@@ -61,7 +61,7 @@ public sealed class ShrinkUConfig : IPluginConfiguration
 
     // Release changelog tracking
     public string LastSeenReleaseChangelogVersion { get; set; } = string.Empty;
-    public string ReleaseChangelogUrl { get; set; } = "https://sphene.online/shrinku/changelog.json";
+    public string ReleaseChangelogUrl { get; set; } = "https://sphene.online/shrinku/change_log.json";
 
     // Debug tracing controls
     public bool DebugTraceModStateChanges { get; set; } = false;
