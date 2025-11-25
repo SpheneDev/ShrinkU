@@ -73,6 +73,40 @@ public sealed partial class ConversionUI
                 try { _conversionService.OpenModInPenumbra(mod, null); }
                 catch (Exception ex) { _logger.LogError(ex, "OpenModInPenumbra failed for {mod}", mod); }
             }
+            if (ImGui.MenuItem("Open Penumbra mod folder"))
+            {
+                var targetMod = mod;
+                _ = Task.Run(() =>
+                {
+                    try
+                    {
+                        string? abs = null;
+                        var snap = _modStateSnapshot ?? _modStateService.Snapshot();
+                        if (snap.TryGetValue(targetMod, out var ms) && ms != null && !string.IsNullOrWhiteSpace(ms.ModAbsolutePath))
+                            abs = ms.ModAbsolutePath;
+                        else
+                            abs = _backupService.GetModAbsolutePath(targetMod);
+                        if (!string.IsNullOrWhiteSpace(abs) && Directory.Exists(abs))
+                            Process.Start(new ProcessStartInfo { FileName = "explorer.exe", Arguments = abs, UseShellExecute = true });
+                    }
+                    catch (Exception ex) { _logger.LogError(ex, "Open mod folder failed for {mod}", targetMod); }
+                });
+            }
+            if (ImGui.MenuItem("Open Shrinku backup folder"))
+            {
+                var targetMod2 = mod;
+                _ = Task.Run(() =>
+                {
+                    try
+                    {
+                        var root = _configService.Current.BackupFolderPath;
+                        var dir = string.IsNullOrWhiteSpace(root) ? string.Empty : Path.Combine(root, targetMod2);
+                        if (!string.IsNullOrWhiteSpace(dir) && Directory.Exists(dir))
+                            Process.Start(new ProcessStartInfo { FileName = "explorer.exe", Arguments = dir, UseShellExecute = true });
+                    }
+                    catch (Exception ex) { _logger.LogError(ex, "Open backup folder failed for {mod}", targetMod2); }
+                });
+            }
             var hasTexBk = GetOrQueryModTextureBackup(mod);
             using (var _d = ImRaii.Disabled(!hasTexBk))
             {
