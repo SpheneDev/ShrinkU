@@ -26,7 +26,10 @@ public sealed partial class ConversionUI
         ImGui.Dummy(new Vector2(0, 6f));
         ImGui.SetWindowFontScale(1.0f);
         ImGui.SetNextItemWidth(186f);
-        ImGui.InputTextWithHint("##scanFilter", "Filter by file or mod", ref _scanFilter, 128);
+        var filterChanged = ImGui.InputTextWithHint("##scanFilter", "Filter by file or mod", ref _scanFilter, 128);
+        _scanFilter = (_scanFilter ?? string.Empty).Trim();
+        if (filterChanged)
+            RequestUiRefresh("scan-filter-changed");
 
         ImGui.SameLine();
         var h = ImGui.GetFrameHeight();
@@ -228,7 +231,7 @@ public sealed partial class ConversionUI
                                        || displayName.IndexOf(_scanFilter, StringComparison.OrdinalIgnoreCase) >= 0
                                        || mod.IndexOf(_scanFilter, StringComparison.OrdinalIgnoreCase) >= 0;
                 var include = string.IsNullOrEmpty(_scanFilter)
-                    ? (_filterPenumbraUsedOnly ? filtered.Count > 0 : (((files?.Count ?? 0) > 0) || totalTexturesForMod > 0))
+                    ? (_filterPenumbraUsedOnly ? filtered.Count > 0 : true)
                     : (_filterPenumbraUsedOnly ? filtered.Count > 0 : (modMatchesFilter || filtered.Count > 0));
                 if (include)
                     _visibleByMod[mod] = filtered;

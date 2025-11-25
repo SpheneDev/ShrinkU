@@ -26,10 +26,8 @@ public sealed partial class ConversionUI : Window, IDisposable
     private readonly Action? _openSettings;
 
     private string _scanFilter = string.Empty;
-    private float _leftPanelWidthRatio = 0.45f;
     private float _leftPanelWidthPx = 0f;
     private bool _leftWidthInitialized = false;
-    private bool _leftWidthDirty = false;
     private float _scannedFirstColWidth = 28f;
     private float _scannedFileColWidth = 0f;
     private float _scannedSizeColWidth = 85f;
@@ -1134,10 +1132,10 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
         var totalWidth = Math.Max(520f, avail.X);
         if (!_leftWidthInitialized)
         {
-            _leftPanelWidthPx = Math.Max(360f, totalWidth * _leftPanelWidthRatio);
+            _leftPanelWidthPx = 300f;
             _leftWidthInitialized = true;
         }
-        var leftWidth = Math.Clamp(_leftPanelWidthPx, 360f, Math.Max(360f, totalWidth - 360f));
+        var leftWidth = 300f;
 
         ImGui.BeginChild("LeftPanel", new Vector2(leftWidth, 0), true);
         DrawSettings();
