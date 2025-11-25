@@ -170,8 +170,7 @@ public sealed partial class ConversionUI
         {
             if (kv.Value != null)
             {
-                if (kv.Value.UsedTextureFiles != null)
-                    usedCountSig += kv.Value.UsedTextureFiles.Count;
+                usedCountSig += Math.Max(0, kv.Value.UsedTextureCount);
                 totalTexturesSig += Math.Max(0, kv.Value.TotalTextures);
             }
         }
@@ -807,7 +806,7 @@ public sealed partial class ConversionUI
             ? restorableModsForAction.Where(m =>
                 {
                     var snap = _modStateSnapshot ?? _modStateService.Snapshot();
-                    if (snap.TryGetValue(m, out var ms) && ms != null && ms.UsedTextureFiles != null && ms.UsedTextureFiles.Count > 0)
+                    if (snap.TryGetValue(m, out var ms) && ms != null && (ms.UsedTextureCount > 0 || (ms.UsedTextureFiles != null && ms.UsedTextureFiles.Count > 0)))
                         return false;
                     return true;
                 })
@@ -915,16 +914,12 @@ public sealed partial class ConversionUI
                     }
                     try
                     {
-                        int removed = 0;
                         foreach (var m in restorableFiltered)
                         {
-                            if (_configService.Current.ExternalConvertedMods.Remove(m))
-                                removed++;
+                            try { _modStateService.UpdateExternalChange(m, null); } catch { }
                         }
-                        if (removed > 0)
-                            _configService.Save();
                     }
-                    catch (Exception ex) { _logger.LogError(ex, "Update ExternalConvertedMods after bulk restore failed"); }
+                    catch (Exception ex) { _logger.LogError(ex, "Update external change after bulk restore failed"); }
                     _uiThreadActions.Enqueue(() =>
                     {
                         _running = false;

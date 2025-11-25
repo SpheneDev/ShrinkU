@@ -18,10 +18,11 @@ public sealed class ShrinkUIpc : IDisposable
     private readonly TextureConversionService _conversionService;
     private readonly ShrinkU.Configuration.ShrinkUConfigService _configService;
     private readonly PenumbraIpc _penumbraIpc;
+    private readonly ModStateService _modStateService;
 
     private readonly List<IDisposable> _providers = new();
 
-    public ShrinkUIpc(IDalamudPluginInterface pi, ILogger logger, TextureBackupService backupService, PenumbraIpc penumbraIpc, ShrinkU.Configuration.ShrinkUConfigService configService, TextureConversionService conversionService)
+    public ShrinkUIpc(IDalamudPluginInterface pi, ILogger logger, TextureBackupService backupService, PenumbraIpc penumbraIpc, ShrinkU.Configuration.ShrinkUConfigService configService, TextureConversionService conversionService, ModStateService modStateService)
     {
         _pi = pi;
         _logger = logger;
@@ -29,6 +30,7 @@ public sealed class ShrinkUIpc : IDisposable
         _penumbraIpc = penumbraIpc;
         _configService = configService;
         _conversionService = conversionService;
+        _modStateService = modStateService;
 
         RegisterProviders();
         try { _logger.LogDebug("ShrinkU IPC providers registered"); } catch { }
@@ -100,12 +102,7 @@ public sealed class ShrinkUIpc : IDisposable
                 var success = _backupService.RestoreLatestForModAsync(modFolder, progress: null, token: default).GetAwaiter().GetResult();
                 if (success)
                 {
-                    try
-                    {
-                        if (_configService.Current.ExternalConvertedMods.Remove(modFolder))
-                            _configService.Save();
-                    }
-                    catch { }
+                    try { _modStateService.UpdateExternalChange(modFolder, null); } catch { }
                     try { _conversionService.NotifyExternalTextureChange("ipc-restore-latest-for-mod"); } catch { }
                 }
                 return success;
@@ -190,15 +187,14 @@ public sealed class ShrinkUIpc : IDisposable
                             {
                                 try
                                 {
-                                    _configService.Current.ExternalConvertedMods[mod] = new ShrinkU.Configuration.ExternalChangeMarker
+                                    _modStateService.UpdateExternalChange(mod, new ShrinkU.Configuration.ExternalChangeMarker
                                     {
                                         Reason = "ipc-auto-conversion-complete",
                                         AtUtc = now,
-                                    };
+                                    });
                                 }
                                 catch { }
                             }
-                            _configService.Save();
                         }
                         catch { }
                         try { _conversionService.NotifyExternalTextureChange("ipc-auto-conversion-complete"); } catch { }

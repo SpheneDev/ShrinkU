@@ -150,7 +150,7 @@ public sealed partial class ConversionUI : Window, IDisposable
         var canRestore = hasAnyBackup;
         if (autoMode && !isOrphan)
         {
-            if (snap.TryGetValue(mod, out var ams) && ams != null && ams.UsedTextureFiles != null && ams.UsedTextureFiles.Count > 0)
+            if (snap.TryGetValue(mod, out var ams) && ams != null && (ams.UsedTextureCount > 0 || (ams.UsedTextureFiles != null && ams.UsedTextureFiles.Count > 0)))
                 canRestore = false;
         }
         var canReinstall = isOrphan && hasPmpBackup;
@@ -515,12 +515,7 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
                         if (success)
                         {
                             try { _backupService.RedrawPlayer(); } catch { }
-                            try
-                            {
-                                if (_configService.Current.ExternalConvertedMods.Remove(target))
-                                    _configService.Save();
-                            }
-                            catch { }
+                            try { _modStateService.UpdateExternalChange(target, null); } catch { }
                         }
                         RefreshScanResults(true, success ? "restore-after-cancel-success" : "restore-after-cancel-fail");
                         _ = _backupService.ComputeSavingsForModAsync(target).ContinueWith(ps =>
@@ -727,15 +722,14 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
                             {
                                 try
                                 {
-                                    _configService.Current.ExternalConvertedMods[mod] = new ShrinkU.Configuration.ExternalChangeMarker
+                                    _modStateService.UpdateExternalChange(mod, new ShrinkU.Configuration.ExternalChangeMarker
                                     {
                                         Reason = string.IsNullOrWhiteSpace(reason) ? "external" : reason,
                                         AtUtc = now,
-                                    };
+                                    });
                                 }
                                 catch { }
                             }
-                            try { _configService.Save(); } catch { }
                         }
                     }
                     catch { }

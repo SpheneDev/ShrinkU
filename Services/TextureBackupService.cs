@@ -845,7 +845,28 @@ public sealed class TextureBackupService
             try { progress?.Report((pmpPath, 1, 1)); } catch { }
             try { _logger.LogDebug("Created manual full mod PMP backup {pmp} for {mod}", pmpPath, modFolderName); } catch { }
 
-            try { _modStateService.UpdateBackupFlags(modFolderName, _modStateService.Get(modFolderName).HasTextureBackup, true); } catch { }
+            try
+            {
+                var created = File.GetCreationTimeUtc(pmpPath);
+                var currentVersion2 = _modStateService.Get(modFolderName).CurrentVersion ?? string.Empty;
+                _modStateService.UpdateLatestBackupsInfo(modFolderName, _modStateService.Get(modFolderName).LatestZipBackupFileName, _modStateService.Get(modFolderName).LatestZipBackupVersion, _modStateService.Get(modFolderName).LatestZipBackupCreatedUtc, System.IO.Path.GetFileName(pmpPath), currentVersion2, created);
+                try
+                {
+                    int entriesCount = 0; long totalBytes = 0;
+                    using var za = ZipFile.OpenRead(pmpPath);
+                    foreach (var e in za.Entries)
+                    {
+                        var name = e.FullName?.Replace('\\','/');
+                        if (string.IsNullOrWhiteSpace(name) || name.EndsWith("/", StringComparison.Ordinal)) continue;
+                        entriesCount++;
+                        totalBytes += e.Length;
+                    }
+                    _modStateService.UpdateLatestBackupSummary(modFolderName, entriesCount, totalBytes);
+                }
+                catch { }
+                _modStateService.UpdateBackupFlags(modFolderName, _modStateService.Get(modFolderName).HasTextureBackup, true);
+            }
+            catch { }
             return true;
         }
         catch (Exception ex)
@@ -1101,6 +1122,7 @@ public sealed class TextureBackupService
             }
             catch { }
             try { _modStateService.UpdateInstalledButNotConverted(modFolderName, true); } catch { }
+            try { _modStateService.SetLastRestoreUtc(modFolderName, DateTime.UtcNow); } catch { }
             return true;
         }
         catch (Exception ex)
@@ -1557,6 +1579,23 @@ public sealed class TextureBackupService
                         var meta = ReadMetaFromZip(zipPath);
                         var created = File.GetCreationTimeUtc(zipPath);
                         _modStateService.UpdateLatestBackupsInfo(mod, System.IO.Path.GetFileName(zipPath), meta?.version ?? string.Empty, created, _modStateService.Get(mod).LatestPmpBackupFileName, _modStateService.Get(mod).LatestPmpBackupVersion, _modStateService.Get(mod).LatestPmpBackupCreatedUtc);
+                        try
+                        {
+                            long totalBytes = 0;
+                            try
+                            {
+                                foreach (var f in Directory.EnumerateFiles(modSessionSubdir, "*", SearchOption.AllDirectories))
+                                {
+                                    var name = Path.GetFileName(f);
+                                    if (string.Equals(name, "manifest.json", StringComparison.OrdinalIgnoreCase)) continue;
+                                    if (string.Equals(name, "meta.json", StringComparison.OrdinalIgnoreCase)) continue;
+                                    try { var fi = new FileInfo(f); totalBytes += fi.Length; } catch { }
+                                }
+                            }
+                            catch { }
+                            _modStateService.UpdateLatestBackupSummary(mod, entries.Count, totalBytes);
+                        }
+                        catch { }
                     }
                     catch { }
                     traceZip.Dispose();
@@ -2743,6 +2782,10 @@ public sealed class TextureBackupService
                         try { _modStateService.UpdateInstalledButNotConverted(modFolderName, true); } catch { }
                     }
                     catch { }
+                    if (zipSuccess)
+                    {
+                        try { _modStateService.SetLastRestoreUtc(modFolderName, DateTime.UtcNow); } catch { }
+                    }
                     trace.Dispose();
                     return zipSuccess;
                 }
@@ -2809,6 +2852,10 @@ public sealed class TextureBackupService
                         try { _modStateService.UpdateInstalledButNotConverted(modFolderName, true); } catch { }
                     }
                     catch { }
+                    if (sessionSuccess)
+                    {
+                        try { _modStateService.SetLastRestoreUtc(modFolderName, DateTime.UtcNow); } catch { }
+                    }
                     trace.Dispose();
                     return sessionSuccess;
                 }
@@ -2997,6 +3044,21 @@ public sealed class TextureBackupService
         // Remove the zip backup only after a successful restore
         if (success)
         {
+            try
+            {
+                var modFolder = string.Empty;
+                try { var parent = Path.GetDirectoryName(zipPath); if (!string.IsNullOrWhiteSpace(parent)) modFolder = new DirectoryInfo(parent).Name; } catch { }
+                if (!string.IsNullOrWhiteSpace(modFolder))
+                {
+                    var hash = await ComputeFileHashAsync(zipPath).ConfigureAwait(false);
+                    var e = _modStateService.Get(modFolder);
+                    if (e.LatestBackup == null) e.LatestBackup = new LatestBackupInfo();
+                    e.LatestBackup.VerifiedUtc = DateTime.UtcNow;
+                    e.LatestBackup.VerifiedHash = hash ?? string.Empty;
+                    _modStateService.Save();
+                }
+            }
+            catch { }
             try { File.Delete(zipPath); } catch { }
         }
         trace.Dispose();

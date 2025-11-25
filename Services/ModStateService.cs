@@ -8,6 +8,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Diagnostics;
 
 namespace ShrinkU.Services;
@@ -118,6 +119,7 @@ public sealed class ModStateService
                 e.CurrentBytes = 0;
                 e.ComparedFiles = 0;
             }
+            e.BytesSaved = Math.Max(0, e.OriginalBytes - e.CurrentBytes);
             e.LastUpdatedUtc = DateTime.UtcNow;
             _lastSaveReason = nameof(UpdateSavings);
             _lastChangedMod = mod;
@@ -139,6 +141,7 @@ public sealed class ModStateService
             e.OriginalBytes = o;
             e.CurrentBytes = 0;
             e.ComparedFiles = 0;
+            e.BytesSaved = Math.Max(0, e.OriginalBytes - e.CurrentBytes);
             e.LastUpdatedUtc = DateTime.UtcNow;
             _lastSaveReason = nameof(UpdateOriginalBytesFromRestore);
             _lastChangedMod = mod;
@@ -163,12 +166,28 @@ public sealed class ModStateService
                 || !string.Equals(e.CurrentVersion ?? string.Empty, ver ?? string.Empty, StringComparison.Ordinal)
                 || !string.Equals(e.CurrentAuthor ?? string.Empty, auth ?? string.Empty, StringComparison.Ordinal)
                 || !string.Equals(e.RelativeModName ?? string.Empty, rname ?? string.Empty, StringComparison.Ordinal);
-            if (!changed) return;
+            // Ensure ModUid and path segments are populated even if no other fields change
+            if (!changed)
+            {
+                bool needsUid = string.IsNullOrWhiteSpace(e.ModUid);
+                bool needsSegs = e.PenumbraPathSegments == null || e.PenumbraPathSegments.Count == 0;
+                if (!needsUid && !needsSegs) return;
+                try { if (needsSegs) e.PenumbraPathSegments = (rel ?? string.Empty).Replace('\\', '/').Split(new[] { '/' }, StringSplitOptions.RemoveEmptyEntries).ToList(); } catch { e.PenumbraPathSegments = new List<string>(); }
+                try { if (needsUid) e.ModUid = ComputeModUid(mod, e.CurrentAuthor); } catch { }
+                e.LastUpdatedUtc = DateTime.UtcNow;
+                _lastSaveReason = nameof(UpdateCurrentModInfo);
+                ScheduleSave();
+                if (!_batching)
+                    try { OnEntryChanged?.Invoke(mod); } catch { }
+                return;
+            }
             e.ModAbsolutePath = abs ?? string.Empty;
             e.PenumbraRelativePath = rel ?? string.Empty;
+            try { e.PenumbraPathSegments = (rel ?? string.Empty).Replace('\\', '/').Split(new[] { '/' }, StringSplitOptions.RemoveEmptyEntries).ToList(); } catch { e.PenumbraPathSegments = new List<string>(); }
             e.CurrentVersion = ver ?? string.Empty;
             e.CurrentAuthor = auth ?? string.Empty;
             e.RelativeModName = rname ?? string.Empty;
+            try { if (string.IsNullOrWhiteSpace(e.ModUid)) e.ModUid = ComputeModUid(mod, e.CurrentAuthor); } catch { }
             e.LastUpdatedUtc = DateTime.UtcNow;
             _lastSaveReason = nameof(UpdateCurrentModInfo);
             ScheduleSave();
@@ -290,8 +309,9 @@ public sealed class ModStateService
             var prevSet = new HashSet<string>(prev, StringComparer.OrdinalIgnoreCase);
             bool sameItems = sameCount && list.All(x => prevSet.Contains(x));
             var flag = list.Count > 0;
-            if (sameItems && e.UsedInCollection == flag) return;
+            if (sameItems && e.UsedInCollection == flag && e.UsedTextureCount == list.Count) return;
             e.UsedInCollection = flag;
+            e.UsedTextureCount = list.Count;
             e.UsedTextureFiles = list;
             e.LastUpdatedUtc = DateTime.UtcNow;
             WriteDetail(mod, null, list);
@@ -310,6 +330,7 @@ public sealed class ModStateService
             var e = Get(mod);
             if (e.TotalTextures == total) return;
             e.TotalTextures = Math.Max(0, total);
+            e.LastScanUtc = DateTime.UtcNow;
             e.LastUpdatedUtc = DateTime.UtcNow;
             _lastSaveReason = nameof(UpdateTextureCount);
             _lastChangedMod = mod;
@@ -392,8 +413,40 @@ public sealed class ModStateService
         try
         {
             var json = File.ReadAllText(path);
-            var dict = JsonSerializer.Deserialize<Dictionary<string, ModStateEntry>>(json) ?? new();
-            lock (_lock) { _state = new Dictionary<string, ModStateEntry>(dict, StringComparer.OrdinalIgnoreCase); }
+            Dictionary<string, ModStateEntry> dict = new Dictionary<string, ModStateEntry>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                using var doc = JsonDocument.Parse(json);
+                if (doc.RootElement.ValueKind == JsonValueKind.Object && doc.RootElement.TryGetProperty("entries", out var entriesEl))
+                {
+                    var file = JsonSerializer.Deserialize<ModStateFile>(json) ?? new ModStateFile { Meta = new ModStateMeta(), Entries = new Dictionary<string, ModStateEntry>() };
+                    dict = new Dictionary<string, ModStateEntry>(file.Entries ?? new Dictionary<string, ModStateEntry>(), StringComparer.OrdinalIgnoreCase);
+                }
+                else
+                {
+                    var d0 = JsonSerializer.Deserialize<Dictionary<string, ModStateEntry>>(json) ?? new();
+                    dict = new Dictionary<string, ModStateEntry>(d0, StringComparer.OrdinalIgnoreCase);
+                }
+            }
+            catch
+            {
+                var d0 = JsonSerializer.Deserialize<Dictionary<string, ModStateEntry>>(json) ?? new();
+                dict = new Dictionary<string, ModStateEntry>(d0, StringComparer.OrdinalIgnoreCase);
+            }
+            lock (_lock) { _state = dict; }
+            try
+            {
+                foreach (var kv in _state)
+                {
+                    var e = kv.Value;
+                    if (e == null) continue;
+                    if (e.UsedTextureCount <= 0 && e.UsedTextureFiles != null)
+                        e.UsedTextureCount = e.UsedTextureFiles.Count;
+                    if (e.BytesSaved <= 0 && e.OriginalBytes > 0 && e.CurrentBytes >= 0)
+                        e.BytesSaved = Math.Max(0, e.OriginalBytes - e.CurrentBytes);
+                }
+            }
+            catch { }
             try { var fi = new FileInfo(path); _lastLoadedWriteUtc = fi.LastWriteTimeUtc; _lastLoadedLength = fi.Length; } catch { }
         }
         catch (Exception ex)
@@ -460,7 +513,15 @@ public sealed class ModStateService
             using (var fs = new FileStream(tmp, FileMode.Create, FileAccess.Write, FileShare.None, 65536, FileOptions.SequentialScan))
             {
                 using var writer = new Utf8JsonWriter(fs, new JsonWriterOptions { Indented = true });
-                JsonSerializer.Serialize(writer, _state, new JsonSerializerOptions { WriteIndented = true });
+                var meta = new ModStateMeta
+                {
+                    SchemaVersion = 2,
+                    GeneratedBy = GetGeneratedBy(),
+                    CreatedUtc = _lastLoadedWriteUtc == DateTime.MinValue ? DateTime.UtcNow : _lastLoadedWriteUtc,
+                    LastSavedUtc = DateTime.UtcNow,
+                };
+                var file = new ModStateFile { Meta = meta, Entries = _state };
+                JsonSerializer.Serialize(writer, file, new JsonSerializerOptions { WriteIndented = true });
                 writer.Flush();
             }
             var moved = false;
@@ -495,7 +556,15 @@ public sealed class ModStateService
                     using (var fs = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.ReadWrite, 65536, FileOptions.SequentialScan))
                     {
                         using var writer = new Utf8JsonWriter(fs, new JsonWriterOptions { Indented = true });
-                        JsonSerializer.Serialize(writer, _state, new JsonSerializerOptions { WriteIndented = true });
+                        var meta2 = new ModStateMeta
+                        {
+                            SchemaVersion = 2,
+                            GeneratedBy = GetGeneratedBy(),
+                            CreatedUtc = _lastLoadedWriteUtc == DateTime.MinValue ? DateTime.UtcNow : _lastLoadedWriteUtc,
+                            LastSavedUtc = DateTime.UtcNow,
+                        };
+                        var file2 = new ModStateFile { Meta = meta2, Entries = _state };
+                        JsonSerializer.Serialize(writer, file2, new JsonSerializerOptions { WriteIndented = true });
                         writer.Flush();
                     }
                 }
@@ -607,6 +676,84 @@ public sealed class ModStateService
             _batchDirty = false;
         }
     }
+    public void UpdateExternalChange(string mod, ShrinkU.Configuration.ExternalChangeMarker? marker)
+    {
+        lock (_lock)
+        {
+            var e = Get(mod);
+            e.ExternalChange = marker;
+            e.LastUpdatedUtc = DateTime.UtcNow;
+            _lastSaveReason = nameof(UpdateExternalChange);
+            _lastChangedMod = mod;
+            ScheduleSave();
+            if (!_batching)
+                try { OnEntryChanged?.Invoke(mod); } catch { }
+        }
+    }
+
+    public void SetLastConvertUtc(string mod, DateTime at)
+    {
+        lock (_lock)
+        {
+            var e = Get(mod);
+            e.LastConvertUtc = at;
+            e.LastChangeReason = nameof(SetLastConvertUtc);
+            e.LastChangeUtc = DateTime.UtcNow;
+            ScheduleSave();
+        }
+    }
+
+    public void SetLastRestoreUtc(string mod, DateTime at)
+    {
+        lock (_lock)
+        {
+            var e = Get(mod);
+            e.LastRestoreUtc = at;
+            e.LastChangeReason = nameof(SetLastRestoreUtc);
+            e.LastChangeUtc = DateTime.UtcNow;
+            ScheduleSave();
+        }
+    }
+
+    public void UpdateLatestBackupSummary(string mod, int entriesCount, long totalBytes)
+    {
+        lock (_lock)
+        {
+            var e = Get(mod);
+            if (e.LatestBackup == null)
+                e.LatestBackup = new LatestBackupInfo();
+            e.LatestBackup.EntriesCount = Math.Max(0, entriesCount);
+            e.LatestBackup.TotalBytes = Math.Max(0, totalBytes);
+            e.LastUpdatedUtc = DateTime.UtcNow;
+            _lastSaveReason = nameof(UpdateLatestBackupSummary);
+            _lastChangedMod = mod;
+            ScheduleSave();
+        }
+    }
+
+    private static string ComputeModUid(string mod, string? author)
+    {
+        try
+        {
+            var s = (mod ?? string.Empty) + "|" + (author ?? string.Empty);
+            using var sha = System.Security.Cryptography.SHA256.Create();
+            var bytes = System.Text.Encoding.UTF8.GetBytes(s);
+            var hash = sha.ComputeHash(bytes);
+            return Convert.ToHexString(hash);
+        }
+        catch { return string.Empty; }
+    }
+
+    private static string GetGeneratedBy()
+    {
+        try
+        {
+            var asm = typeof(ModStateService).Assembly;
+            var ver = asm?.GetName()?.Version?.ToString() ?? string.Empty;
+            return string.IsNullOrWhiteSpace(ver) ? "ShrinkU" : ("ShrinkU " + ver);
+        }
+        catch { return "ShrinkU"; }
+    }
 }
 
 public sealed class ModStateEntry
@@ -619,6 +766,7 @@ public sealed class ModStateEntry
     public long CurrentBytes { get; set; } = 0L;
     public int ComparedFiles { get; set; } = 0;
     public int TotalTextures { get; set; } = 0;
+    [JsonIgnore]
     public List<string> TextureFiles { get; set; } = new List<string>();
     public DateTime LastUpdatedUtc { get; set; } = DateTime.MinValue;
     public string ModAbsolutePath { get; set; } = string.Empty;
@@ -631,11 +779,55 @@ public sealed class ModStateEntry
     public bool Enabled { get; set; } = false;
     public int Priority { get; set; } = 0;
     public bool UsedInCollection { get; set; } = false;
+    [JsonIgnore]
     public List<string> UsedTextureFiles { get; set; } = new List<string>();
+    public int UsedTextureCount { get; set; } = 0;
+    public long BytesSaved { get; set; } = 0L;
+    public List<string> PenumbraPathSegments { get; set; } = new List<string>();
+    public string ModUid { get; set; } = string.Empty;
+    public ShrinkU.Configuration.ExternalChangeMarker? ExternalChange { get; set; } = null;
     public string LatestZipBackupFileName { get; set; } = string.Empty;
     public string LatestZipBackupVersion { get; set; } = string.Empty;
     public DateTime LatestZipBackupCreatedUtc { get; set; } = DateTime.MinValue;
     public string LatestPmpBackupFileName { get; set; } = string.Empty;
     public string LatestPmpBackupVersion { get; set; } = string.Empty;
     public DateTime LatestPmpBackupCreatedUtc { get; set; } = DateTime.MinValue;
+    public LatestBackupInfo? LatestBackup { get; set; } = null;
+    public DateTime LastScanUtc { get; set; } = DateTime.MinValue;
+    public DateTime LastConvertUtc { get; set; } = DateTime.MinValue;
+    public DateTime LastRestoreUtc { get; set; } = DateTime.MinValue;
+    public string LastChangeReason { get; set; } = string.Empty;
+    public DateTime LastChangeUtc { get; set; } = DateTime.MinValue;
+    public bool AutoConvertEligible { get; set; } = false;
+    public bool AutoRestoreEligible { get; set; } = false;
+    public bool Pinned { get; set; } = false;
+    public string Notes { get; set; } = string.Empty;
+    public bool NeedsRescan { get; set; } = false;
+    public bool NeedsRebuild { get; set; } = false;
+}
+
+public sealed class ModStateMeta
+{
+    public int SchemaVersion { get; set; } = 2;
+    public string GeneratedBy { get; set; } = string.Empty;
+    public DateTime CreatedUtc { get; set; } = DateTime.MinValue;
+    public DateTime LastSavedUtc { get; set; } = DateTime.MinValue;
+}
+
+public sealed class ModStateFile
+{
+    public ModStateMeta Meta { get; set; } = new ModStateMeta();
+    public Dictionary<string, ModStateEntry> Entries { get; set; } = new Dictionary<string, ModStateEntry>(StringComparer.OrdinalIgnoreCase);
+}
+
+public sealed class LatestBackupInfo
+{
+    public string Type { get; set; } = string.Empty;
+    public string FileName { get; set; } = string.Empty;
+    public string Version { get; set; } = string.Empty;
+    public DateTime CreatedUtc { get; set; } = DateTime.MinValue;
+    public int EntriesCount { get; set; } = 0;
+    public long TotalBytes { get; set; } = 0L;
+    public DateTime VerifiedUtc { get; set; } = DateTime.MinValue;
+    public string VerifiedHash { get; set; } = string.Empty;
 }

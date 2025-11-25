@@ -350,7 +350,13 @@ public sealed partial class ConversionUI
                         ImGui.TextUnformatted($"State: {enabledState}");
                         ImGui.EndTooltip();
                     }
-                    var hasPersistent = _configService.Current.ExternalConvertedMods.ContainsKey(mod);
+                    var hasPersistent = false;
+                    try
+                    {
+                        if (_modStateSnapshot != null && _modStateSnapshot.TryGetValue(mod, out var ms) && ms != null && ms.ExternalChange != null)
+                            hasPersistent = true;
+                    }
+                    catch { }
                     var showExternal = ((DateTime.UtcNow - _lastExternalChangeAt).TotalSeconds < 30 && !string.IsNullOrEmpty(_lastExternalChangeReason)) || hasPersistent;
                     if (showExternal && drawModRow)
                     {
@@ -365,8 +371,8 @@ public sealed partial class ConversionUI
                             {
                                 try
                                 {
-                                    if (_configService.Current.ExternalConvertedMods.TryGetValue(mod, out var marker) && marker != null)
-                                        reason = marker.Reason ?? reason;
+                                    if (_modStateSnapshot != null && _modStateSnapshot.TryGetValue(mod, out var ms) && ms != null && ms.ExternalChange != null)
+                                        reason = ms.ExternalChange.Reason ?? reason;
                                 }
                                 catch { }
                             }

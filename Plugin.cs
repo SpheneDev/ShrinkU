@@ -52,7 +52,7 @@ public sealed class Plugin : IDalamudPlugin
         _backupService = new TextureBackupService(_logger, _configService, _penumbraIpc, _modStateService);
         _conversionService = new TextureConversionService(_logger, _penumbraIpc, _backupService, _configService, _modStateService);
         var cacheService = new ConversionCacheService(_logger, _configService, _backupService, _modStateService);
-        _shrinkuIpc = new ShrinkU.Interop.ShrinkUIpc(pluginInterface, _logger, _backupService, _penumbraIpc, _configService, _conversionService);
+        _shrinkuIpc = new ShrinkU.Interop.ShrinkUIpc(pluginInterface, _logger, _backupService, _penumbraIpc, _configService, _conversionService, _modStateService);
 
         // Ensure standalone ShrinkU is not marked as controlled by Sphene
         try

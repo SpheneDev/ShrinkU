@@ -598,8 +598,8 @@ public sealed partial class ConversionUI
                                 _ = _conversionService.StartAutomaticConversionForModWithDelayAsync(mod, 2000);
                         }
                         catch (Exception ex) { _logger.LogError(ex, "StartAutomaticConversionForModWithDelayAsync failed for {mod}", mod); }
-                        try { _configService.Current.ExternalConvertedMods.Remove(mod); _configService.Save(); }
-                        catch (Exception ex) { _logger.LogError(ex, "Update ExternalConvertedMods after install failed for {mod}", mod); }
+                        try { _modStateService.UpdateExternalChange(mod, null); }
+                        catch (Exception ex) { _logger.LogError(ex, "Update external change after install failed for {mod}", mod); }
                         try { RefreshModState(mod, "orphan-install-flat"); }
                         catch (Exception ex) { _logger.LogError(ex, "RefreshModState after install failed for {mod}", mod); }
                         try
