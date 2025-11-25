@@ -195,9 +195,7 @@ public sealed partial class ConversionUI
                 var displayName = ResolveModDisplayName(mod);
                 var filtered = string.IsNullOrEmpty(_scanFilter)
                     ? files
-                    : files.Where(f => Path.GetFileName(f).IndexOf(_scanFilter, StringComparison.OrdinalIgnoreCase) >= 0
-                                    || mod.IndexOf(_scanFilter, StringComparison.OrdinalIgnoreCase) >= 0
-                                    || displayName.IndexOf(_scanFilter, StringComparison.OrdinalIgnoreCase) >= 0).ToList();
+                    : files.Where(f => Path.GetFileName(f).IndexOf(_scanFilter, StringComparison.OrdinalIgnoreCase) >= 0).ToList();
                 if (_filterPenumbraUsedOnly)
                 {
                     if (_penumbraUsedFiles.Count > 0)
@@ -229,15 +227,28 @@ public sealed partial class ConversionUI
                 var modMatchesFilter = string.IsNullOrEmpty(_scanFilter)
                                        || displayName.IndexOf(_scanFilter, StringComparison.OrdinalIgnoreCase) >= 0
                                        || mod.IndexOf(_scanFilter, StringComparison.OrdinalIgnoreCase) >= 0;
-                var include = _filterPenumbraUsedOnly ? filtered.Count > 0 : ((files?.Count ?? 0) > 0 || modMatchesFilter || totalTexturesForMod > 0);
+                var include = string.IsNullOrEmpty(_scanFilter)
+                    ? (_filterPenumbraUsedOnly ? filtered.Count > 0 : (((files?.Count ?? 0) > 0) || totalTexturesForMod > 0))
+                    : (_filterPenumbraUsedOnly ? filtered.Count > 0 : (modMatchesFilter || filtered.Count > 0));
                 if (include)
                     _visibleByMod[mod] = filtered;
             }
             foreach (var o in _orphaned)
             {
                 var name = o.ModFolderName;
-                if (!string.IsNullOrWhiteSpace(name) && !_visibleByMod.ContainsKey(name))
+                if (string.IsNullOrWhiteSpace(name) || _visibleByMod.ContainsKey(name))
+                    continue;
+                if (string.IsNullOrEmpty(_scanFilter))
+                {
                     _visibleByMod[name] = new List<string>();
+                }
+                else
+                {
+                    var disp = ResolveModDisplayName(name);
+                    if (name.IndexOf(_scanFilter, StringComparison.OrdinalIgnoreCase) >= 0
+                        || disp.IndexOf(_scanFilter, StringComparison.OrdinalIgnoreCase) >= 0)
+                        _visibleByMod[name] = new List<string>();
+                }
             }
             _visibleByModSig = visibleSig;
             _modStateSnapshot = snap;
