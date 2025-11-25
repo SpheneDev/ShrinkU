@@ -2530,6 +2530,11 @@ public sealed class TextureBackupService
                                 if (!convertedRel.Contains(name, StringComparer.OrdinalIgnoreCase))
                                     continue;
                             }
+                            else if (!(key.EndsWith(".tex", StringComparison.OrdinalIgnoreCase) || key.EndsWith(".dds", StringComparison.OrdinalIgnoreCase)))
+                            {
+                                continue;
+                            }
+
                             result[key] = e.Length;
                         }
                     }
@@ -3416,11 +3421,16 @@ public sealed class TextureBackupService
                         if (string.IsNullOrWhiteSpace(name) || name.EndsWith("/", StringComparison.Ordinal))
                             continue;
                         if (convertedRel != null && convertedRel.Count > 0 && !convertedRel.Contains(name, StringComparer.OrdinalIgnoreCase))
-                            continue;
-                        stats.OriginalBytes += e.Length;
-                        stats.ComparedFiles += 1;
+                                continue;
+                            
+                            if ((convertedRel == null || convertedRel.Count == 0) && 
+                                !(name.EndsWith(".tex", StringComparison.OrdinalIgnoreCase) || name.EndsWith(".dds", StringComparison.OrdinalIgnoreCase)))
+                                continue;
+
+                            stats.OriginalBytes += e.Length;
+                            stats.ComparedFiles += 1;
+                        }
                     }
-                }
                 catch { }
             }
             else
@@ -3438,6 +3448,10 @@ public sealed class TextureBackupService
                             var name = e.FullName?.Replace('\\', '/');
                             if (string.IsNullOrWhiteSpace(name) || name.EndsWith("/", StringComparison.Ordinal))
                                 continue;
+                            
+                            if (!(name.EndsWith(".tex", StringComparison.OrdinalIgnoreCase) || name.EndsWith(".dds", StringComparison.OrdinalIgnoreCase)))
+                                continue;
+
                             stats.OriginalBytes += e.Length;
                             stats.ComparedFiles += 1;
                         }
