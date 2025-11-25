@@ -177,13 +177,32 @@ public sealed partial class ConversionUI
                     if (GetOrQueryModBackup(m))
                         modsConverted++;
 
-                    var modOrig = GetOrQueryModOriginalTotal(m);
-                    if (modOrig > 0) origBytes += modOrig;
+                    int modTexCount = files != null ? files.Count : 0;
+                    if (modTexCount <= 0)
+                    {
+                        var snap2 = _modStateSnapshot ?? _modStateService.Snapshot();
+                        if (snap2.TryGetValue(m, out var st2) && st2 != null)
+                            modTexCount = Math.Max(0, st2.TotalTextures);
+                    }
+                    if (modTexCount > 0)
+                    {
+                        var modOrig = GetOrQueryModOriginalTotal(m);
+                        if (modOrig > 0) origBytes += modOrig;
+                    }
                     var hasBackupM = GetOrQueryModBackup(m);
                     if (hasBackupM)
                     {
                         if (_cachedPerModSavings.TryGetValue(m, out var stats) && stats != null && stats.CurrentBytes > 0)
-                            compBytes += stats.CurrentBytes;
+                        {
+                            if (modTexCount > 0)
+                                compBytes += stats.CurrentBytes;
+                        }
+                        else
+                        {
+                            var snap2 = _modStateSnapshot ?? _modStateService.Snapshot();
+                            if (modTexCount > 0 && snap2.TryGetValue(m, out var st3) && st3 != null && st3.CurrentBytes > 0)
+                                compBytes += st3.CurrentBytes;
+                        }
                     }
                 }
                 foreach (var ch in cur.Children.Values)

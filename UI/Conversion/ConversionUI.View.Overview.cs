@@ -485,9 +485,9 @@ public sealed partial class ConversionUI
                 _cachedTotalRows = _flatRows.Count;
                 _flatRowsSig = sig;
                 _folderSizeCache.Clear();
-                _folderSizeCacheSig = _flatRowsSig;
+                _folderSizeCacheSig = string.Concat(_flatRowsSig, "|", _perModSavingsRevision.ToString());
                 _folderCountsCache.Clear();
-                _folderCountsCacheSig = _flatRowsSig;
+                _folderCountsCacheSig = string.Concat(_flatRowsSig, "|", _perModSavingsRevision.ToString());
                 BuildFolderCountsCache(root, visibleByMod, string.Empty);
             }
             var clipper = ImGui.ImGuiListClipper();
@@ -584,7 +584,9 @@ public sealed partial class ConversionUI
 
                 long modOrig = 0;
                 long modCur = 0;
-
+                var totalAll = GetTotalTexturesForMod(m, files);
+                if (totalAll <= 0)
+                    continue;
                 if (snap.TryGetValue(m, out var st) && st != null && st.OriginalBytes > 0)
                     modOrig = st.OriginalBytes;
                 else
@@ -628,7 +630,7 @@ public sealed partial class ConversionUI
             ImGui.TableSetBgColor(ImGuiTableBgTarget.RowBg0, ImGui.GetColorU32((_zebraRowIndex++ % 2 == 0) ? _zebraEvenColor : _zebraOddColor));
             ImGui.TableSetColumnIndex(1);
             var reduction = totalUncompressed > 0
-                ? MathF.Max(0f, (float)savedBytes / totalUncompressed * 100f)
+                ? MathF.Max(0f, (1f - (float)totalCompressed / totalUncompressed) * 100f)
                 : 0f;
             ImGui.TextUnformatted($"Total saved ({reduction.ToString("0.00")}%)");
             ImGui.TableSetColumnIndex(2);

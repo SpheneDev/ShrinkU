@@ -120,6 +120,26 @@ public sealed class ModStateService
         }
     }
 
+    public void UpdateOriginalBytesFromRestore(string mod, long originalBytes, int comparedFiles)
+    {
+        lock (_lock)
+        {
+            var e = Get(mod);
+            var o = Math.Max(0, originalBytes);
+            bool changed = e.OriginalBytes != o || e.CurrentBytes != o || e.ComparedFiles != comparedFiles;
+            if (!changed) return;
+            e.OriginalBytes = o;
+            e.CurrentBytes = o;
+            e.ComparedFiles = comparedFiles;
+            e.LastUpdatedUtc = DateTime.UtcNow;
+            _lastSaveReason = nameof(UpdateOriginalBytesFromRestore);
+            _lastChangedMod = mod;
+            ScheduleSave();
+            if (!_batching)
+                try { OnEntryChanged?.Invoke(mod); } catch { }
+        }
+    }
+
     public void UpdateCurrentModInfo(string mod, string? absolutePath, string? relativePath, string? version, string? author, string? relativeModName)
     {
         lock (_lock)

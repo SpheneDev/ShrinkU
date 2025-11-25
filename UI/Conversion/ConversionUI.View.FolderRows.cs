@@ -99,10 +99,11 @@ public sealed partial class ConversionUI
         ImGui.TextColored(folderColor, $"{child.Name} (mods {cvals.modsConverted}/{cvals.modsTotal}, textures {cvals.texturesConverted}/{cvals.texturesTotal})");
 
         ImGui.TableSetColumnIndex(3);
-        if (!string.Equals(_folderSizeCacheSig, _flatRowsSig, StringComparison.Ordinal))
+        var fSig = string.Concat(_flatRowsSig, "|", _perModSavingsRevision.ToString());
+        if (!string.Equals(_folderSizeCacheSig, fSig, StringComparison.Ordinal))
         {
             _folderSizeCache.Clear();
-            _folderSizeCacheSig = _flatRowsSig;
+            _folderSizeCacheSig = fSig;
         }
         if (!_folderSizeCache.TryGetValue(fullPath, out var cached))
         {
@@ -110,6 +111,13 @@ public sealed partial class ConversionUI
             long comp = 0;
             foreach (var m in child.Mods)
             {
+                List<string>? filesForMod = null;
+                if (_scannedByMod.TryGetValue(m, out var allFiles) && allFiles != null && allFiles.Count > 0)
+                    filesForMod = allFiles;
+                else if (visibleByMod.TryGetValue(m, out var visFiles) && visFiles != null)
+                    filesForMod = visFiles;
+                var totalAll = GetTotalTexturesForMod(m, filesForMod);
+                if (totalAll <= 0) continue;
                 var modOrig = GetOrQueryModOriginalTotal(m);
                 if (modOrig > 0)
                     orig += modOrig;
@@ -117,6 +125,12 @@ public sealed partial class ConversionUI
                 if (!hasBackupM) continue;
                 if (_cachedPerModSavings.TryGetValue(m, out var stats) && stats != null && stats.CurrentBytes > 0)
                     comp += stats.CurrentBytes;
+                else
+                {
+                    var snap = _modStateSnapshot ?? _modStateService.Snapshot();
+                    if (snap.TryGetValue(m, out var st) && st != null && st.CurrentBytes > 0)
+                        comp += st.CurrentBytes;
+                }
             }
             cached = (orig, comp);
             _folderSizeCache[fullPath] = cached;

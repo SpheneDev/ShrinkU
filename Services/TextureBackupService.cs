@@ -2730,6 +2730,15 @@ public sealed class TextureBackupService
                         _modStateService.UpdateBackupFlags(modFolderName, hasTex, hasPmp);
                     }
                     catch { }
+                    try
+                    {
+                        var convertedManifestPath = Path.Combine(modDir, "pmp_converted_manifest.json");
+                        if (File.Exists(convertedManifestPath)) File.Delete(convertedManifestPath);
+                        try { await Task.Delay(300, token).ConfigureAwait(false); } catch { }
+                        var stats = await ComputeSavingsForModAsync(modFolderName).ConfigureAwait(false);
+                        _modStateService.UpdateOriginalBytesFromRestore(modFolderName, stats.CurrentBytes, stats.ComparedFiles);
+                    }
+                    catch { }
                     trace.Dispose();
                     return zipSuccess;
                 }
@@ -2784,6 +2793,15 @@ public sealed class TextureBackupService
                         var hasTex = await HasBackupForModAsync(modFolderName).ConfigureAwait(false);
                         var hasPmp = await HasPmpBackupForModAsync(modFolderName).ConfigureAwait(false);
                         _modStateService.UpdateBackupFlags(modFolderName, hasTex, hasPmp);
+                    }
+                    catch { }
+                    try
+                    {
+                        var convertedManifestPath = Path.Combine(modDir, "pmp_converted_manifest.json");
+                        if (File.Exists(convertedManifestPath)) File.Delete(convertedManifestPath);
+                        try { await Task.Delay(300, token).ConfigureAwait(false); } catch { }
+                        var stats = await ComputeSavingsForModAsync(modFolderName).ConfigureAwait(false);
+                        _modStateService.UpdateOriginalBytesFromRestore(modFolderName, stats.CurrentBytes, stats.ComparedFiles);
                     }
                     catch { }
                     trace.Dispose();
@@ -3374,12 +3392,6 @@ public sealed class TextureBackupService
                     {
                         try
                         {
-                            if (convertedRel != null && convertedRel.Count > 0)
-                            {
-                                var rel = Path.GetRelativePath(modAbs!, file).Replace('\\', '/');
-                                if (!convertedRel.Contains(rel, StringComparer.OrdinalIgnoreCase))
-                                    continue;
-                            }
                             var fi = new FileInfo(file);
                             stats.CurrentBytes += fi.Length;
                             countedCurrentFiles++;
