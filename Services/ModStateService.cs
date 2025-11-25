@@ -108,7 +108,15 @@ public sealed class ModStateService
         {
             var e = Get(mod);
             if (e.OriginalBytes <= 0)
+            {
                 e.OriginalBytes = originalBytes;
+            }
+            else if (originalBytes > 0 && Math.Abs(e.OriginalBytes - originalBytes) > 1024 * 1024) // >1MB diff
+            {
+                // Trace if we are ignoring a significantly different original size
+                try { _logger.LogDebug("[TRACE-ORIGINAL] UpdateSavings ignored new original size {new} vs existing {old} for {mod}", originalBytes, e.OriginalBytes, mod); } catch { }
+            }
+
             if (!e.InstalledButNotConverted)
             {
                 e.CurrentBytes = currentBytes;
@@ -161,11 +169,25 @@ public sealed class ModStateService
             string ver = version ?? string.Empty;
             string auth = author ?? string.Empty;
             string rname = string.IsNullOrWhiteSpace(relativeModName) ? (e.RelativeModName ?? string.Empty) : relativeModName ?? string.Empty;
+            bool versionChanged = !string.Equals(e.CurrentVersion ?? string.Empty, ver ?? string.Empty, StringComparison.Ordinal);
             bool changed = !string.Equals(e.ModAbsolutePath ?? string.Empty, abs ?? string.Empty, StringComparison.Ordinal)
                 || !string.Equals(e.PenumbraRelativePath ?? string.Empty, rel ?? string.Empty, StringComparison.Ordinal)
-                || !string.Equals(e.CurrentVersion ?? string.Empty, ver ?? string.Empty, StringComparison.Ordinal)
+                || versionChanged
                 || !string.Equals(e.CurrentAuthor ?? string.Empty, auth ?? string.Empty, StringComparison.Ordinal)
                 || !string.Equals(e.RelativeModName ?? string.Empty, rname ?? string.Empty, StringComparison.Ordinal);
+
+            // LOGIC-FIX: If version changes and we have no backup, reset OriginalBytes to allow re-scan.
+            // This handles mod updates (v1 -> v2) where size changes, while protecting converted mods (which have backup).
+            if (versionChanged && !e.HasTextureBackup && !e.HasPmpBackup && e.OriginalBytes > 0)
+            {
+                try { _logger.LogDebug($"[ModState] Version change for '{mod}' ({e.CurrentVersion} -> {ver}) without backup. Resetting OriginalBytes for re-scan."); } catch { }
+                e.OriginalBytes = 0;
+                e.CurrentBytes = 0;
+                e.ComparedFiles = 0;
+                e.BytesSaved = 0;
+                changed = true;
+            }
+
             // Ensure ModUid and path segments are populated even if no other fields change
             if (!changed)
             {
