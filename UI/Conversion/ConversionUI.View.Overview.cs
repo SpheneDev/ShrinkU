@@ -53,6 +53,8 @@ public sealed partial class ConversionUI
             ImGui.PopStyleColor();
         }
         ImGui.PopFont();
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("Show only mods used by the current Penumbra collection.");
         if (usedOnlyClicked)
         {
             _filterPenumbraUsedOnly = !_filterPenumbraUsedOnly;
@@ -84,7 +86,7 @@ public sealed partial class ConversionUI
             ImGui.PushStyleColor(ImGuiCol.Text, ShrinkUColors.ButtonTextOnAccent);
         }
         ImGui.PushStyleVar(ImGuiStyleVar.ButtonTextAlign, new Vector2(0.9f, 0.5f));
-        var hideNonConvertibleClicked = ImGui.Button(FontAwesomeIcon.Ban.ToIconString(), new Vector2(w, h));
+        var hideNonConvertibleClicked = ImGui.Button(FontAwesomeIcon.Image.ToIconString(), new Vector2(w, h));
         ImGui.PopStyleVar();
         if (_filterNonConvertibleMods)
         {
@@ -94,6 +96,8 @@ public sealed partial class ConversionUI
             ImGui.PopStyleColor();
         }
         ImGui.PopFont();
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("Hide mods without textures.");
         if (hideNonConvertibleClicked)
         {
             _filterNonConvertibleMods = !_filterNonConvertibleMods;
@@ -121,6 +125,8 @@ public sealed partial class ConversionUI
             ImGui.PopStyleColor();
         }
         ImGui.PopFont();
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("Hide inefficient mods (larger after conversion).");
         if (hideInefficientClicked)
         {
             _filterInefficientMods = !_filterInefficientMods;
