@@ -108,8 +108,16 @@ public sealed class ModStateService
             var e = Get(mod);
             if (e.OriginalBytes <= 0)
                 e.OriginalBytes = originalBytes;
-            e.CurrentBytes = currentBytes;
-            e.ComparedFiles = comparedFiles;
+            if (!e.InstalledButNotConverted)
+            {
+                e.CurrentBytes = currentBytes;
+                e.ComparedFiles = comparedFiles;
+            }
+            else
+            {
+                e.CurrentBytes = 0;
+                e.ComparedFiles = 0;
+            }
             e.LastUpdatedUtc = DateTime.UtcNow;
             _lastSaveReason = nameof(UpdateSavings);
             _lastChangedMod = mod;
@@ -126,11 +134,11 @@ public sealed class ModStateService
         {
             var e = Get(mod);
             var o = Math.Max(0, originalBytes);
-            bool changed = e.OriginalBytes != o || e.CurrentBytes != o || e.ComparedFiles != comparedFiles;
+            bool changed = e.OriginalBytes != o || e.CurrentBytes != 0 || e.ComparedFiles != 0;
             if (!changed) return;
             e.OriginalBytes = o;
-            e.CurrentBytes = o;
-            e.ComparedFiles = comparedFiles;
+            e.CurrentBytes = 0;
+            e.ComparedFiles = 0;
             e.LastUpdatedUtc = DateTime.UtcNow;
             _lastSaveReason = nameof(UpdateOriginalBytesFromRestore);
             _lastChangedMod = mod;

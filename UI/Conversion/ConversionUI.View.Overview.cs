@@ -597,12 +597,15 @@ public sealed partial class ConversionUI
                     modOrig = st.OriginalBytes;
                 else
                     modOrig = GetOrQueryModOriginalTotal(m);
-                if (_cachedPerModSavings.TryGetValue(m, out var stats) && stats != null && stats.CurrentBytes > 0)
-                    modCur = stats.CurrentBytes;
-                if (modCur <= 0)
+
+                // Prefer snapshot for current size to match mod rows; fall back to cached savings
+                if (snap.TryGetValue(m, out var st2) && st2 != null && st2.CurrentBytes > 0 && st2.ComparedFiles > 0 && !st2.InstalledButNotConverted)
+                    modCur = st2.CurrentBytes;
+                else if (_cachedPerModSavings.TryGetValue(m, out var stats) && stats != null && stats.CurrentBytes > 0 && stats.ComparedFiles > 0)
                 {
-                    if (snap.TryGetValue(m, out var st2) && st2 != null && st2.CurrentBytes > 0)
-                        modCur = st2.CurrentBytes;
+                    var stx = snap.TryGetValue(m, out var s3) ? s3 : null;
+                    if (!(stx != null && stx.InstalledButNotConverted))
+                        modCur = stats.CurrentBytes;
                 }
 
                 if (modOrig > 0) totalUncompressedCalc += modOrig;
@@ -750,6 +753,8 @@ public sealed partial class ConversionUI
         {
             _running = true;
             ResetConversionProgress();
+            _bulkStartedAt = DateTime.UtcNow;
+            _bulkBackedUpMods.Clear();
             var toConvert = GetConvertableTextures();
             var modsToConvert = new HashSet<string>(convertibleSelectedModsNoBackup, StringComparer.OrdinalIgnoreCase);
             _uiThreadActions.Enqueue(() => { _totalMods = modsToConvert.Count; _currentModIndex = 0; _currentModTotalFiles = 0; _needsUIRefresh = true; });
@@ -832,6 +837,9 @@ public sealed partial class ConversionUI
                 _restoreCancellationTokenSource?.Dispose();
                 _restoreCancellationTokenSource = new CancellationTokenSource();
                 var restoreToken = _restoreCancellationTokenSource.Token;
+                _bulkStartedAt = DateTime.UtcNow;
+                _restoreModsTotal = restorableFiltered.Count;
+                _restoreModsDone = 0;
 
                 _ = Task.Run(async () =>
                 {
@@ -839,6 +847,7 @@ public sealed partial class ConversionUI
                     {
                         try
                         {
+                            _uiThreadActions.Enqueue(() => { _restoreModsDone++; _currentRestoreMod = mod; });
                             _currentRestoreMod = mod;
                             _currentRestoreModIndex = 0;
                             _currentRestoreModTotal = 0;
@@ -924,7 +933,21 @@ public sealed partial class ConversionUI
                         _currentRestoreMod = string.Empty;
                         _currentRestoreModIndex = 0;
                         _currentRestoreModTotal = 0;
+                        _restoreModsDone = 0;
+                        _restoreModsTotal = 0;
                     });
+
+                    try
+                    {
+                        var threads = Math.Max(1, _configService.Current.MaxStartupThreads);
+                        _uiThreadActions.Enqueue(() => { SetStartupRefreshInProgress(true); });
+                        _ = Task.Run(async () =>
+                        {
+                            try { await _conversionService.RunInitialParallelUpdateAsync(threads, CancellationToken.None).ConfigureAwait(false); } catch { }
+                            _uiThreadActions.Enqueue(() => { SetStartupRefreshInProgress(false); _needsUIRefresh = true; });
+                        });
+                    }
+                    catch { }
                 });
             }
             ImGui.PopStyleColor(4);

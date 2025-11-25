@@ -192,18 +192,15 @@ public sealed partial class ConversionUI
                     var hasBackupM = GetOrQueryModBackup(m);
                     if (hasBackupM)
                     {
-                        if (_cachedPerModSavings.TryGetValue(m, out var stats) && stats != null && stats.CurrentBytes > 0)
+                        var snap2 = _modStateSnapshot ?? _modStateService.Snapshot();
+                        if (modTexCount > 0 && snap2.TryGetValue(m, out var st3) && st3 != null && st3.CurrentBytes > 0 && st3.ComparedFiles > 0 && !st3.InstalledButNotConverted)
+                            compBytes += st3.CurrentBytes;
+                        else if (_cachedPerModSavings.TryGetValue(m, out var stats) && stats != null && stats.CurrentBytes > 0 && stats.ComparedFiles > 0)
                         {
                             if (modTexCount > 0)
                                 compBytes += stats.CurrentBytes;
                         }
-                        else
-                        {
-                            var snap2 = _modStateSnapshot ?? _modStateService.Snapshot();
-                            if (modTexCount > 0 && snap2.TryGetValue(m, out var st3) && st3 != null && st3.CurrentBytes > 0)
-                                compBytes += st3.CurrentBytes;
-                        }
-                    }
+                }
                 }
                 foreach (var ch in cur.Children.Values)
                     stack.Push(ch);

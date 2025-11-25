@@ -1,4 +1,5 @@
 using Dalamud.Bindings.ImGui;
+using System;
 using System.Numerics;
 using Microsoft.Extensions.Logging;
 namespace ShrinkU.UI;
@@ -16,6 +17,16 @@ public sealed partial class ConversionUI
         if (!string.IsNullOrEmpty(displayMod))
         {
             ImGui.TextColored(new Vector4(0.90f, 0.77f, 0.35f, 1f), "Restoring");
+            if (_restoreModsTotal > 0)
+            {
+                var elapsed = (_bulkStartedAt == DateTime.MinValue) ? TimeSpan.Zero : (DateTime.UtcNow - _bulkStartedAt);
+                var done = Math.Max(0, _restoreModsDone);
+                var remaining = Math.Max(0, _restoreModsTotal - done);
+                var etaSec = done > 0 ? (int)Math.Round(elapsed.TotalSeconds / done * remaining) : 0;
+                var m = etaSec / 60;
+                var s = etaSec % 60;
+                ImGui.Text($"Mods: {done}/{_restoreModsTotal} • ETA {m}:{s:D2}");
+            }
             ImGui.Text($"Mod: {displayMod} ({_currentRestoreModIndex}/{_currentRestoreModTotal})");
             var total = _currentRestoreModTotal > 0 ? _currentRestoreModTotal : _backupTotal;
             var current = _currentRestoreModTotal > 0 ? _currentRestoreModIndex : _backupIndex;
@@ -35,6 +46,16 @@ public sealed partial class ConversionUI
             var modName = string.IsNullOrEmpty(_currentModName) ? string.Empty : _currentModName;
             var dn2 = !string.IsNullOrEmpty(modName) && _modDisplayNames.TryGetValue(modName, out var nm) ? nm : modName;
             ImGui.TextColored(new Vector4(0.40f, 0.85f, 0.40f, 1f), "Converting");
+            if (_totalMods > 0)
+            {
+                var elapsed = (_bulkStartedAt == DateTime.MinValue) ? TimeSpan.Zero : (DateTime.UtcNow - _bulkStartedAt);
+                var done = Math.Max(0, _currentModIndex);
+                var remaining = Math.Max(0, _totalMods - done);
+                var etaSec = done > 0 ? (int)Math.Round(elapsed.TotalSeconds / done * remaining) : 0;
+                var m = etaSec / 60;
+                var s = etaSec % 60;
+                ImGui.Text($"Mods: {done}/{_totalMods} • Backups: {_bulkBackedUpMods.Count} • ETA {m}:{s:D2}");
+            }
             if (!string.IsNullOrEmpty(dn2))
                 ImGui.Text($"Mod: {dn2} ({_currentModIndex}/{_totalMods})");
             float overall = (_totalMods > 0) ? (float)_currentModIndex / _totalMods : 0f;

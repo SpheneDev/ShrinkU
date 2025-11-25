@@ -783,6 +783,7 @@ public TextureConversionService(ILogger logger, PenumbraIpc penumbraIpc, Texture
                     if (stats != null && stats.ComparedFiles > 0)
                     {
                         try { _modStateService.UpdateSavings(modName, stats.OriginalBytes, stats.CurrentBytes, stats.ComparedFiles); } catch { }
+                        try { _modStateService.Save(); } catch { }
                         if (stats.CurrentBytes > stats.OriginalBytes)
                         {
                             // Persist inefficient mod marker

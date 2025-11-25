@@ -64,6 +64,8 @@ public sealed partial class ConversionUI : Window, IDisposable
     private int _convertedCount = 0;
     private int _backupIndex = 0;
     private int _backupTotal = 0;
+    private DateTime _bulkStartedAt = DateTime.MinValue;
+    private readonly HashSet<string> _bulkBackedUpMods = new(StringComparer.OrdinalIgnoreCase);
     private bool _running = false;
     private string _currentModName = string.Empty;
     private int _currentModIndex = 0;
@@ -239,6 +241,8 @@ public sealed partial class ConversionUI : Window, IDisposable
     private List<TextureBackupService.OrphanBackupInfo> _orphaned = new();
     private int _orphanRevision = 0;
     private int _currentRestoreModTotal = 0;
+    private int _restoreModsTotal = 0;
+    private int _restoreModsDone = 0;
     private bool _restoreAfterCancel = false;
     private string _cancelTargetMod = string.Empty;
     private string _statusMessage = string.Empty;
@@ -426,6 +430,7 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
                         {
                             _modsWithBackupCache[mod] = true;
                             _modsWithPmpCache[mod] = true;
+                            _bulkBackedUpMods.Add(mod);
                             RefreshModState(mod, "backup-progress-pmp");
                             _ = _backupService.ComputeSavingsForModAsync(mod).ContinueWith(ps =>
                             {
@@ -450,6 +455,13 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
                                 });
                             }, TaskScheduler.Default);
                         }
+                    }
+                    else
+                    {
+                        var modDir2 = Path.GetDirectoryName(path);
+                        var mod2 = !string.IsNullOrWhiteSpace(modDir2) ? Path.GetFileName(modDir2) : string.Empty;
+                        if (!string.IsNullOrWhiteSpace(mod2))
+                            _bulkBackedUpMods.Add(mod2);
                     }
                 }
             }
@@ -577,6 +589,18 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
                 ResetConversionProgress();
                 ResetRestoreProgress();
             });
+
+            try
+            {
+                var threads = Math.Max(1, _configService.Current.MaxStartupThreads);
+                _uiThreadActions.Enqueue(() => { SetStartupRefreshInProgress(true); });
+                _ = Task.Run(async () =>
+                {
+                    try { await _conversionService.RunInitialParallelUpdateAsync(threads, CancellationToken.None).ConfigureAwait(false); } catch { }
+                    _uiThreadActions.Enqueue(() => { SetStartupRefreshInProgress(false); _needsUIRefresh = true; });
+                });
+            }
+            catch { }
         };
         _conversionService.OnConversionCompleted += _onConversionCompleted;
 
@@ -1694,6 +1718,8 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
         _currentTexture = string.Empty;
         _backupIndex = 0;
         _backupTotal = 0;
+        _bulkStartedAt = DateTime.MinValue;
+        try { _bulkBackedUpMods.Clear(); } catch { }
     }
 
     // Reset restore-related progress state to avoid stale UI between operations
@@ -1705,6 +1731,8 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
         _currentTexture = string.Empty;
         _backupIndex = 0;
         _backupTotal = 0;
+        _restoreModsTotal = 0;
+        _restoreModsDone = 0;
     }
 
     private void ResetBothProgress()

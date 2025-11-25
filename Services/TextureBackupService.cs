@@ -1094,10 +1094,13 @@ public sealed class TextureBackupService
                 _modStateService.UpdateBackupFlags(modFolderName, hasTex, hasPmp);
             }
             catch { }
-            if (deregisterDuringRestore)
+            try
             {
-                try { _modStateService.UpdateInstalledButNotConverted(modFolderName, true); } catch { }
+                var stats = await ComputeSavingsForModAsync(modFolderName).ConfigureAwait(false);
+                _modStateService.UpdateOriginalBytesFromRestore(modFolderName, stats.CurrentBytes, stats.ComparedFiles);
             }
+            catch { }
+            try { _modStateService.UpdateInstalledButNotConverted(modFolderName, true); } catch { }
             return true;
         }
         catch (Exception ex)
@@ -2737,6 +2740,7 @@ public sealed class TextureBackupService
                         try { await Task.Delay(300, token).ConfigureAwait(false); } catch { }
                         var stats = await ComputeSavingsForModAsync(modFolderName).ConfigureAwait(false);
                         _modStateService.UpdateOriginalBytesFromRestore(modFolderName, stats.CurrentBytes, stats.ComparedFiles);
+                        try { _modStateService.UpdateInstalledButNotConverted(modFolderName, true); } catch { }
                     }
                     catch { }
                     trace.Dispose();
@@ -2802,6 +2806,7 @@ public sealed class TextureBackupService
                         try { await Task.Delay(300, token).ConfigureAwait(false); } catch { }
                         var stats = await ComputeSavingsForModAsync(modFolderName).ConfigureAwait(false);
                         _modStateService.UpdateOriginalBytesFromRestore(modFolderName, stats.CurrentBytes, stats.ComparedFiles);
+                        try { _modStateService.UpdateInstalledButNotConverted(modFolderName, true); } catch { }
                     }
                     catch { }
                     trace.Dispose();
@@ -3379,10 +3384,18 @@ public sealed class TextureBackupService
                 }
             }
 
-            // Compute current bytes from live mod folder
             try
             {
-                var modAbs = GetModAbsolutePath(modFolderName);
+                string? modAbs = null;
+                try
+                {
+                    var snap = _modStateService.Snapshot();
+                    if (snap.TryGetValue(modFolderName, out var e) && e != null && !string.IsNullOrWhiteSpace(e.ModAbsolutePath))
+                        modAbs = e.ModAbsolutePath;
+                }
+                catch { }
+                if (string.IsNullOrWhiteSpace(modAbs))
+                    modAbs = GetModAbsolutePath(modFolderName);
                 if (!string.IsNullOrWhiteSpace(modAbs) && Directory.Exists(modAbs))
                 {
                     int countedCurrentFiles = 0;
@@ -3412,6 +3425,7 @@ public sealed class TextureBackupService
             try { _logger.LogDebug("[ShrinkU] Populate: ComputeSavings done mod={mod} original={orig} current={cur} comparedFiles={cmp}", modFolderName, stats.OriginalBytes, stats.CurrentBytes, stats.ComparedFiles); } catch { }
 
             try { _modStateService.UpdateSavings(modFolderName, stats.OriginalBytes, stats.CurrentBytes, stats.ComparedFiles); } catch { }
+            try { _modStateService.Save(); } catch { }
         }
         catch { }
         await Task.CompletedTask;

@@ -123,13 +123,14 @@ public sealed partial class ConversionUI
                     orig += modOrig;
                 var hasBackupM = GetOrQueryModBackup(m);
                 if (!hasBackupM) continue;
-                if (_cachedPerModSavings.TryGetValue(m, out var stats) && stats != null && stats.CurrentBytes > 0)
-                    comp += stats.CurrentBytes;
-                else
+                var snap = _modStateSnapshot ?? _modStateService.Snapshot();
+                if (snap.TryGetValue(m, out var st) && st != null && st.CurrentBytes > 0 && st.ComparedFiles > 0 && !st.InstalledButNotConverted)
+                    comp += st.CurrentBytes;
+                else if (_cachedPerModSavings.TryGetValue(m, out var stats) && stats != null && stats.CurrentBytes > 0 && stats.ComparedFiles > 0)
                 {
-                    var snap = _modStateSnapshot ?? _modStateService.Snapshot();
-                    if (snap.TryGetValue(m, out var st) && st != null && st.CurrentBytes > 0)
-                        comp += st.CurrentBytes;
+                    var stx = snap.TryGetValue(m, out var s3) ? s3 : null;
+                    if (!(stx != null && stx.InstalledButNotConverted))
+                        comp += stats.CurrentBytes;
                 }
             }
             cached = (orig, comp);
