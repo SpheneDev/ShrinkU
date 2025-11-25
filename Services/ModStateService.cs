@@ -412,7 +412,21 @@ public sealed class ModStateService
         if (!File.Exists(path)) return;
         try
         {
-            var json = File.ReadAllText(path);
+            string json = string.Empty;
+            for (int attempt = 0; attempt < 3; attempt++)
+            {
+                try
+                {
+                    using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, 65536, FileOptions.SequentialScan);
+                    using var sr = new StreamReader(fs, System.Text.Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
+                    json = sr.ReadToEnd();
+                    if (!string.IsNullOrWhiteSpace(json)) break;
+                }
+                catch
+                {
+                    try { System.Threading.Thread.Sleep(30); } catch { }
+                }
+            }
             Dictionary<string, ModStateEntry> dict = new Dictionary<string, ModStateEntry>(StringComparer.OrdinalIgnoreCase);
             try
             {
@@ -433,7 +447,32 @@ public sealed class ModStateService
                 var d0 = JsonSerializer.Deserialize<Dictionary<string, ModStateEntry>>(json) ?? new();
                 dict = new Dictionary<string, ModStateEntry>(d0, StringComparer.OrdinalIgnoreCase);
             }
-            lock (_lock) { _state = dict; }
+            lock (_lock)
+            {
+                if (_state.Count > 0 && (dict == null || dict.Count == 0))
+                {
+                    try { _logger.LogDebug("Load() ignored empty state from disk due to non-empty in-memory state"); } catch { }
+                }
+                else
+                {
+                    if (_state.Count > 0 && dict != null)
+                    {
+                        try
+                        {
+                            var sampleOld = _state.Values.FirstOrDefault(x => x.TotalTextures > 0 || !string.IsNullOrEmpty(x.CurrentVersion));
+                            if (sampleOld != null && dict.TryGetValue(sampleOld.ModFolderName, out var sampleNew))
+                            {
+                                if (sampleNew.TotalTextures == 0 && string.IsNullOrEmpty(sampleNew.CurrentVersion) && string.IsNullOrEmpty(sampleNew.CurrentAuthor))
+                                {
+                                    _logger.LogDebug($"[TRACE-WIPE] Load() replacing populated mod '{sampleOld.ModFolderName}' (tex={sampleOld.TotalTextures}, ver={sampleOld.CurrentVersion}) with empty/default entry! Source file size: {_lastLoadedLength}");
+                                }
+                            }
+                        }
+                        catch { }
+                    }
+                    _state = dict ?? new Dictionary<string, ModStateEntry>(StringComparer.OrdinalIgnoreCase);
+                }
+            }
             try
             {
                 foreach (var kv in _state)
@@ -462,7 +501,7 @@ public sealed class ModStateService
                 File.Move(path, corrupt);
             }
             catch { }
-            try { lock (_lock) { _state = new Dictionary<string, ModStateEntry>(StringComparer.OrdinalIgnoreCase); } } catch { }
+            try { ScheduleSave(); } catch { }
         }
     }
 
@@ -472,7 +511,7 @@ public sealed class ModStateService
 
     public void Save()
     {
-        SaveInternal();
+        ScheduleSave();
     }
 
     private void ScheduleSave()
@@ -490,7 +529,7 @@ public sealed class ModStateService
             {
                 try
                 {
-                    await Task.Delay(600, token).ConfigureAwait(false);
+                    await Task.Delay(300, token).ConfigureAwait(false);
                     if (token.IsCancellationRequested) return;
                     SaveInternal();
                 }
@@ -500,65 +539,100 @@ public sealed class ModStateService
         }
     }
 
+    private readonly object _fileSaveLock = new();
+
     private void SaveInternal()
     {
         if (!_savingEnabled) return;
-        try
+        lock (_fileSaveLock)
         {
-            var trace = PerfTrace.Step(_logger, "ModState Save");
-            var path = GetPath();
-            var tmp = path + ".tmp";
-            try { var dir = Path.GetDirectoryName(path); if (!string.IsNullOrWhiteSpace(dir)) Directory.CreateDirectory(dir); } catch { }
-            var sw = Stopwatch.StartNew();
-            using (var fs = new FileStream(tmp, FileMode.Create, FileAccess.Write, FileShare.None, 65536, FileOptions.SequentialScan))
+            try
             {
-                using var writer = new Utf8JsonWriter(fs, new JsonWriterOptions { Indented = true });
-                var meta = new ModStateMeta
+                var trace = PerfTrace.Step(_logger, "ModState Save");
+                var path = GetPath();
+                var pid = System.Diagnostics.Process.GetCurrentProcess().Id;
+                var tmp = path + $".tmp.{pid}.{System.Environment.CurrentManagedThreadId}.{DateTime.UtcNow.Ticks}";
+                try { var dir = Path.GetDirectoryName(path); if (!string.IsNullOrWhiteSpace(dir)) Directory.CreateDirectory(dir); } catch { }
+                
+                Dictionary<string, ModStateEntry> entriesSnapshot;
+                lock (_lock)
                 {
-                    SchemaVersion = 2,
-                    GeneratedBy = GetGeneratedBy(),
-                    CreatedUtc = _lastLoadedWriteUtc == DateTime.MinValue ? DateTime.UtcNow : _lastLoadedWriteUtc,
-                    LastSavedUtc = DateTime.UtcNow,
-                };
-                var file = new ModStateFile { Meta = meta, Entries = _state };
-                JsonSerializer.Serialize(writer, file, new JsonSerializerOptions { WriteIndented = true });
-                writer.Flush();
-            }
-            var moved = false;
-            for (int i = 0; i < 8 && !moved; i++)
-            {
-                try
-                {
-                    if (File.Exists(path))
-                        File.Replace(tmp, path, null);
-                    else
-                        File.Move(tmp, path);
-                    moved = true;
+                    entriesSnapshot = new Dictionary<string, ModStateEntry>(_state, StringComparer.OrdinalIgnoreCase);
                 }
-                catch
+
+                var sw = Stopwatch.StartNew();
+                using (var fs = new FileStream(tmp, FileMode.Create, FileAccess.Write, FileShare.None, 65536, FileOptions.SequentialScan))
                 {
-                    try { if (File.Exists(path)) File.Delete(path); } catch { }
+                    using var writer = new Utf8JsonWriter(fs, new JsonWriterOptions { Indented = true });
+                    var meta = new ModStateMeta
+                    {
+                        SchemaVersion = 2,
+                        GeneratedBy = GetGeneratedBy(),
+                        CreatedUtc = _lastLoadedWriteUtc == DateTime.MinValue ? DateTime.UtcNow : _lastLoadedWriteUtc,
+                        LastSavedUtc = DateTime.UtcNow,
+                    };
+                    var file = new ModStateFile { Meta = meta, Entries = entriesSnapshot };
+                    JsonSerializer.Serialize(writer, file, new JsonSerializerOptions { WriteIndented = true });
+                    writer.Flush();
+                }
+                
+                var fiTmp = new FileInfo(tmp);
+                if (fiTmp.Length == 0)
+                {
+                     try { _logger.LogError("SaveInternal generated empty file, aborting move"); } catch { }
+                     try { File.Delete(tmp); } catch { }
+                     return;
+                }
+
+                var moved = false;
+                int tries = 0;
+                while (!moved && tries < 20)
+                {
+                    tries++;
                     try
                     {
-                        File.Move(tmp, path);
+                        if (File.Exists(path))
+                            File.Replace(tmp, path, null);
+                        else
+                            File.Move(tmp, path);
                         moved = true;
                     }
                     catch
                     {
-                        try { System.Threading.Thread.Sleep(50); } catch { }
+                        try { if (File.Exists(path)) File.Delete(path); } catch { }
+                        try
+                        {
+                            File.Move(tmp, path);
+                            moved = true;
+                        }
+                        catch
+                        {
+                            try { System.Threading.Thread.Sleep(Math.Min(500, 50 * tries)); } catch { }
+                        }
                     }
                 }
-            }
-            if (!moved)
-            {
-                try
+                
+                if (moved)
                 {
-                    using (var fs = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.ReadWrite, 65536, FileOptions.SequentialScan))
+                    try 
+                    { 
+                        var fi = new FileInfo(path);
+                        _lastLoadedWriteUtc = fi.LastWriteTimeUtc;
+                        _lastLoadedLength = fi.Length;
+                    } 
+                    catch { }
+                }
+
+                if (!moved)
+                {
+                    try
                     {
-                        using var writer = new Utf8JsonWriter(fs, new JsonWriterOptions { Indented = true });
-                        var meta2 = new ModStateMeta
+                        using (var fs = new FileStream(path, FileMode.OpenOrCreate, FileAccess.Write, FileShare.Read, 65536, FileOptions.SequentialScan))
                         {
-                            SchemaVersion = 2,
+                            using var writer = new Utf8JsonWriter(fs, new JsonWriterOptions { Indented = true });
+                            var meta2 = new ModStateMeta
+                            {
+                                SchemaVersion = 2,
                             GeneratedBy = GetGeneratedBy(),
                             CreatedUtc = _lastLoadedWriteUtc == DateTime.MinValue ? DateTime.UtcNow : _lastLoadedWriteUtc,
                             LastSavedUtc = DateTime.UtcNow,
@@ -567,6 +641,7 @@ public sealed class ModStateService
                         JsonSerializer.Serialize(writer, file2, new JsonSerializerOptions { WriteIndented = true });
                         writer.Flush();
                     }
+                    moved = true;
                 }
                 catch
                 {
@@ -609,11 +684,20 @@ public sealed class ModStateService
             catch { }
             try { OnStateSaved?.Invoke(); } catch { }
             trace.Dispose();
-        }
-        catch (Exception ex)
-        {
-            try { _logger.LogError(ex, "Failed to save mod_state.json to {path}", GetPath()); } catch { }
-            try { var t = GetPath() + ".tmp"; if (File.Exists(t)) File.Delete(t); } catch { }
+            }
+            catch (Exception ex)
+            {
+                try { _logger.LogError(ex, "Failed to save mod_state.json to {path}", GetPath()); } catch { }
+                try
+                {
+                    var dir = Path.GetDirectoryName(GetPath()) ?? string.Empty;
+                    foreach (var f in Directory.EnumerateFiles(dir, "mod_state.json.tmp.*"))
+                    {
+                        try { File.Delete(f); } catch { }
+                    }
+                }
+                catch { }
+            }
         }
     }
 

@@ -61,7 +61,17 @@ public TextureConversionService(ILogger logger, PenumbraIpc penumbraIpc, Texture
         };
         _onModDeleted = dir => {
             OnPenumbraModDeleted?.Invoke(dir);
-            try { _modStateService.RemoveEntry(dir); } catch { }
+            try
+            {
+                // Only remove state if the mod truly no longer exists in Penumbra
+                var exists = false;
+                try { exists = _penumbraIpc.ModExists(dir); } catch { exists = true; }
+                if (!exists)
+                    _modStateService.RemoveEntry(dir);
+                else
+                    _logger.LogDebug("Skip RemoveEntry: mod still exists after ModDeleted broadcast {dir}", dir);
+            }
+            catch { }
             _ = Task.Run(async () => { try { await UpdateAllModUsedTextureFilesAsync().ConfigureAwait(false); } catch { } });
         };
         _onModPathChanged = (modDir, newPath) =>
@@ -318,7 +328,7 @@ public TextureConversionService(ILogger logger, PenumbraIpc penumbraIpc, Texture
             foreach (var mod in ordered)
             {
                 await sem.WaitAsync(token).ConfigureAwait(false);
-                tasks.Add(Task.Run(() =>
+                tasks.Add(Task.Run(async () =>
                 {
                     try
                     {
@@ -330,7 +340,31 @@ public TextureConversionService(ILogger logger, PenumbraIpc penumbraIpc, Texture
                                 fileCount = list.Count;
                         }
                         catch { fileCount = 0; }
-                        _modStateService.UpdateTextureCount(key, fileCount);
+
+                        bool skipUpdate = false;
+                        int finalCount = fileCount;
+                        if (fileCount == 0)
+                        {
+                            var existingState = _modStateService.Get(key);
+                            if (existingState != null && existingState.TotalTextures > 0)
+                            {
+                                // Verify with direct filesystem scan
+                                var directFiles = await GetModTextureFilesAsync(key).ConfigureAwait(false);
+                                if (directFiles.Count > 0)
+                                {
+                                    finalCount = directFiles.Count;
+                                    try { _logger.LogDebug("Startup: Correction for {mod}: Penumbra=0, FS={count}", key, finalCount); } catch { }
+                                }
+                                else
+                                {
+                                    skipUpdate = true;
+                                    try { _logger.LogDebug("Startup: Skip UpdateTextureCount for {mod}: new=0, old={old} (transient protection)", key, existingState.TotalTextures); } catch { }
+                                }
+                            }
+                        }
+
+                        if (!skipUpdate)
+                            _modStateService.UpdateTextureCount(key, finalCount);
 
                         var display = names.TryGetValue(key, out var dn) ? (dn ?? string.Empty) : string.Empty;
                         var tagList = tags.TryGetValue(key, out var tl) ? (tl ?? new List<string>()) : new List<string>();
@@ -1062,12 +1096,25 @@ public TextureConversionService(ILogger logger, PenumbraIpc penumbraIpc, Texture
 
     public async Task<Dictionary<string, string>> GetModDisplayNamesAsync()
     {
-        if (!_penumbraIpc.APIAvailable)
+        var dict = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        if (_penumbraIpc.APIAvailable)
         {
-            _logger.LogDebug("Penumbra API not available; display name query aborted");
-            return new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            try { dict = await _penumbraIpc.GetModDisplayNamesAsync().ConfigureAwait(false); }
+            catch { }
         }
-        return await _penumbraIpc.GetModDisplayNamesAsync().ConfigureAwait(false);
+        var snap = _modStateService.Snapshot();
+        foreach (var kv in snap)
+        {
+            if (!dict.ContainsKey(kv.Key))
+            {
+                var dn = kv.Value?.DisplayName;
+                if (!string.IsNullOrWhiteSpace(dn))
+                    dict[kv.Key] = dn;
+                else
+                    dict[kv.Key] = kv.Key;
+            }
+        }
+        return dict;
     }
 
     public async Task StartAutomaticConversionForModWithDelayAsync(string modFolder, int delayMs)
@@ -1111,12 +1158,17 @@ public TextureConversionService(ILogger logger, PenumbraIpc penumbraIpc, Texture
 
     public async Task<List<string>> GetAllModFoldersAsync()
     {
-        if (!_penumbraIpc.APIAvailable)
+        var list = new List<string>();
+        if (_penumbraIpc.APIAvailable)
         {
-            _logger.LogDebug("Penumbra API not available; all mods query aborted");
-            return new List<string>();
+            try { list = await _penumbraIpc.GetAllModFoldersAsync().ConfigureAwait(false); }
+            catch { }
         }
-        return await _penumbraIpc.GetAllModFoldersAsync().ConfigureAwait(false);
+        var cached = _modStateService.Snapshot().Keys;
+        var set = new HashSet<string>(list, StringComparer.OrdinalIgnoreCase);
+        foreach (var c in cached)
+            if (!string.IsNullOrWhiteSpace(c)) set.Add(c);
+        return set.ToList();
     }
 
     public async Task UpdateAllModTextureCountsAsync()
@@ -1125,17 +1177,39 @@ public TextureConversionService(ILogger logger, PenumbraIpc penumbraIpc, Texture
         {
             var grouped = await GetGroupedCandidateTexturesAsync().ConfigureAwait(false);
             var mods = await GetAllModFoldersAsync().ConfigureAwait(false);
-            foreach (var mod in mods)
+            if (mods.Count > 0 && grouped.Count == 0)
+            {
+                try { _logger.LogDebug("Skip UpdateAllModTextureCounts: grouped=0 while mods>0 (transient)"); } catch { }
+                return;
+            }
+            foreach (var kv in grouped)
             {
                 try
                 {
-                    var leaf = mod.Replace('/', System.IO.Path.DirectorySeparatorChar).Replace('\\', System.IO.Path.DirectorySeparatorChar).TrimEnd(System.IO.Path.DirectorySeparatorChar);
-                    var segs = leaf.Split(System.IO.Path.DirectorySeparatorChar);
-                    var key = segs.Length > 0 ? segs[^1] : mod;
-                    int count = 0;
-                    if (grouped.TryGetValue(key, out var list) && list != null)
-                        count = list.Count;
-                    _modStateService.UpdateTextureCount(key, count);
+                    var key = kv.Key;
+                    var list = kv.Value ?? new List<string>();
+                    
+                    int finalCount = list.Count;
+                    if (finalCount == 0)
+                    {
+                        var existing = _modStateService.Get(key);
+                        if (existing != null && existing.TotalTextures > 0)
+                        {
+                            var directFiles = await GetModTextureFilesAsync(key).ConfigureAwait(false);
+                            if (directFiles.Count > 0)
+                            {
+                                finalCount = directFiles.Count;
+                                try { _logger.LogDebug("Correction: Penumbra scan said 0 for {mod}, but FS found {count}", key, finalCount); } catch { }
+                            }
+                            else
+                            {
+                                try { _logger.LogDebug("Skip UpdateTextureCount for {mod}: new=0, old={old} (transient protection)", key, existing.TotalTextures); } catch { }
+                                continue;
+                            }
+                        }
+                    }
+
+                    _modStateService.UpdateTextureCount(key, finalCount);
                 }
                 catch { }
             }
@@ -1226,6 +1300,15 @@ public TextureConversionService(ILogger logger, PenumbraIpc penumbraIpc, Texture
         try
         {
             var files = await GetModTextureFilesAsync(mod).ConfigureAwait(false);
+            if (files.Count == 0)
+            {
+                var existing = _modStateService.Get(mod);
+                if (existing != null && existing.TotalTextures > 0)
+                {
+                    try { _logger.LogDebug("Skip UpdateTextureFiles for {mod}: new=0, old={old} (transient protection)", mod, existing.TotalTextures); } catch { }
+                    return;
+                }
+            }
             _modStateService.UpdateTextureFiles(mod, files);
         }
         catch { }
@@ -1263,13 +1346,17 @@ public TextureConversionService(ILogger logger, PenumbraIpc penumbraIpc, Texture
                 }
                 catch { }
             }
-            var snap = _modStateService.Snapshot();
-            foreach (var kv in snap)
+            if (byMod.Count == 0)
+            {
+                try { _logger.LogDebug("Skip UpdateAllModUsedTextureFiles: byMod=0 (transient)"); } catch { }
+                return;
+            }
+            foreach (var kv in byMod)
             {
                 try
                 {
                     var key = kv.Key;
-                    var list = byMod.TryGetValue(key, out var l) ? l : new List<string>();
+                    var list = kv.Value ?? new List<string>();
                     _modStateService.UpdateUsedTextureFiles(key, list);
                 }
                 catch { }
@@ -1280,12 +1367,22 @@ public TextureConversionService(ILogger logger, PenumbraIpc penumbraIpc, Texture
 
     public async Task<Dictionary<string, List<string>>> GetModTagsAsync()
     {
-        if (!_penumbraIpc.APIAvailable)
+        var dict = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+        if (_penumbraIpc.APIAvailable)
         {
-            _logger.LogDebug("Penumbra API not available; mod tags query aborted");
-            return new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+            try { dict = await _penumbraIpc.GetModTagsAsync().ConfigureAwait(false); }
+            catch { }
         }
-        return await _penumbraIpc.GetModTagsAsync().ConfigureAwait(false);
+        var snap = _modStateService.Snapshot();
+        foreach (var kv in snap)
+        {
+            if (!dict.ContainsKey(kv.Key))
+            {
+                var t = kv.Value?.Tags;
+                dict[kv.Key] = t != null ? new List<string>(t) : new List<string>();
+            }
+        }
+        return dict;
     }
 
     public async Task UpdateAllModPathsAsync()

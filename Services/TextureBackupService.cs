@@ -3543,6 +3543,14 @@ public sealed class TextureBackupService
                             var list = grouped.TryGetValue(mod, out var files) && files != null ? files : new List<string>();
                             long current = 0L;
                             int totalTextures = list.Count;
+
+                            bool skipCountUpdate = false;
+                            if (totalTextures == 0 && entry != null && entry.TotalTextures > 0)
+                            {
+                                skipCountUpdate = true;
+                                try { _logger.LogDebug("[ShrinkU] PopulateMissingOriginalBytes: Skip UpdateTextureCount for {mod}: new=0, old={old} (transient protection)", mod, entry.TotalTextures); } catch { }
+                            }
+
                             for (int i = 0; i < list.Count; i++)
                             {
                                 var f = list[i];
@@ -3550,7 +3558,8 @@ public sealed class TextureBackupService
                                 catch { }
                             }
                             long original = current;
-                            try { _modStateService.UpdateTextureCount(mod, totalTextures); } catch { }
+                            if (!skipCountUpdate)
+                                try { _modStateService.UpdateTextureCount(mod, totalTextures); } catch { }
                             try { _modStateService.UpdateSavings(mod, original, current, 0); } catch { }
                             try { _logger.LogDebug("[ShrinkU] PopulateMissingOriginalBytes: stats mod={mod} original={orig} current={cur} comparedFiles={cmp}", mod, original, current, 0); } catch { }
                             System.Threading.Interlocked.Increment(ref updated);
