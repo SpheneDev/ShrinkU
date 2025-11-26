@@ -149,7 +149,6 @@ public sealed class ShrinkUConfigService
                     .Distinct(StringComparer.OrdinalIgnoreCase)
                     .ToList();
                 _current.ExcludedMods = new HashSet<string>(norm, StringComparer.OrdinalIgnoreCase);
-                _logger.LogDebug("[TRACE-EXCLUDE-SPHENE] Normalized excluded mods: count={count}", _current.ExcludedMods.Count);
             }
             catch { }
             _logger.LogDebug("Loaded ShrinkU configuration");
@@ -206,12 +205,6 @@ public sealed class ShrinkUConfigService
             if (modsChanged) { try { OnExcludedModsUpdated?.Invoke(); } catch { } }
             if (tagsChanged) { try { OnExcludedTagsUpdated?.Invoke(); } catch { } }
             _logger.LogDebug("ShrinkU configuration reloaded due to external change");
-            try
-            {
-                var sample = string.Join("|", newMods.Take(3));
-                _logger.LogDebug("[TRACE-EXCLUDE-SPHENE] External change: excludedMods={count} sample={sample}", newMods.Count, sample);
-            }
-            catch { }
         }
         catch { }
     }

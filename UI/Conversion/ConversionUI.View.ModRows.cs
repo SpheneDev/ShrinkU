@@ -23,17 +23,6 @@ public sealed partial class ConversionUI
         var hasBackup = GetOrQueryModBackup(mod);
         bool excludedByTags = (!hasBackup && !isOrphan && IsModExcludedByTags(mod));
         var excluded = excludedByTags || (_configService.Current.ExcludedMods != null && _configService.Current.ExcludedMods.Contains(mod));
-        try
-        {
-            var prev = _excludeTraceState.TryGetValue(mod, out var p) ? p : (bool?)null;
-            if (!prev.HasValue || prev.Value != excluded)
-            {
-                _excludeTraceState[mod] = excluded;
-                var cnt = _configService.Current.ExcludedMods?.Count ?? 0;
-                _logger.LogDebug("[TRACE-EXCLUDE-SPHENE] Row excluded eval: mod={mod} now={now} exCount={count}", mod, excluded, cnt);
-            }
-        }
-        catch { }
         int totalAll = GetTotalTexturesForMod(mod, files);
         int convertedAll = 0;
         if (totalAll > 0)

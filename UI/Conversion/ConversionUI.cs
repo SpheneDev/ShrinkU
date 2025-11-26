@@ -525,7 +525,6 @@ public sealed partial class ConversionUI : Window, IDisposable
     private readonly Action<string> _onExternalTexturesChanged;
     private readonly Action _onExcludedTagsUpdated;
     private readonly Action _onExcludedModsUpdated;
-    private readonly Dictionary<string, bool> _excludeTraceState = new(StringComparer.OrdinalIgnoreCase);
     private readonly Action _onPlayerResourcesChanged;
     private readonly Action<string> _onModStateEntryChanged;
     
@@ -1154,12 +1153,6 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
             try
             {
                 _needsUIRefresh = true;
-                try
-                {
-                    var cnt = _configService.Current.ExcludedMods?.Count ?? 0;
-                    _logger.LogDebug("[TRACE-EXCLUDE-SPHENE] UI observed excluded mods update: count={count}", cnt);
-                }
-                catch { }
             }
             catch { }
         };
