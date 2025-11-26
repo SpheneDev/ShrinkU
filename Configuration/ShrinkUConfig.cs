@@ -27,6 +27,7 @@ public sealed class ShrinkUConfig : IPluginConfiguration
     // Conversion filters
     public List<string> ExcludedModTags { get; set; } = new List<string> { "UI" };
     public List<string> KnownModTags { get; set; } = new List<string>();
+    public HashSet<string> ExcludedMods { get; set; } = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     
     // Backup folder configuration
     public string BackupFolderPath { get; set; } = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "ShrinkU", "Backups");

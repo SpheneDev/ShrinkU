@@ -21,7 +21,19 @@ public sealed partial class ConversionUI
         var files = visibleByMod.TryGetValue(mod, out var list) ? list : new List<string>();
         var isOrphan = _orphaned.Any(x => string.Equals(x.ModFolderName, mod, StringComparison.OrdinalIgnoreCase));
         var hasBackup = GetOrQueryModBackup(mod);
-        var excluded = (!hasBackup && !isOrphan && IsModExcludedByTags(mod));
+        bool excludedByTags = (!hasBackup && !isOrphan && IsModExcludedByTags(mod));
+        var excluded = excludedByTags || (_configService.Current.ExcludedMods != null && _configService.Current.ExcludedMods.Contains(mod));
+        try
+        {
+            var prev = _excludeTraceState.TryGetValue(mod, out var p) ? p : (bool?)null;
+            if (!prev.HasValue || prev.Value != excluded)
+            {
+                _excludeTraceState[mod] = excluded;
+                var cnt = _configService.Current.ExcludedMods?.Count ?? 0;
+                _logger.LogDebug("[TRACE-EXCLUDE-SPHENE] Row excluded eval: mod={mod} now={now} exCount={count}", mod, excluded, cnt);
+            }
+        }
+        catch { }
         int totalAll = GetTotalTexturesForMod(mod, files);
         int convertedAll = 0;
         if (totalAll > 0)
@@ -54,10 +66,14 @@ public sealed partial class ConversionUI
         Vector4 iconColor = new Vector4(1f, 1f, 1f, 1f);
         if (_modStateSnapshot != null && _modStateSnapshot.TryGetValue(mod, out var msEnabledPre) && msEnabledPre != null && msEnabledPre.Enabled)
             iconColor = new Vector4(0.40f, 0.85f, 0.40f, 1f);
+        if (excluded)
+            iconColor = new Vector4(0.85f, 0.60f, 0.20f, 1f);
         ImGui.TextColored(iconColor, FontAwesomeIcon.Cube.ToIconString());
         ImGui.PopFont();
         ImGui.SameLine();
         ImGui.AlignTextToFramePadding();
+        if (excluded)
+            header = string.Concat(header, " [Excluded]");
         open = ImGui.TreeNodeEx($"{header}##mod-{mod}", nodeFlags);
         var modToggled = ImGui.IsItemToggledOpen();
         if (modToggled)
@@ -106,6 +122,23 @@ public sealed partial class ConversionUI
                     }
                     catch (Exception ex) { _logger.LogError(ex, "Open backup folder failed for {mod}", targetMod2); }
                 });
+            }
+            var isExcluded = _configService.Current.ExcludedMods != null && _configService.Current.ExcludedMods.Contains(mod);
+            if (!isExcluded)
+            {
+                if (ImGui.MenuItem("Exclude from conversion"))
+                {
+                    try { _configService.Current.ExcludedMods ??= new HashSet<string>(StringComparer.OrdinalIgnoreCase); _configService.Current.ExcludedMods.Add(mod); _configService.Save(); }
+                    catch (Exception ex) { _logger.LogError(ex, "Failed to exclude mod {mod}", mod); }
+                }
+            }
+            else
+            {
+                if (ImGui.MenuItem("Include in conversion"))
+                {
+                    try { _configService.Current.ExcludedMods ??= new HashSet<string>(StringComparer.OrdinalIgnoreCase); _ = _configService.Current.ExcludedMods.Remove(mod); _configService.Save(); }
+                    catch (Exception ex) { _logger.LogError(ex, "Failed to include mod {mod}", mod); }
+                }
             }
             var hasTexBk = GetOrQueryModTextureBackup(mod);
             using (var _d = ImRaii.Disabled(!hasTexBk))
@@ -164,7 +197,7 @@ public sealed partial class ConversionUI
         if (disableCheckbox)
         {
             if (excluded)
-                disableReason = "Mod excluded by tags.";
+                disableReason = "Mod excluded.";
             else if (automaticMode && !isOrphan && (convertedAll >= totalAll))
                 disableReason = "All textures already converted.";
             else if (!isNonConvertible && files.Count == 0)
@@ -172,8 +205,7 @@ public sealed partial class ConversionUI
             else if (isNonConvertible)
                 disableReason = "Mod has no textures.";
         }
-        using (var _d = ImRaii.Disabled(disableCheckbox))
-        {
+        ImGui.BeginDisabled(disableCheckbox);
         if (ImGui.Checkbox($"##modsel-{mod}", ref modSelected))
         {
             if (isNonConvertible)
@@ -201,7 +233,7 @@ public sealed partial class ConversionUI
                 }
             }
         }
-        }
+        ImGui.EndDisabled();
         if (disableCheckbox && ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
             ImGui.SetTooltip(string.IsNullOrEmpty(disableReason) ? "Selection disabled." : disableReason);
         else

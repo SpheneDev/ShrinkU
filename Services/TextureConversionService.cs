@@ -809,11 +809,21 @@ public TextureConversionService(ILogger logger, PenumbraIpc penumbraIpc, Texture
                 }
                 modDict[source] = kvp.Value;
             }
+            // Compute planned mods excluding those marked as excluded
+            var excludedSet = _configService.Current.ExcludedMods ?? new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var plannedMods = byMod
+                .Where(kv => !excludedSet.Contains(kv.Key))
+                .ToList();
 
-            var totalMods = byMod.Count;
+            var excludedInInput = byMod.Keys.Where(m => excludedSet.Contains(m)).ToList();
+            try { _logger.LogDebug("Conversion planning: inputMods={input}, plannedMods={planned}, excluded={excluded}", byMod.Count, plannedMods.Count, excludedInInput.Count); } catch { }
+
+            var totalMods = plannedMods.Count;
             var currentModIndex = 0;
-            foreach (var (modName, modTextures) in byMod)
+            foreach (var kv in plannedMods)
             {
+                var modName = kv.Key;
+                var modTextures = kv.Value;
                 currentModIndex++;
                 var modFileTotal = modTextures.Count;
                 OnModProgress?.Invoke((modName, currentModIndex, totalMods, modFileTotal));
@@ -833,17 +843,16 @@ public TextureConversionService(ILogger logger, PenumbraIpc penumbraIpc, Texture
                 var isLastPlannedMod = currentModIndex == totalMods;
                 var redrawAfter = isLastPlannedMod || _cancelRequested;
 
-                // Convert textures for the current mod; support cancellation between files.
                 var traceConvert = PerfTrace.Step(_logger, $"Convert {modName}");
                 await _penumbraIpc.ConvertTextureFilesAsync(_logger, modTextures, _conversionProgress, token, redrawAfter).ConfigureAwait(false);
                 traceConvert.Dispose();
 
                 if (_cancelRequested || token.IsCancellationRequested)
                 {
+                    try { _logger.LogDebug("Conversion cancelled after mod {mod}", modName); } catch { }
                     break;
                 }
 
-                // After conversion: evaluate per-mod savings and auto-restore if conversion made it larger.
                 try
                 {
                     var traceSavings = PerfTrace.Step(_logger, $"Savings {modName}");
@@ -856,7 +865,6 @@ public TextureConversionService(ILogger logger, PenumbraIpc penumbraIpc, Texture
                         try { _modStateService.Save(); } catch { }
                         if (stats.CurrentBytes > stats.OriginalBytes)
                         {
-                            // Persist inefficient mod marker
                             _configService.Current.InefficientMods ??= new List<string>();
                             if (!_configService.Current.InefficientMods.Any(m => string.Equals(m, modName, StringComparison.OrdinalIgnoreCase)))
                             {
@@ -865,7 +873,6 @@ public TextureConversionService(ILogger logger, PenumbraIpc penumbraIpc, Texture
                                 _logger.LogDebug("Marked mod {modName} as inefficient (larger after conversion)", modName);
                             }
 
-                            // Auto-restore latest backup for this mod if enabled
                             if (_configService.Current.AutoRestoreInefficientMods)
                             {
                                 _logger.LogDebug("Auto-restoring mod {modName} due to increased size after conversion", modName);
@@ -881,7 +888,6 @@ public TextureConversionService(ILogger logger, PenumbraIpc penumbraIpc, Texture
                         }
                         else
                         {
-                            // Remove inefficient marker if the mod is no longer larger after conversion
                             var list = _configService.Current.InefficientMods;
                             if (list != null && list.Any(m => string.Equals(m, modName, StringComparison.OrdinalIgnoreCase)))
                             {
@@ -898,7 +904,6 @@ public TextureConversionService(ILogger logger, PenumbraIpc penumbraIpc, Texture
                     _logger.LogDebug(ex, "Failed to compute per-mod savings for {modName}", modName);
                 }
 
-                // Yield between mods to keep UI responsive
                 await Task.Yield();
             }
         }
@@ -1007,8 +1012,9 @@ public TextureConversionService(ILogger logger, PenumbraIpc penumbraIpc, Texture
                 var rel = !string.IsNullOrWhiteSpace(root) ? Path.GetRelativePath(root, file) : file;
                 var parts = rel.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
                 var modName = parts.Length > 1 ? parts[0] : string.Empty;
-                
                 if (string.IsNullOrWhiteSpace(modName) || !modsToScan.Contains(modName))
+                    continue;
+                if (_configService.Current.ExcludedMods != null && _configService.Current.ExcludedMods.Contains(modName))
                     continue;
 
                 try

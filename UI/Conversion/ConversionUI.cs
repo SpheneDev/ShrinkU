@@ -224,6 +224,66 @@ public sealed partial class ConversionUI : Window, IDisposable
         }
     }
 
+    public void OpenForMods(IEnumerable<string> modDirectoriesOrNames)
+    {
+        try
+        {
+            IsOpen = true;
+            _scanFilter = string.Empty;
+            foreach (var input in modDirectoriesOrNames)
+            {
+                var search = input?.Trim() ?? string.Empty;
+                if (string.IsNullOrEmpty(search)) continue;
+
+                var modName = search;
+                if (!_modPaths.ContainsKey(modName))
+                {
+                    var snap = _modStateService.Snapshot();
+                    if (snap.TryGetValue(modName, out var entry))
+                    {
+                        var folder = entry.PenumbraRelativePath ?? string.Empty;
+                        var leaf = entry.RelativeModName ?? string.Empty;
+                        if (!string.IsNullOrWhiteSpace(leaf))
+                        {
+                            var constructedPath = !string.IsNullOrWhiteSpace(folder) ? string.Concat(folder, "/", leaf) : leaf;
+                            _modPaths[modName] = constructedPath;
+                        }
+                    }
+                }
+
+                if (_modPaths.TryGetValue(modName, out var fullPath) && !string.IsNullOrEmpty(fullPath))
+                {
+                    int lastSlash = fullPath.LastIndexOf('/');
+                    if (lastSlash > 0)
+                    {
+                        var folderOnly = fullPath.Substring(0, lastSlash);
+                        var parts = folderOnly.Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                        var currentPath = "";
+                        for (int i = 0; i < parts.Length; i++)
+                        {
+                            if (i > 0) currentPath += "/";
+                            currentPath += parts[i];
+                            _expandedFolders.Add(currentPath);
+                        }
+                    }
+                    else
+                    {
+                        _expandedFolders.Add("(Uncategorized)");
+                    }
+                }
+                else
+                {
+                    _expandedFolders.Add("(Uncategorized)");
+                }
+                _expandedMods.Add(modName);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error opening ShrinkU for mods");
+        }
+    }
+
     private ModCapabilities EvaluateModCapabilities(string mod)
     {
         var isOrphan = _orphaned.Any(x => string.Equals(x.ModFolderName, mod, StringComparison.OrdinalIgnoreCase));
@@ -233,7 +293,8 @@ public sealed partial class ConversionUI : Window, IDisposable
         var hasPmpBackup = GetOrQueryModPmp(mod);
         var hasModBackup = GetOrQueryModBackup(mod);
         var hasAnyBackup = hasTexBackup || hasPmpBackup || hasModBackup;
-        var excluded = !hasModBackup && !isOrphan && IsModExcludedByTags(mod);
+        var excluded = (!hasModBackup && !isOrphan && IsModExcludedByTags(mod))
+            || (_configService.Current.ExcludedMods != null && _configService.Current.ExcludedMods.Contains(mod));
         var autoMode = _configService.Current.TextureProcessingMode == TextureProcessingMode.Automatic;
         var canConvert = totalTextures > 0 && !hasAnyBackup && !excluded;
         var canBackup = totalTextures == 0 && !hasAnyBackup;
@@ -463,6 +524,8 @@ public sealed partial class ConversionUI : Window, IDisposable
     private readonly Action<bool> _onPenumbraEnabledChanged;
     private readonly Action<string> _onExternalTexturesChanged;
     private readonly Action _onExcludedTagsUpdated;
+    private readonly Action _onExcludedModsUpdated;
+    private readonly Dictionary<string, bool> _excludeTraceState = new(StringComparer.OrdinalIgnoreCase);
     private readonly Action _onPlayerResourcesChanged;
     private readonly Action<string> _onModStateEntryChanged;
     
@@ -1085,6 +1148,22 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
             catch { }
         };
         _configService.OnExcludedTagsUpdated += _onExcludedTagsUpdated;
+
+        _onExcludedModsUpdated = () =>
+        {
+            try
+            {
+                _needsUIRefresh = true;
+                try
+                {
+                    var cnt = _configService.Current.ExcludedMods?.Count ?? 0;
+                    _logger.LogDebug("[TRACE-EXCLUDE-SPHENE] UI observed excluded mods update: count={count}", cnt);
+                }
+                catch { }
+            }
+            catch { }
+        };
+        _configService.OnExcludedModsUpdated += _onExcludedModsUpdated;
 
         // Initialize persisted UI settings from config
         _filterPenumbraUsedOnly = _configService.Current.FilterPenumbraUsedOnly;
@@ -2147,6 +2226,14 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
     private static string NormalizeTag(string tag)
     {
         return (tag ?? string.Empty).Trim();
+    }
+
+    private static string NormalizeExcludedModKey(string name)
+    {
+        if (string.IsNullOrWhiteSpace(name)) return string.Empty;
+        var idx = name.IndexOf(" - ", StringComparison.Ordinal);
+        if (idx > 0) return name.Substring(0, idx).Trim();
+        return name.Trim();
     }
 
     private bool IsModExcludedByTags(string mod)
