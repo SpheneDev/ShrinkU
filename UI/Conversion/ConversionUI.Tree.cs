@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.IO;
+using Microsoft.Extensions.Logging;
 
 namespace ShrinkU.UI;
 
@@ -126,6 +127,7 @@ public sealed partial class ConversionUI
             var catOpen = _filterPenumbraUsedOnly || _expandedFolders.Contains(fullPath);
             if (!catOpen)
                 continue;
+
             BuildFlatRows(child, visibleByMod, fullPath, depth + 1);
         }
         foreach (var mod in node.Mods)

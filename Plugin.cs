@@ -36,6 +36,7 @@ public sealed class Plugin : IDalamudPlugin
     private readonly DebugTraceService _debugTrace;
     private readonly DebugUI _debugUi;
     private readonly StartupProgressUI _startupProgressUi;
+    private readonly PenumbraExtensionService _penumbraExtension;
     private System.Threading.CancellationTokenSource? _initRefreshCts;
 
     public Plugin(IDalamudPluginInterface pluginInterface, IFramework framework, ICommandManager commandManager, IPluginLog pluginLog)
@@ -75,6 +76,7 @@ public sealed class Plugin : IDalamudPlugin
         _debugUi = new DebugUI(_logger, _configService, _debugTrace);
         _settingsUi = new SettingsUI(_logger, _configService, _conversionService, _backupService, () => _releaseChangelogUi.OpenLatest(), _debugTrace, () => _debugUi.IsOpen = true);
         _conversionUi = new ConversionUI(_logger, _configService, _conversionService, _backupService, () => _settingsUi.IsOpen = true, _modStateService, cacheService, _debugTrace);
+        _penumbraExtension = new PenumbraExtensionService(_penumbraIpc, _conversionUi, _logger);
         _startupProgressUi = new StartupProgressUI(_logger, _configService, _conversionService, _backupService);
         _firstRunUi = new FirstRunSetupUI(_logger, _configService)
         {
@@ -209,6 +211,7 @@ public sealed class Plugin : IDalamudPlugin
         try { _conversionUi.ShutdownBackgroundWork(); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to shutdown conversion UI background work"); }
         try { _conversionUi.Dispose(); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to dispose conversion UI"); }
         try { _conversionService.Dispose(); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to dispose conversion service"); }
+        try { _penumbraExtension.Dispose(); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to dispose Penumbra extension"); }
         try { _shrinkuIpc.Dispose(); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to dispose ShrinkU IPC"); }
         try { _logger.LogDebug("ShrinkU plugin disposing: releasing Penumbra subscriptions (DIAG-v3)"); _penumbraIpc.Dispose(); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to dispose Penumbra IPC"); }
         try { _commandManager.RemoveHandler("/shrinku"); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to remove /shrinku command handler"); }

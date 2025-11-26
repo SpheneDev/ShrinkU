@@ -71,6 +71,7 @@ public sealed partial class ConversionUI : Window, IDisposable
     private int _currentModIndex = 0;
     private int _totalMods = 0;
     private int _currentModTotalFiles = 0;
+    private DateTime _currentModStartedAt = DateTime.MinValue;
     // Tag filtering state
     private Dictionary<string, IReadOnlyList<string>> _modTags = new(StringComparer.OrdinalIgnoreCase);
     private string _excludedTagsInput = string.Empty;
@@ -132,6 +133,95 @@ public sealed partial class ConversionUI : Window, IDisposable
         public bool Excluded;
         public int TotalTextures;
         public int VisibleFileCount;
+    }
+
+    public void OpenForMod(string modDirectory)
+        {
+            try
+            {
+                IsOpen = true;
+
+                var searchDir = modDirectory?.Trim() ?? string.Empty;
+                
+                // Try to find the mod name from the directory
+                var modName = _modPaths.FirstOrDefault(x => string.Equals(x.Value, searchDir, StringComparison.OrdinalIgnoreCase)).Key;
+                
+                // Fallback: maybe the input is already the mod name or we can extract it?
+                if (string.IsNullOrEmpty(modName))
+                {
+                    if (_modPaths.ContainsKey(searchDir))
+                    {
+                        modName = searchDir;
+                    }
+                    else
+                    {
+                        // Try extracting folder name
+                        var folderName = Path.GetFileName(searchDir);
+                        if (!string.IsNullOrEmpty(folderName))
+                        {
+                            modName = folderName;
+                        }
+                    }
+                }
+
+            if (!string.IsNullOrEmpty(modName))
+                {
+                    _scanFilter = modName;
+
+                    // Ensure mod paths map is ready/populated to find folders
+                    if (!_modPaths.ContainsKey(modName))
+                    {
+                        // Force a quick refresh of paths if missing
+                        var snap = _modStateService.Snapshot();
+                        if (snap.TryGetValue(modName, out var entry))
+                        {
+                            var folder = entry.PenumbraRelativePath ?? string.Empty;
+                            var leaf = entry.RelativeModName ?? string.Empty;
+                            
+                            // Allow folder to be empty (root mod), but leaf must exist
+                            if (!string.IsNullOrWhiteSpace(leaf))
+                            {
+                                var constructedPath = !string.IsNullOrWhiteSpace(folder) ? string.Concat(folder, "/", leaf) : leaf;
+                                _modPaths[modName] = constructedPath;
+                            }
+                        }
+                    }
+
+                    // Expand folders for this mod so it is visible
+                    if (_modPaths.TryGetValue(modName, out var fullPath) && !string.IsNullOrEmpty(fullPath))
+                    {
+                        int lastSlash = fullPath.LastIndexOf('/');
+                        if (lastSlash > 0)
+                        {
+                            var folderOnly = fullPath.Substring(0, lastSlash);
+                            var parts = folderOnly.Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                            
+                            var currentPath = "";
+                            for (int i = 0; i < parts.Length; i++)
+                            {
+                                if (i > 0) currentPath += "/";
+                                currentPath += parts[i];
+                                _expandedFolders.Add(currentPath);
+                            }
+                        }
+                        else
+                        {
+                             // Root mod -> Expand (Uncategorized)
+                             _expandedFolders.Add("(Uncategorized)");
+                        }
+                    }
+                    else
+                    {
+                        // Even if fullPath is missing, it goes to (Uncategorized)
+                        _expandedFolders.Add("(Uncategorized)");
+                    }
+                    
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error opening ShrinkU for mod");
+        }
     }
 
     private ModCapabilities EvaluateModCapabilities(string mod)
@@ -599,7 +689,19 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
         };
         _conversionService.OnConversionCompleted += _onConversionCompleted;
 
-        _onModProgress = e => { if (e.current == 1) { try { _modsTouchedLastRun.Clear(); } catch { } } _currentModName = e.modName; _currentModIndex = e.current; _totalMods = e.total; _currentModTotalFiles = e.fileTotal; try { _modsTouchedLastRun[e.modName] = true; } catch { } RefreshModState(e.modName, "conversion-progress"); try { _uiThreadActions.Enqueue(() => { _footerTotalsDirty = true; }); } catch { } };
+        _onModProgress = e => 
+        { 
+            if (e.current == 1) { try { _modsTouchedLastRun.Clear(); } catch { } } 
+            _currentModName = e.modName; 
+            _currentModIndex = e.current; 
+            _totalMods = e.total; 
+            _currentModTotalFiles = e.fileTotal; 
+            _convertedCount = 0; 
+            _currentModStartedAt = DateTime.UtcNow;
+            try { _modsTouchedLastRun[e.modName] = true; } catch { } 
+            RefreshModState(e.modName, "conversion-progress"); 
+            try { _uiThreadActions.Enqueue(() => { _footerTotalsDirty = true; }); } catch { } 
+        };
         _conversionService.OnModProgress += _onModProgress;
 
         // Generic ModsChanged only marks UI for refresh; heavy scan is driven by add/delete.

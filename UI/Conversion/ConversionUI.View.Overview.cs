@@ -846,7 +846,11 @@ public sealed partial class ConversionUI
                     {
                         try
                         {
-                            _uiThreadActions.Enqueue(() => { _restoreModsDone++; _currentRestoreMod = mod; });
+                            _uiThreadActions.Enqueue(() => { 
+                                _restoreModsDone++; 
+                                _currentRestoreMod = mod; 
+                                _currentModStartedAt = DateTime.UtcNow;
+                            });
                             _currentRestoreMod = mod;
                             _currentRestoreModIndex = 0;
                             _currentRestoreModTotal = 0;

@@ -117,6 +117,11 @@ public sealed class ModStateService
                 try { _logger.LogDebug("[TRACE-ORIGINAL] UpdateSavings ignored new original size {new} vs existing {old} for {mod}", originalBytes, e.OriginalBytes, mod); } catch { }
             }
 
+            if (currentBytes == 0 && e.CurrentBytes > 0)
+            {
+                try { _logger.LogDebug("[TRACE-ZERO-BUG] UpdateSavings reset CurrentBytes to 0 for {mod}. Prev={prev}. Trace: {trace}", mod, e.CurrentBytes, Environment.StackTrace); } catch { }
+            }
+
             if (!e.InstalledButNotConverted)
             {
                 e.CurrentBytes = currentBytes;
@@ -308,6 +313,10 @@ public sealed class ModStateService
         {
             var e = Get(mod);
             var list = (files ?? Array.Empty<string>()).Where(f => !string.IsNullOrWhiteSpace(f)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+            if (list.Count == 0 && e.TotalTextures > 0)
+            {
+                try { _logger.LogDebug("[TRACE-ZERO-BUG] UpdateTextureFiles reset TotalTextures to 0 for {mod}. Prev={prev}. Trace: {trace}", mod, e.TotalTextures, Environment.StackTrace); } catch { }
+            }
             e.TotalTextures = list.Count;
             e.TextureFiles = list;
             e.LastUpdatedUtc = DateTime.UtcNow;
@@ -351,6 +360,10 @@ public sealed class ModStateService
         {
             var e = Get(mod);
             if (e.TotalTextures == total) return;
+            if (total == 0 && e.TotalTextures > 0)
+            {
+                try { _logger.LogDebug("[TRACE-ZERO-BUG] UpdateTextureCount reset TotalTextures to 0 for {mod}. Prev={prev}. Trace: {trace}", mod, e.TotalTextures, Environment.StackTrace); } catch { }
+            }
             e.TotalTextures = Math.Max(0, total);
             e.LastScanUtc = DateTime.UtcNow;
             e.LastUpdatedUtc = DateTime.UtcNow;
