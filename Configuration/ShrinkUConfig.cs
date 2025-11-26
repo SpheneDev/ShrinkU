@@ -18,14 +18,12 @@ public sealed class ShrinkUConfig : IPluginConfiguration
     public TextureProcessingMode TextureProcessingMode { get; set; } = TextureProcessingMode.Manual;
     public bool AutomaticHandledBySphene { get; set; } = false;
     public string AutomaticControllerName { get; set; } = string.Empty;
-    public bool EnableBackupBeforeConversion { get; set; } = true;
-    public bool EnableFullModBackupBeforeConversion { get; set; } = false;
+    public bool EnableBackupBeforeConversion { get; set; } = false;
+    public bool EnableFullModBackupBeforeConversion { get; set; } = true;
     public bool EnableZipCompressionForBackups { get; set; } = true;
     public bool DeleteOriginalBackupsAfterCompression { get; set; } = true;
     public bool StrictPerModRestore { get; set; } = true;
     public bool DeleteOldBackupsOnVersionChange { get; set; } = false;
-    // When restoring via UI, prefer full-mod PMP restore if available
-    public bool PreferPmpRestoreWhenAvailable { get; set; } = false;
     // Conversion filters
     public List<string> ExcludedModTags { get; set; } = new List<string> { "UI" };
     public List<string> KnownModTags { get; set; } = new List<string>();

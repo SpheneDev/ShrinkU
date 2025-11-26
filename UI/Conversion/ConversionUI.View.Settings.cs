@@ -99,15 +99,7 @@ public sealed partial class ConversionUI
         {
             try { _openSettings?.Invoke(); } catch { }
         }
-        try
-        {
-            if (!_configService.Current.EnableBackupBeforeConversion && !_configService.Current.EnableFullModBackupBeforeConversion)
-            {
-                _configService.Current.EnableBackupBeforeConversion = true;
-                _configService.Current.EnableFullModBackupBeforeConversion = false;
-                _configService.Save();
-            }
-        }
+        try { }
         catch { }
     }
 }

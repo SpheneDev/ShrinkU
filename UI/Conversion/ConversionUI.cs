@@ -327,6 +327,7 @@ public sealed partial class ConversionUI : Window, IDisposable
     private string _currentRestoreMod = string.Empty;
     private int _currentRestoreModIndex = 0;
     private volatile bool _orphanScanInFlight = false;
+    private System.Threading.CancellationTokenSource? _orphanScanCts;
     private DateTime _lastOrphanScanUtc = DateTime.MinValue;
     private List<TextureBackupService.OrphanBackupInfo> _orphaned = new();
     private int _orphanRevision = 0;
@@ -712,11 +713,16 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
             if (!_orphanScanInFlight)
             {
                 _orphanScanInFlight = true;
-                _ = Task.Run(() =>
+                try { _orphanScanCts?.Cancel(); } catch { }
+                try { _orphanScanCts?.Dispose(); } catch { }
+                _orphanScanCts = new System.Threading.CancellationTokenSource();
+                var token = _orphanScanCts.Token;
+                _ = Task.Run(async () =>
                 {
                     try
                     {
-                        var orphans = _backupService.FindOrphanedBackupsAsync().GetAwaiter().GetResult();
+                        var orphans = await _backupService.FindOrphanedBackupsAsync(token).ConfigureAwait(false);
+                        if (token.IsCancellationRequested) return;
                         _uiThreadActions.Enqueue(() =>
                         {
                             _orphaned = orphans ?? new List<TextureBackupService.OrphanBackupInfo>();
@@ -725,11 +731,12 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
                             RequestUiRefresh("orphaned-backups-refreshed");
                         });
                     }
+                    catch (System.OperationCanceledException) { }
                     finally
                     {
                         _orphanScanInFlight = false;
                     }
-                });
+                }, token);
             }
             // Refresh hierarchical mod paths from mod_state snapshot
             if (!_loadingModPaths)
@@ -1320,6 +1327,11 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
         try { _restoreCancellationTokenSource?.Dispose(); }
         catch (Exception ex) { _logger.LogError(ex, "Dispose restoreCancellationTokenSource failed"); }
         _restoreCancellationTokenSource = null;
+        try { _orphanScanCts?.Cancel(); }
+        catch (Exception ex) { _logger.LogError(ex, "Cancel orphanScanCts failed"); }
+        try { _orphanScanCts?.Dispose(); }
+        catch (Exception ex) { _logger.LogError(ex, "Dispose orphanScanCts failed"); }
+        _orphanScanCts = null;
 
         // Stop Used-Only watcher
         StopUsedResourcesWatcher();

@@ -21,6 +21,9 @@ public sealed class ShrinkUIpc : IDisposable
     private readonly ModStateService _modStateService;
 
     private readonly List<IDisposable> _providers = new();
+    private string _cachedBackupOverviewJson = "[]";
+    private DateTime _cachedBackupOverviewUtc = DateTime.MinValue;
+    private readonly object _overviewLock = new();
 
     public ShrinkUIpc(IDalamudPluginInterface pi, ILogger logger, TextureBackupService backupService, PenumbraIpc penumbraIpc, ShrinkU.Configuration.ShrinkUConfigService configService, TextureConversionService conversionService, ModStateService modStateService)
     {
@@ -33,7 +36,7 @@ public sealed class ShrinkUIpc : IDisposable
         _modStateService = modStateService;
 
         RegisterProviders();
-        try { _logger.LogDebug("ShrinkU IPC providers registered"); } catch { }
+        _logger.LogDebug("ShrinkU IPC providers registered");
     }
 
     private void RegisterProviders()
@@ -114,13 +117,51 @@ public sealed class ShrinkUIpc : IDisposable
             }
         });
 
+        // Begin restore latest backup asynchronously; returns whether scheduling succeeded
+        TryRegisterFuncProvider<string, bool>("ShrinkU.BeginRestoreLatestForMod", (modFolder) =>
+        {
+            try
+            {
+                _ = _backupService.RestoreLatestForModAsync(modFolder, progress: null, token: default).ContinueWith(t =>
+                {
+                    if (t.IsCompletedSuccessfully && t.Result)
+                    {
+                        try { _modStateService.UpdateExternalChange(modFolder, null); } catch { }
+                        try { _conversionService.NotifyExternalTextureChange("ipc-restore-latest-for-mod-async"); } catch { }
+                    }
+                    else if (t.IsFaulted)
+                    {
+                        var ex = t.Exception?.GetBaseException();
+                        _logger.LogDebug(ex, "Async restore failed for {mod}", modFolder);
+                    }
+                });
+                return true;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "IPC BeginRestoreLatestForMod scheduling failed for {mod}", modFolder);
+                return false;
+            }
+        });
+
         // Return a JSON overview of backup sessions (entries include mod names, original filenames, relative paths)
         TryRegisterFuncProvider<string>("ShrinkU.GetBackupOverviewJson", () =>
         {
             try
             {
+                var now = DateTime.UtcNow;
+                lock (_overviewLock)
+                {
+                    if ((now - _cachedBackupOverviewUtc).TotalSeconds < 3)
+                        return _cachedBackupOverviewJson;
+                }
                 var overview = _backupService.GetBackupOverviewAsync().GetAwaiter().GetResult();
                 var json = JsonSerializer.Serialize(overview);
+                lock (_overviewLock)
+                {
+                    _cachedBackupOverviewJson = json;
+                    _cachedBackupOverviewUtc = now;
+                }
                 return json;
             }
             catch (Exception ex)
@@ -247,7 +288,7 @@ public sealed class ShrinkUIpc : IDisposable
             try { p.Dispose(); } catch { }
         }
         _providers.Clear();
-        try { _logger.LogDebug("ShrinkU IPC providers disposed"); } catch { }
+        _logger.LogDebug("ShrinkU IPC providers disposed");
     }
 
     private sealed class DisposableUnregister : IDisposable

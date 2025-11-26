@@ -29,6 +29,7 @@ public sealed class SettingsUI : Window
     private List<string> _excludedTagsEditable = new();
     private volatile bool _orphanScanInFlight = false;
     private DateTime _lastOrphanScanUtc = DateTime.MinValue;
+    private System.Threading.CancellationTokenSource? _orphanScanCts;
 
     public SettingsUI(ILogger logger, ShrinkUConfigService configService, TextureConversionService conversionService, TextureBackupService backupService, Action? openReleaseNotes = null, DebugTraceService? debugTrace = null, Action? openDebugUi = null)
     : base("ShrinkU Settings###ShrinkUSettingsUI")
@@ -38,7 +39,7 @@ public sealed class SettingsUI : Window
         _conversionService = conversionService;
         _backupService = backupService;
         _openReleaseNotes = openReleaseNotes;
-        _debugTrace = debugTrace ?? new DebugTraceService();
+        _debugTrace = debugTrace ?? throw new ArgumentNullException(nameof(debugTrace));
         _openDebugUi = openDebugUi;
 
         SizeConstraints = new WindowSizeConstraints
@@ -58,28 +59,33 @@ public sealed class SettingsUI : Window
 
         try
         {
-            _conversionService.OnPenumbraModsChanged += () =>
+            _penumbraModsChangedHandler = () =>
             {
                 if (_orphanScanInFlight)
                     return;
                 _orphanScanInFlight = true;
-                System.Threading.Tasks.Task.Run(() =>
+                try { _orphanScanCts?.Cancel(); } catch { }
+                try { _orphanScanCts?.Dispose(); } catch { }
+                _orphanScanCts = new System.Threading.CancellationTokenSource();
+                var token = _orphanScanCts.Token;
+                System.Threading.Tasks.Task.Run(async () =>
                 {
                     try
                     {
-                        var orphans = _backupService.FindOrphanedBackupsAsync().GetAwaiter().GetResult();
+                        var orphans = await _backupService.FindOrphanedBackupsAsync(token).ConfigureAwait(false);
+                        if (token.IsCancellationRequested) return;
                         _orphaned = orphans ?? new List<TextureBackupService.OrphanBackupInfo>();
                         _lastOrphanScanUtc = DateTime.UtcNow;
                     }
-                    catch
-                    {
-                    }
+                    catch (System.OperationCanceledException) { }
+                    catch { }
                     finally
                     {
                         _orphanScanInFlight = false;
                     }
-                });
+                }, token);
             };
+            _conversionService.OnPenumbraModsChanged += _penumbraModsChangedHandler;
         }
         catch (Exception ex) { _logger.LogError(ex, "Subscribe OnPenumbraModsChanged failed"); }
     }
@@ -119,6 +125,7 @@ public sealed class SettingsUI : Window
                     {
                         _configService.Current.TextureProcessingMode = TextureProcessingMode.Manual;
                         _configService.Save();
+                        try { _conversionService.OnProcessingModeChanged(TextureProcessingMode.Manual); } catch { }
                     }
                     if (spheneIntegrated)
                     {
@@ -129,6 +136,7 @@ public sealed class SettingsUI : Window
                             _configService.Current.AutomaticHandledBySphene = true;
                             _configService.Current.AutomaticControllerName = string.IsNullOrWhiteSpace(controller) ? "Sphene" : controller;
                             _configService.Save();
+                            try { _conversionService.OnProcessingModeChanged(TextureProcessingMode.Automatic); } catch { }
                         }
                     }
                     else
@@ -139,6 +147,7 @@ public sealed class SettingsUI : Window
                             _configService.Current.AutomaticHandledBySphene = false;
                             _configService.Current.AutomaticControllerName = string.Empty;
                             _configService.Save();
+                            try { _conversionService.OnProcessingModeChanged(TextureProcessingMode.Automatic); } catch { }
                         }
                     }
                     ImGui.EndCombo();
@@ -148,64 +157,19 @@ public sealed class SettingsUI : Window
                 ImGui.Separator();
                 ImGui.TextColored(ShrinkUColors.Accent, "Backups");
                 ImGui.Spacing();
-                var texturesBackup = _configService.Current.EnableBackupBeforeConversion;
                 var fullModBackup = _configService.Current.EnableFullModBackupBeforeConversion;
-                if (!texturesBackup && !fullModBackup)
+                if (ImGui.Checkbox("Create full mod PMP backup before conversion", ref fullModBackup))
                 {
-                    _configService.Current.EnableBackupBeforeConversion = true;
-                    _configService.Current.EnableFullModBackupBeforeConversion = false;
+                    _configService.Current.EnableFullModBackupBeforeConversion = fullModBackup;
+                    _configService.Current.EnableBackupBeforeConversion = false;
+                    _configService.Current.EnableZipCompressionForBackups = false;
+                    _configService.Current.DeleteOriginalBackupsAfterCompression = false;
                     _configService.Save();
-                    texturesBackup = true;
-                    fullModBackup = false;
                 }
-                string currentBackupMode = (texturesBackup, fullModBackup) switch
-                {
-                    (true, false) => "Texture",
-                    (false, true) => "Full Mod",
-                    (true, true) => "Both",
-                    _ => "Texture",
-                };
-                ImGui.TextUnformatted("Backup Mode:");
-                ImGui.SameLine();
-                if (ImGui.BeginCombo("##ShrinkUBackupMode", currentBackupMode))
-                {
-                    if (ImGui.Selectable("Texture", currentBackupMode == "Texture"))
-                    {
-                        _configService.Current.EnableBackupBeforeConversion = true;
-                        _configService.Current.EnableFullModBackupBeforeConversion = false;
-                        _configService.Save();
-                    }
-                    if (ImGui.Selectable("Full Mod", currentBackupMode == "Full Mod"))
-                    {
-                        _configService.Current.EnableBackupBeforeConversion = false;
-                        _configService.Current.EnableFullModBackupBeforeConversion = true;
-                        _configService.Save();
-                    }
-                    if (ImGui.Selectable("Both", currentBackupMode == "Both"))
-                    {
-                        _configService.Current.EnableBackupBeforeConversion = true;
-                        _configService.Current.EnableFullModBackupBeforeConversion = true;
-                        _configService.Save();
-                    }
-                    ImGui.EndCombo();
-                }
-                UiTooltip.ShowWrapped("Backup Modes:\n- Texture: smaller storage; per-file restore\n- Full Mod: larger storage; safer full restore\n- Both: combines advantages; highest storage use", 420f);
 
                 ImGui.Separator();
                 ImGui.TextColored(ShrinkUColors.Accent, "Restore");
                 ImGui.Spacing();
-                var preferPmp = _configService.Current.PreferPmpRestoreWhenAvailable;
-                if (ImGui.Checkbox("Prefer PMP restore when available", ref preferPmp))
-                {
-                    _configService.Current.PreferPmpRestoreWhenAvailable = preferPmp;
-                    if (preferPmp)
-                    {
-                        _configService.Current.EnableBackupBeforeConversion = false;
-                    }
-                    _configService.Save();
-                    _logger.LogDebug("Updated preference for PMP restore: {value}", preferPmp);
-                }
-                UiTooltip.ShowWrapped("If a full-mod PMP backup exists, ShrinkU will prefer restoring it. When this is enabled, per-texture backups are disabled unless you explicitly enable 'Enable backup before conversion'.", 420f);
                 bool autoRestore = _configService.Current.AutoRestoreInefficientMods;
                 if (ImGui.Checkbox("Auto-restore backups for inefficient mods", ref autoRestore))
                 {
@@ -470,6 +434,7 @@ public sealed class SettingsUI : Window
     private string _backupSummaryPath = string.Empty;
     private DateTime _backupSummaryLastScanUtc = DateTime.MinValue;
     private volatile bool _backupSummaryScanInFlight = false;
+    private System.Threading.CancellationTokenSource? _backupSummaryScanCts;
     private int _backupZipCount = 0;
     private long _backupZipBytes = 0;
     private int _backupPmpCount = 0;
@@ -502,6 +467,10 @@ public sealed class SettingsUI : Window
             if ((now - _backupSummaryLastScanUtc).TotalSeconds < 10)
                 return;
             _backupSummaryScanInFlight = true;
+            try { _backupSummaryScanCts?.Cancel(); } catch { }
+            try { _backupSummaryScanCts?.Dispose(); } catch { }
+            _backupSummaryScanCts = new System.Threading.CancellationTokenSource();
+            var token = _backupSummaryScanCts.Token;
             System.Threading.Tasks.Task.Run(() =>
             {
                 int zipCount = 0;
@@ -512,10 +481,11 @@ public sealed class SettingsUI : Window
                 {
                     foreach (var file in Directory.EnumerateFiles(path, "*", SearchOption.AllDirectories))
                     {
+                        if (token.IsCancellationRequested) break;
                         var name = Path.GetFileName(file) ?? string.Empty;
                         long len = 0;
                         try { len = new FileInfo(file).Length; }
-                        catch (Exception ex) { _logger.LogError(ex, "FileInfo length read failed for {file}", file); len = 0; }
+                        catch { len = 0; }
                         if (name.StartsWith("backup_", StringComparison.OrdinalIgnoreCase) && name.EndsWith(".zip", StringComparison.OrdinalIgnoreCase))
                         {
                             zipCount++;
@@ -528,15 +498,28 @@ public sealed class SettingsUI : Window
                         }
                     }
                 }
-                catch (Exception ex) { _logger.LogError(ex, "Backup summary scan failed"); }
+                catch { }
                 _backupZipCount = zipCount;
                 _backupZipBytes = zipBytes;
                 _backupPmpCount = pmpCount;
                 _backupPmpBytes = pmpBytes;
                 _backupSummaryLastScanUtc = DateTime.UtcNow;
                 _backupSummaryScanInFlight = false;
-            });
+            }, token);
         }
         catch (Exception ex) { _logger.LogError(ex, "EnsureBackupSummary scheduling failed"); }
+    }
+
+    private Action? _penumbraModsChangedHandler;
+
+    public void Dispose()
+    {
+        try { if (_penumbraModsChangedHandler != null) _conversionService.OnPenumbraModsChanged -= _penumbraModsChangedHandler; } catch { }
+        try { _orphanScanCts?.Cancel(); } catch { }
+        try { _orphanScanCts?.Dispose(); } catch { }
+        _orphanScanCts = null;
+        try { _backupSummaryScanCts?.Cancel(); } catch { }
+        try { _backupSummaryScanCts?.Dispose(); } catch { }
+        _backupSummaryScanCts = null;
     }
 }

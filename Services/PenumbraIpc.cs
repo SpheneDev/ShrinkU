@@ -471,13 +471,13 @@ public sealed class PenumbraIpc : IDisposable
                 if (string.IsNullOrWhiteSpace(ModDirectory) || !Directory.Exists(ModDirectory))
                     { trace.Dispose(); return result; }
 
-                foreach (var file in Directory.EnumerateFiles(ModDirectory!, "*.*", SearchOption.AllDirectories)
-                                               .Where(f => f.EndsWith(".tex", StringComparison.OrdinalIgnoreCase)
-                                                        || f.EndsWith(".dds", StringComparison.OrdinalIgnoreCase)))
+                foreach (var file in Directory.EnumerateFiles(ModDirectory!, "*.*", SearchOption.AllDirectories))
                 {
-                    // Initial pass: collect all texture files; non-BC7 filtering can be added
-                    // via header inspection in a later iteration.
-                    result[file] = Array.Empty<string>();
+                    if (file.EndsWith(".tex", StringComparison.OrdinalIgnoreCase)
+                        || file.EndsWith(".dds", StringComparison.OrdinalIgnoreCase))
+                    {
+                        result[file] = Array.Empty<string>();
+                    }
                 }
             }
             catch
@@ -502,21 +502,22 @@ public sealed class PenumbraIpc : IDisposable
                     return result;
 
                 var root = Path.GetFullPath(ModDirectory!);
-                foreach (var file in Directory.EnumerateFiles(root, "*.*", SearchOption.AllDirectories)
-                                             .Where(f => f.EndsWith(".tex", StringComparison.OrdinalIgnoreCase)
-                                                      || f.EndsWith(".dds", StringComparison.OrdinalIgnoreCase)))
+                foreach (var file in Directory.EnumerateFiles(root, "*.*", SearchOption.AllDirectories))
                 {
-                    // Derive mod folder name from the first directory segment under the mod root
-                    var rel = Path.GetRelativePath(root, file);
-                    var parts = rel.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-                    var modName = parts.Length > 1 ? parts[0] : "<unknown>";
-                    if (!result.TryGetValue(modName, out var list))
+                    if (file.EndsWith(".tex", StringComparison.OrdinalIgnoreCase)
+                        || file.EndsWith(".dds", StringComparison.OrdinalIgnoreCase))
                     {
-                        list = new List<string>();
-                        result[modName] = list;
+                        var rel = Path.GetRelativePath(root, file);
+                        var parts = rel.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                        var modName = parts.Length > 1 ? parts[0] : "<unknown>";
+                        if (!result.TryGetValue(modName, out var list))
+                        {
+                            list = new List<string>();
+                            result[modName] = list;
+                        }
+                        list.Add(file);
+                        fileCount++;
                     }
-                    list.Add(file);
-                    fileCount++;
                 }
             }
             catch

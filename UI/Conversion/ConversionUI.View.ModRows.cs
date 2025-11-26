@@ -381,11 +381,7 @@ public sealed partial class ConversionUI
                 if (ImGui.Button($"Restore##restore-{mod}", new Vector2(60, 0)))
                 {
                     var hasPmpForClick = GetOrQueryModPmp(mod);
-                    if (hasPmpForClick && _configService.Current.PreferPmpRestoreWhenAvailable)
-                    {
-                        TryStartPmpRestoreNewest(mod, "restore-pmp-flat", true, false, false, true, false);
-                    }
-                    else if (hasPmpForClick)
+                    if (hasPmpForClick)
                     {
                         ImGui.OpenPopup($"restorectx-{mod}");
                     }

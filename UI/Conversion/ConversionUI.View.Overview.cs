@@ -875,11 +875,10 @@ public sealed partial class ConversionUI
                             _currentRestoreMod = mod;
                             _currentRestoreModIndex = 0;
                             _currentRestoreModTotal = 0;
-                            var preferPmp = _configService.Current.PreferPmpRestoreWhenAvailable;
                             var hasPmp = false;
                             try { hasPmp = _backupService.HasPmpBackupForModAsync(mod).GetAwaiter().GetResult(); }
                             catch (Exception ex) { _logger.LogError(ex, "HasPmpBackup check failed for {mod}", mod); }
-                            if (preferPmp && hasPmp)
+                            if (hasPmp)
                             {
                                 var latestPmp = _backupService.GetPmpBackupsForModAsync(mod).GetAwaiter().GetResult().FirstOrDefault();
                                 if (!string.IsNullOrEmpty(latestPmp))

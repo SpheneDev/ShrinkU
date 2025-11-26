@@ -68,6 +68,20 @@ public sealed class Plugin : IDalamudPlugin
         }
         catch (Exception ex) { _logger.LogError(ex, "Failed to reset automatic controller flags"); }
 
+        try
+        {
+            if (!_configService.Current.EnableFullModBackupBeforeConversion)
+            {
+                _configService.Current.EnableFullModBackupBeforeConversion = true;
+                _configService.Current.EnableBackupBeforeConversion = false;
+                _configService.Current.EnableZipCompressionForBackups = false;
+                _configService.Current.DeleteOriginalBackupsAfterCompression = false;
+                _configService.Save();
+                _logger.LogDebug("Enforced default: EnableFullModBackupBeforeConversion=true (standalone)");
+            }
+        }
+        catch (Exception ex) { _logger.LogError(ex, "Failed to enforce PMP backup default"); }
+
         // Initialize changelog service and UI before wiring callbacks
         _changelogService = new ChangelogService(_logger, new System.Net.Http.HttpClient(), _configService);
         _releaseChangelogUi = new ReleaseChangelogUI(_pluginInterface, _logger, _configService, _changelogService);
@@ -210,6 +224,7 @@ public sealed class Plugin : IDalamudPlugin
         _initRefreshCts = null;
         try { _conversionUi.ShutdownBackgroundWork(); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to shutdown conversion UI background work"); }
         try { _conversionUi.Dispose(); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to dispose conversion UI"); }
+        try { _settingsUi.Dispose(); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to dispose settings UI"); }
         try { _conversionService.Dispose(); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to dispose conversion service"); }
         try { _penumbraExtension.Dispose(); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to dispose Penumbra extension"); }
         try { _shrinkuIpc.Dispose(); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to dispose ShrinkU IPC"); }
@@ -301,13 +316,13 @@ public sealed class Plugin : IDalamudPlugin
             {
                 if (!_penumbraIpc.APIAvailable)
                 {
-                    errors.Add("Penumbra API nicht verfügbar. Bitte Penumbra aktivieren.");
+                    errors.Add("Penumbra API not available. Please enable Penumbra.");
                     _logger.LogError("Penumbra API unavailable at startup");
                 }
                 var modDir = _penumbraIpc.ModDirectory ?? string.Empty;
                 if (string.IsNullOrWhiteSpace(modDir) || !System.IO.Directory.Exists(modDir))
                 {
-                    errors.Add("Penumbra Mod-Verzeichnis nicht gefunden.");
+                    errors.Add("Penumbra mod directory not found.");
                     _logger.LogError("Penumbra mod directory missing: {dir}", modDir);
                 }
             }
@@ -318,7 +333,7 @@ public sealed class Plugin : IDalamudPlugin
                 var cfgDir = _pluginInterface.ConfigDirectory?.FullName ?? string.Empty;
                 if (string.IsNullOrWhiteSpace(cfgDir) || !System.IO.Directory.Exists(cfgDir))
                 {
-                    errors.Add("Konfigurationsordner nicht verfügbar.");
+                    errors.Add("Configuration folder not available.");
                     _logger.LogError("Config directory unavailable: {dir}", cfgDir);
                 }
                 else
@@ -331,8 +346,8 @@ public sealed class Plugin : IDalamudPlugin
                     }
                     catch (Exception ex)
                     {
-                        errors.Add("Konfigurationsordner nicht beschreibbar.");
-                        _logger.LogError(ex, "Config directory not writable: {dir}", cfgDir);
+                        errors.Add("Configuration folder is not writable.");
+                        _logger.LogWarning(ex, "Config directory not writable: {dir}", cfgDir);
                     }
                 }
             }
@@ -343,7 +358,7 @@ public sealed class Plugin : IDalamudPlugin
                 var backup = _configService.Current.BackupFolderPath ?? string.Empty;
                 if (string.IsNullOrWhiteSpace(backup))
                 {
-                    errors.Add("Backup-Ordner nicht konfiguriert.");
+                    errors.Add("Backup folder not configured.");
                     _logger.LogError("Backup folder path not configured");
                 }
                 else
@@ -351,7 +366,7 @@ public sealed class Plugin : IDalamudPlugin
                     try { System.IO.Directory.CreateDirectory(backup); } catch { }
                     if (!System.IO.Directory.Exists(backup))
                     {
-                        errors.Add("Backup-Ordner existiert nicht.");
+                        errors.Add("Backup folder does not exist.");
                         _logger.LogError("Backup folder does not exist: {path}", backup);
                     }
                     else
@@ -364,8 +379,8 @@ public sealed class Plugin : IDalamudPlugin
                         }
                         catch (Exception ex)
                         {
-                            errors.Add("Backup-Ordner nicht beschreibbar.");
-                            _logger.LogError(ex, "Backup folder not writable: {path}", backup);
+                        errors.Add("Backup folder is not writable.");
+                        _logger.LogWarning(ex, "Backup folder not writable: {path}", backup);
                         }
                     }
                 }

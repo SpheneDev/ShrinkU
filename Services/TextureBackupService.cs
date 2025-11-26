@@ -1839,7 +1839,7 @@ public sealed class TextureBackupService
         catch { return (string.Empty, string.Empty); }
     }
 
-    public async Task<List<OrphanBackupInfo>> FindOrphanedBackupsAsync()
+    public async Task<List<OrphanBackupInfo>> FindOrphanedBackupsAsync(System.Threading.CancellationToken token)
     {
         var result = new List<OrphanBackupInfo>();
         try
@@ -1847,10 +1847,12 @@ public sealed class TextureBackupService
             var backupDirectory = _configService.Current.BackupFolderPath;
             if (string.IsNullOrWhiteSpace(backupDirectory) || !Directory.Exists(backupDirectory))
                 return result;
+            if (token.IsCancellationRequested) return result;
             var mods = await _penumbraIpc.GetAllModFoldersAsync().ConfigureAwait(false);
             var modSet = new HashSet<string>(mods ?? new List<string>(), StringComparer.OrdinalIgnoreCase);
             foreach (var modDir in Directory.EnumerateDirectories(backupDirectory))
             {
+                if (token.IsCancellationRequested) break;
                 var modName = Path.GetFileName(modDir) ?? string.Empty;
                 if (string.IsNullOrWhiteSpace(modName)) continue;
                 if (modSet.Contains(modName)) continue;
@@ -1859,6 +1861,7 @@ public sealed class TextureBackupService
                 {
                     foreach (var file in Directory.EnumerateFiles(modDir, "*", SearchOption.TopDirectoryOnly))
                     {
+                        if (token.IsCancellationRequested) break;
                         var name = Path.GetFileName(file) ?? string.Empty;
                         var len = 0L;
                         try { len = new FileInfo(file).Length; } catch { }
@@ -1881,6 +1884,11 @@ public sealed class TextureBackupService
         }
         catch { }
         return result;
+    }
+
+    public Task<List<OrphanBackupInfo>> FindOrphanedBackupsAsync()
+    {
+        return FindOrphanedBackupsAsync(System.Threading.CancellationToken.None);
     }
 
     public Task<bool> DeleteOrphanBackupsAsync(string modFolderName)
@@ -2402,7 +2410,6 @@ public sealed class TextureBackupService
                         modStats.OriginalBytes += backupBytes;
                         modStats.CurrentBytes += currentBytes;
                         modStats.ComparedFiles += 1;
-                        try { _modStateService.UpdateSavings(modFolder, modStats.OriginalBytes, modStats.CurrentBytes, modStats.ComparedFiles); } catch { }
                     }
                 }
             }
@@ -2475,7 +2482,6 @@ public sealed class TextureBackupService
                         stats.CurrentBytes += currentBytes;
                         stats.ComparedFiles += Math.Max(1, entryCount);
                         result[modName!] = stats;
-                        try { _modStateService.UpdateSavings(modName!, stats.OriginalBytes, stats.CurrentBytes, stats.ComparedFiles); } catch { }
                     }
                 }
             }
