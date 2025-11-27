@@ -42,14 +42,15 @@ public sealed partial class ConversionUI
             ImGui.PushStyleColor(ImGuiCol.Button, new Vector4(0.6f, 0.2f, 0.2f, 1f));
             ImGui.PushStyleColor(ImGuiCol.ButtonHovered, new Vector4(0.8f, 0.3f, 0.3f, 1f));
             ImGui.PushStyleColor(ImGuiCol.ButtonActive, new Vector4(0.4f, 0.1f, 0.1f, 1f));
+            ImGui.PushStyleVar(ImGuiStyleVar.ButtonTextAlign, new Vector2(0.9f, 0.5f));
             if (ImGui.Button(FontAwesomeIcon.Times.ToIconString(), new Vector2(w, h)))
             {
                 _scanFilter = string.Empty;
                 RequestUiRefresh("scan-filter-cleared");
             }
-            ImGui.PushStyleVar(ImGuiStyleVar.ButtonTextAlign, new Vector2(0.9f, 0.5f));
             ImGui.PopStyleColor(3);
             ImGui.PopFont();
+            ImGui.PopStyleVar();
             if (ImGui.IsItemHovered())
                 ImGui.SetTooltip("Clear filter");
         }
