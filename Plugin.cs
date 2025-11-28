@@ -12,6 +12,7 @@ using ShrinkU.UI;
 using ShrinkU.Configuration;
 using ShrinkU.Interop;
 using System.Security.Principal;
+using Dalamud.Bindings.ImGui;
 
 namespace ShrinkU;
 
@@ -234,7 +235,20 @@ public sealed class Plugin : IDalamudPlugin
 
     private void DrawUi()
     {
+        var style = ImGui.GetStyle();
+        var windowBg = style.Colors[(int)ImGuiCol.WindowBg];
+        var childBg = style.Colors[(int)ImGuiCol.ChildBg];
+        var popupBg = style.Colors[(int)ImGuiCol.PopupBg];
+        windowBg.W = 1f;
+        childBg.W = 1f;
+        popupBg.W = 1f;
+        ImGui.PushStyleColor(ImGuiCol.WindowBg, windowBg);
+        ImGui.PushStyleColor(ImGuiCol.ChildBg, childBg);
+        ImGui.PushStyleColor(ImGuiCol.PopupBg, popupBg);
+        ImGui.PushStyleVar(ImGuiStyleVar.Alpha, 1f);
         _windowSystem.Draw();
+        ImGui.PopStyleVar();
+        ImGui.PopStyleColor(3);
     }
 
     private void OpenConfigUi()
