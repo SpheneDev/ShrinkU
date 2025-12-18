@@ -9,5 +9,6 @@
     "textures",
     "conversion",
     "penumbra"
-  ]
+  ],
+  "DalamudApiLevel": 14
 }
