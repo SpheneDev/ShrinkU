@@ -73,6 +73,8 @@ public sealed class ModStateService
 
     public ModStateEntry Get(string mod)
     {
+        if (string.IsNullOrWhiteSpace(mod))
+            return new ModStateEntry { ModFolderName = string.Empty, LastUpdatedUtc = DateTime.UtcNow };
         lock (_lock)
         {
             if (!_state.TryGetValue(mod, out var e))
@@ -394,6 +396,8 @@ public sealed class ModStateService
     {
         try
         {
+            if (string.IsNullOrWhiteSpace(mod))
+                return;
             var trace = PerfTrace.Step(_logger, $"ModState Detail {mod}");
             var dir = GetDetailDir();
             var path = Path.Combine(dir, Sanitize(mod) + ".json");
@@ -411,6 +415,8 @@ public sealed class ModStateService
     {
         try
         {
+            if (string.IsNullOrWhiteSpace(mod))
+                return new List<string>();
             var dir = GetDetailDir();
             var path = Path.Combine(dir, Sanitize(mod) + ".json");
             if (!File.Exists(path)) return new List<string>();
@@ -425,6 +431,8 @@ public sealed class ModStateService
     {
         try
         {
+            if (string.IsNullOrWhiteSpace(mod))
+                return new List<string>();
             var dir = GetDetailDir();
             var path = Path.Combine(dir, Sanitize(mod) + ".json");
             if (!File.Exists(path)) return new List<string>();
@@ -507,6 +515,40 @@ public sealed class ModStateService
                     }
                     _state = dict ?? new Dictionary<string, ModStateEntry>(StringComparer.OrdinalIgnoreCase);
                 }
+            }
+            List<string>? removedKeys = null;
+            lock (_lock)
+            {
+                foreach (var key in _state.Keys)
+                {
+                    if (string.IsNullOrWhiteSpace(key)
+                        || string.Equals(key, "Entries", StringComparison.OrdinalIgnoreCase)
+                        || string.Equals(key, "Meta", StringComparison.OrdinalIgnoreCase))
+                    {
+                        removedKeys ??= new List<string>();
+                        removedKeys.Add(key);
+                    }
+                }
+
+                if (removedKeys != null)
+                {
+                    for (var i = 0; i < removedKeys.Count; i++)
+                        _state.Remove(removedKeys[i]);
+                }
+            }
+            if (removedKeys != null && removedKeys.Count > 0)
+            {
+                try { ScheduleSave(); } catch { }
+                try
+                {
+                    var dir = GetDetailDir();
+                    for (var i = 0; i < removedKeys.Count; i++)
+                    {
+                        var p = Path.Combine(dir, Sanitize(removedKeys[i]) + ".json");
+                        try { if (File.Exists(p)) File.Delete(p); } catch { }
+                    }
+                }
+                catch { }
             }
             try
             {

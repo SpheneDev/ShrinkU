@@ -224,10 +224,25 @@ public TextureConversionService(ILogger logger, PenumbraIpc penumbraIpc, Texture
 
     public static string NormalizeLeafKey(string mod)
     {
-        if (string.IsNullOrWhiteSpace(mod)) return string.Empty;
-        var leaf = mod.Replace('/', System.IO.Path.DirectorySeparatorChar).Replace('\\', System.IO.Path.DirectorySeparatorChar).TrimEnd(System.IO.Path.DirectorySeparatorChar);
-        var segs = leaf.Split(System.IO.Path.DirectorySeparatorChar);
-        return segs.Length > 0 ? segs[^1] : leaf;
+        if (string.IsNullOrWhiteSpace(mod))
+            return string.Empty;
+
+        var normalized = mod.Replace('/', System.IO.Path.DirectorySeparatorChar)
+            .Replace('\\', System.IO.Path.DirectorySeparatorChar)
+            .Trim()
+            .TrimEnd(System.IO.Path.DirectorySeparatorChar);
+
+        if (normalized.Length == 0)
+            return string.Empty;
+
+        var lastSep = normalized.LastIndexOf(System.IO.Path.DirectorySeparatorChar);
+        if (lastSep < 0)
+            return normalized;
+
+        if (lastSep >= normalized.Length - 1)
+            return string.Empty;
+
+        return normalized.Substring(lastSep + 1).Trim();
     }
 
     public static string ComputeRelativePathFromAbs(string root, string abs)
@@ -272,7 +287,8 @@ public TextureConversionService(ILogger logger, PenumbraIpc penumbraIpc, Texture
         try
         {
             var sw = System.Diagnostics.Stopwatch.StartNew();
-            var mods = await GetAllModFoldersAsync().ConfigureAwait(false);
+            var modsRaw = await GetAllModFoldersAsync().ConfigureAwait(false);
+            var mods = modsRaw.Where(m => NormalizeLeafKey(m).Length > 0).ToList();
             sw.Stop();
             try { _logger.LogDebug("Initial update step: GetAllModFolders count={count} elapsedMs={ms}", mods.Count, (int)sw.ElapsedMilliseconds); } catch { }
             var total = mods.Count;
@@ -326,6 +342,8 @@ public TextureConversionService(ILogger logger, PenumbraIpc penumbraIpc, Texture
                     try
                     {
                         var key = NormalizeLeafKey(mod);
+                        if (key.Length == 0)
+                            return;
                         int fileCount = 0;
                         try
                         {
@@ -1146,6 +1164,8 @@ public TextureConversionService(ILogger logger, PenumbraIpc penumbraIpc, Texture
         var snap = _modStateService.Snapshot();
         foreach (var kv in snap)
         {
+            if (string.IsNullOrWhiteSpace(kv.Key))
+                continue;
             if (!dict.ContainsKey(kv.Key))
             {
                 var dn = kv.Value?.DisplayName;
@@ -1417,6 +1437,8 @@ public TextureConversionService(ILogger logger, PenumbraIpc penumbraIpc, Texture
         var snap = _modStateService.Snapshot();
         foreach (var kv in snap)
         {
+            if (string.IsNullOrWhiteSpace(kv.Key))
+                continue;
             if (!dict.ContainsKey(kv.Key))
             {
                 var t = kv.Value?.Tags;
@@ -1438,6 +1460,8 @@ public TextureConversionService(ILogger logger, PenumbraIpc penumbraIpc, Texture
                 try
                 {
                     var mod = kv.Key;
+                    if (string.IsNullOrWhiteSpace(mod))
+                        continue;
                     var e = kv.Value;
                     var pf = paths.TryGetValue(mod, out var val) ? (val ?? string.Empty) : string.Empty;
                     var disp = names.TryGetValue(mod, out var dn) ? (dn ?? string.Empty) : (e.RelativeModName ?? string.Empty);

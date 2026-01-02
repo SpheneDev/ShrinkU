@@ -521,7 +521,10 @@ public sealed class TextureBackupService
             try
             {
                 foreach (var kv in _modStateService.Snapshot())
-                    mods.Add(kv.Key);
+                {
+                    if (!PenumbraIpc.ShouldSkipModRootFolder(kv.Key))
+                        mods.Add(kv.Key);
+                }
             }
             catch { }
 
@@ -536,6 +539,7 @@ public sealed class TextureBackupService
                         if (string.IsNullOrWhiteSpace(name)) continue;
                         if (name.Equals("mod_state", StringComparison.OrdinalIgnoreCase)) continue;
                         if (name.StartsWith("session_", StringComparison.OrdinalIgnoreCase)) continue;
+                        if (PenumbraIpc.ShouldSkipModRootFolder(name)) continue;
                         mods.Add(name);
                     }
                     foreach (var session in Directory.EnumerateDirectories(backupDirectory, "session_*", SearchOption.TopDirectoryOnly))
@@ -543,7 +547,9 @@ public sealed class TextureBackupService
                         foreach (var modSub in Directory.EnumerateDirectories(session, "*", SearchOption.TopDirectoryOnly))
                         {
                             var name = Path.GetFileName(modSub);
-                            if (!string.IsNullOrWhiteSpace(name)) mods.Add(name);
+                            if (string.IsNullOrWhiteSpace(name)) continue;
+                            if (PenumbraIpc.ShouldSkipModRootFolder(name)) continue;
+                            mods.Add(name);
                         }
                     }
                 }
@@ -556,7 +562,7 @@ public sealed class TextureBackupService
                 var list = _penumbraIpc.GetModList();
                 foreach (var dir in list.Keys)
                 {
-                    if (!string.IsNullOrWhiteSpace(dir))
+                    if (!string.IsNullOrWhiteSpace(dir) && !PenumbraIpc.ShouldSkipModRootFolder(dir))
                         mods.Add(dir);
                 }
             }
@@ -578,6 +584,7 @@ public sealed class TextureBackupService
                         var modName = Path.GetFileName(dir);
                         if (string.IsNullOrWhiteSpace(modName)) continue;
                         if (modName.StartsWith("session_", StringComparison.OrdinalIgnoreCase)) continue;
+                        if (PenumbraIpc.ShouldSkipModRootFolder(modName)) continue;
                         try
                         {
                             var latestZip = Directory.EnumerateFiles(dir, "backup_*.zip").OrderByDescending(f => f).FirstOrDefault();
@@ -609,6 +616,7 @@ public sealed class TextureBackupService
                             {
                                 var name = Path.GetFileName(modSub);
                                 if (string.IsNullOrWhiteSpace(name)) continue;
+                                if (PenumbraIpc.ShouldSkipModRootFolder(name)) continue;
                                 var manifestPath = Path.Combine(modSub, "manifest.json");
                                 if (File.Exists(manifestPath))
                                     modsInSessions.Add(name);
@@ -1855,6 +1863,7 @@ public sealed class TextureBackupService
                 if (token.IsCancellationRequested) break;
                 var modName = Path.GetFileName(modDir) ?? string.Empty;
                 if (string.IsNullOrWhiteSpace(modName)) continue;
+                if (PenumbraIpc.ShouldSkipModRootFolder(modName)) continue;
                 if (modSet.Contains(modName)) continue;
                 var info = new OrphanBackupInfo { ModFolderName = modName };
                 try
@@ -1938,6 +1947,7 @@ public sealed class TextureBackupService
             foreach (var modDir in Directory.EnumerateDirectories(backupDirectory).OrderBy(d => d))
             {
                 var modName = Path.GetFileName(modDir);
+                if (PenumbraIpc.ShouldSkipModRootFolder(modName)) continue;
                 foreach (var zip in Directory.EnumerateFiles(modDir, "backup_*.zip").OrderByDescending(f => f))
                 {
                     try

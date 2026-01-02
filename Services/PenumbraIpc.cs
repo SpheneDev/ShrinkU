@@ -19,6 +19,21 @@ public sealed class PenumbraIpc : IDisposable
     private readonly IDalamudPluginInterface _pi;
     private readonly ILogger _logger;
 
+    private static readonly HashSet<string> NonModRootFolderNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "Entries",
+        "Meta",
+    };
+
+    internal static bool ShouldSkipModRootFolder(string? folderName)
+    {
+        if (string.IsNullOrWhiteSpace(folderName))
+            return true;
+        if (folderName.StartsWith(".", StringComparison.Ordinal))
+            return true;
+        return NonModRootFolderNames.Contains(folderName);
+    }
+
     private readonly GetEnabledState _penumbraEnabled;
     private readonly GetModDirectory _penumbraResolveModDir;
     private readonly ConvertTextureFile _penumbraConvertTextureFile;
@@ -510,6 +525,8 @@ public sealed class PenumbraIpc : IDisposable
                         var rel = Path.GetRelativePath(root, file);
                         var parts = rel.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
                         var modName = parts.Length > 1 ? parts[0] : "<unknown>";
+                        if (ShouldSkipModRootFolder(modName))
+                            continue;
                         if (!result.TryGetValue(modName, out var list))
                         {
                             list = new List<string>();
@@ -546,6 +563,8 @@ public sealed class PenumbraIpc : IDisposable
             foreach (var dir in Directory.EnumerateDirectories(root, "*", SearchOption.TopDirectoryOnly))
             {
                 var folderName = Path.GetFileName(dir);
+                if (ShouldSkipModRootFolder(folderName))
+                    continue;
                 var metaPath = Path.Combine(dir, "meta.json");
                 if (!File.Exists(metaPath))
                 {
@@ -559,8 +578,8 @@ public sealed class PenumbraIpc : IDisposable
                     using var doc = JsonDocument.Parse(s);
                     if (doc.RootElement.TryGetProperty("Name", out var nameProp) && nameProp.ValueKind == JsonValueKind.String)
                     {
-                        var display = nameProp.GetString() ?? folderName;
-                        map[folderName] = display;
+                        var display = nameProp.GetString();
+                        map[folderName] = string.IsNullOrWhiteSpace(display) ? folderName : display;
                     }
                     else
                     {
@@ -584,7 +603,15 @@ public sealed class PenumbraIpc : IDisposable
     {
         try
         {
-            return _penumbraGetModList.Invoke();
+            var list = _penumbraGetModList.Invoke();
+            var normalized = new Dictionary<string, string>(list.Count, StringComparer.OrdinalIgnoreCase);
+            foreach (var kv in list)
+            {
+                if (ShouldSkipModRootFolder(kv.Key))
+                    continue;
+                normalized[kv.Key] = string.IsNullOrWhiteSpace(kv.Value) ? kv.Key : kv.Value;
+            }
+            return normalized;
         }
         catch
         {
@@ -596,6 +623,8 @@ public sealed class PenumbraIpc : IDisposable
     {
         try
         {
+            if (ShouldSkipModRootFolder(modDirectory))
+                return false;
             var list = _penumbraGetModList.Invoke();
             return list.ContainsKey(modDirectory);
         }
@@ -658,6 +687,8 @@ public sealed class PenumbraIpc : IDisposable
             foreach (var kv in list)
             {
                 var modDir = kv.Key;
+                if (ShouldSkipModRootFolder(modDir))
+                    continue;
                 var modName = kv.Value ?? string.Empty;
                 try
                 {
@@ -700,8 +731,8 @@ public sealed class PenumbraIpc : IDisposable
                 using var doc = JsonDocument.Parse(s);
                 if (doc.RootElement.TryGetProperty("Name", out var nameProp) && nameProp.ValueKind == JsonValueKind.String)
                 {
-                    var display = nameProp.GetString() ?? name;
-                    return Task.FromResult(display);
+                    var display = nameProp.GetString();
+                    return Task.FromResult(string.IsNullOrWhiteSpace(display) ? name : display);
                 }
             }
             catch { }
@@ -828,7 +859,7 @@ public sealed class PenumbraIpc : IDisposable
                     foreach (var kv in modList)
                     {
                         var modDir = kv.Key;
-                        if (!string.IsNullOrWhiteSpace(modDir))
+                        if (!string.IsNullOrWhiteSpace(modDir) && !ShouldSkipModRootFolder(modDir))
                             folders.Add(modDir);
                     }
                     try
@@ -852,8 +883,7 @@ public sealed class PenumbraIpc : IDisposable
             foreach (var dir in Directory.EnumerateDirectories(root, "*", SearchOption.TopDirectoryOnly))
             {
                 var folderName = Path.GetFileName(dir);
-                // Skip hidden/temporary dot-prefixed directories that are not actual mods
-                if (!string.IsNullOrEmpty(folderName) && !folderName.StartsWith(".", StringComparison.Ordinal))
+                if (!ShouldSkipModRootFolder(folderName))
                     folders.Add(folderName);
             }
         }
@@ -882,6 +912,8 @@ public sealed class PenumbraIpc : IDisposable
             foreach (var dir in Directory.EnumerateDirectories(root, "*", SearchOption.TopDirectoryOnly))
             {
                 var folderName = Path.GetFileName(dir);
+                if (ShouldSkipModRootFolder(folderName))
+                    continue;
                 var metaPath = Path.Combine(dir, "meta.json");
                 var list = new List<string>();
                 if (File.Exists(metaPath))

@@ -297,6 +297,8 @@ public sealed partial class ConversionUI
             {
                 var key = kvp.Key;
                 var val = kvp.Value ?? string.Empty;
+                if (string.IsNullOrWhiteSpace(key))
+                    continue;
                 if (!string.IsNullOrWhiteSpace(val))
                     _modPathsStable[key] = val;
             }

@@ -1652,9 +1652,13 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                     }
                     if (folders != null)
                     {
+                        var known = new List<string>(folders.Count);
                         foreach (var folder in folders)
                         {
                             var leaf = TextureConversionService.NormalizeLeafKey(folder);
+                            if (string.IsNullOrWhiteSpace(leaf))
+                                continue;
+                            known.Add(folder);
                             var files = _modStateService.ReadDetailTextures(leaf);
                             _scannedByMod[leaf] = files ?? new List<string>();
                             foreach (var file in (files ?? new List<string>()))
@@ -1663,7 +1667,7 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                                 _fileOwnerMod[file] = leaf;
                             }
                         }
-                        _knownModFolders = new HashSet<string>(folders, StringComparer.OrdinalIgnoreCase);
+                        _knownModFolders = new HashSet<string>(known, StringComparer.OrdinalIgnoreCase);
                     }
                     _logger.LogDebug("Initial mods loaded: {mods}", _scannedByMod.Count);
                     _needsUIRefresh = true;
@@ -1737,6 +1741,8 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                             _modStateService.BeginBatch();
                             foreach (var kv in grouped)
                             {
+                                if (string.IsNullOrWhiteSpace(kv.Key))
+                                    continue;
                                 var prev = _modStateService.ReadDetailTextures(kv.Key);
                                 var prevCount = prev?.Count ?? 0;
                                 bool sameCount = prevCount == kv.Value.Count;
@@ -1764,6 +1770,8 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                             foreach (var folder in folders)
                             {
                                 var leaf = TextureConversionService.NormalizeLeafKey(folder);
+                                if (string.IsNullOrWhiteSpace(leaf))
+                                    continue;
                                 var list = _modStateService.ReadDetailTextures(leaf);
                                 if (list != null && list.Count > 0)
                                     persisted[leaf] = list;
@@ -1786,6 +1794,8 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                         _fileOwnerMod.Clear();
                         foreach (var mod in grouped)
                         {
+                            if (string.IsNullOrWhiteSpace(mod.Key))
+                                continue;
                             if (_configService.Current.DebugTraceActions)
                             {
                                 TraceAction(origin, "mod", mod.Key);
@@ -1844,6 +1854,8 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                         {
                             var key = kvp.Key;
                             var val = kvp.Value ?? string.Empty;
+                            if (string.IsNullOrWhiteSpace(key))
+                                continue;
                             if (!string.IsNullOrWhiteSpace(val))
                                 _modPathsStable[key] = val;
                         }
@@ -1860,13 +1872,17 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                     }
                     if (folders != null)
                     {
+                        var known = new List<string>(folders.Count);
                         foreach (var folder in folders)
                         {
                             var leaf = TextureConversionService.NormalizeLeafKey(folder);
+                            if (string.IsNullOrWhiteSpace(leaf))
+                                continue;
+                            known.Add(folder);
                             if (!_scannedByMod.ContainsKey(leaf))
                                 _scannedByMod[leaf] = new List<string>();
                         }
-                        _knownModFolders = new HashSet<string>(folders, StringComparer.OrdinalIgnoreCase);
+                        _knownModFolders = new HashSet<string>(known, StringComparer.OrdinalIgnoreCase);
                     }
                     _needsUIRefresh = true;
                     _scanInProgress = false;
