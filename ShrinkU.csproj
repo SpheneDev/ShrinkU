@@ -8,6 +8,14 @@
     <FileVersion>0.0.7.0</FileVersion>
     <Description>Standalone texture conversion plugin.</Description>
     <PackageProjectUrl>https://github.com/SpheneDev/ShrinkU</PackageProjectUrl>
+    <Author>ShrinkU</Author>
+    <Name>ShrinkU</Name>
+    <InternalName>shrinku</InternalName>
+    <Punchline>Convert Penumbra textures to BC7 with backups.</Punchline>
+    <RepoUrl>https://github.com/SpheneDev/ShrinkU</RepoUrl>
+    <Tags>textures;conversion;penumbra</Tags>
+    <ApplicableVersion>any</ApplicableVersion>
+    <DalamudApiLevel>14</DalamudApiLevel>
   </PropertyGroup>
 
   <PropertyGroup>
@@ -36,9 +44,6 @@
   
 
   <ItemGroup>
-    <None Include="ShrinkU.json">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
     <None Include="..\\.editorconfig" Link=".editorconfig" />
   </ItemGroup>
 
