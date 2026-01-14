@@ -711,6 +711,42 @@ public sealed class PenumbraIpc : IDisposable
         return Task.FromResult(paths);
     }
 
+    public record ModMetadata(string Name, string? Author, string? Version, string? Description, string? Website);
+
+    public Task<ModMetadata?> GetModMetadataAsync(string modDirectory)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(ModDirectory) || !Directory.Exists(ModDirectory))
+                return Task.FromResult<ModMetadata?>(null);
+
+            var root = Path.GetFullPath(ModDirectory!);
+            var dir = Path.Combine(root, modDirectory ?? string.Empty);
+            if (!Directory.Exists(dir))
+                return Task.FromResult<ModMetadata?>(null);
+
+            var metaPath = Path.Combine(dir, "meta.json");
+            if (!File.Exists(metaPath))
+                return Task.FromResult<ModMetadata?>(null);
+
+            using var s = File.OpenRead(metaPath);
+            using var doc = JsonDocument.Parse(s);
+            var rootEl = doc.RootElement;
+            
+            var name = rootEl.TryGetProperty("Name", out var pName) ? pName.GetString() ?? string.Empty : string.Empty;
+            var author = rootEl.TryGetProperty("Author", out var pAuthor) ? pAuthor.GetString() : null;
+            var version = rootEl.TryGetProperty("Version", out var pVersion) ? pVersion.GetString() : null;
+            var description = rootEl.TryGetProperty("Description", out var pDesc) ? pDesc.GetString() : null;
+            var website = rootEl.TryGetProperty("Website", out var pWeb) ? pWeb.GetString() : null;
+
+            return Task.FromResult<ModMetadata?>(new ModMetadata(name, author, version, description, website));
+        }
+        catch
+        {
+            return Task.FromResult<ModMetadata?>(null);
+        }
+    }
+
     public Task<string> GetModDisplayNameAsync(string modDirectory)
     {
         var name = modDirectory ?? string.Empty;
