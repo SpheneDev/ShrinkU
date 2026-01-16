@@ -625,11 +625,10 @@ public sealed class TextureBackupService
             if (string.Equals(current, path, StringComparison.OrdinalIgnoreCase))
                 return;
 
-            try { _logger.LogDebug("[ShrinkU][Fingerprint] ConfigureBackupFolderPath: {from} -> {to}", current, path); } catch { }
+            try { _logger.LogDebug("ShrinkU backup folder path updated: {from} -> {to}", current, path); } catch { }
             _configService.Current.BackupFolderPath = path;
             try { _configService.Save(); } catch { }
             try { _modStateService.ReloadIfChanged(); } catch { }
-            try { _logger.LogDebug("[ShrinkU][Fingerprint] ConfigureBackupFolderPath: stateFile={stateFile}", _modStateService.GetStateFilePath()); } catch { }
         }
         catch { }
     }
@@ -642,17 +641,11 @@ public sealed class TextureBackupService
 
             var backupDirectory = _configService.Current.BackupFolderPath;
             if (string.IsNullOrWhiteSpace(backupDirectory) || !Directory.Exists(backupDirectory))
-            {
-                try { _logger.LogDebug("[ShrinkU][Fingerprint] Unchanged=false (backup dir missing): path={path} exists={exists} stateFile={stateFile}", backupDirectory ?? string.Empty, Directory.Exists(backupDirectory ?? string.Empty), _modStateService.GetStateFilePath()); } catch { }
                 return false;
-            }
 
             var lastFingerprint = _modStateService.GetBackupFolderFingerprint();
             if (string.IsNullOrWhiteSpace(lastFingerprint))
-            {
-                try { _logger.LogDebug("[ShrinkU][Fingerprint] Unchanged=false (no stored fingerprint): path={path} stateFile={stateFile}", backupDirectory, _modStateService.GetStateFilePath()); } catch { }
                 return false;
-            }
 
             var currentStateFingerprint = _modStateService.ComputeStateFingerprintSnapshot();
             var lastStateFingerprint = _modStateService.GetStateFingerprint();
@@ -662,45 +655,25 @@ public sealed class TextureBackupService
                 {
                     try { _modStateService.SetStateFingerprint(currentStateFingerprint); } catch { }
                     lastStateFingerprint = currentStateFingerprint;
-                    try { _logger.LogDebug("[ShrinkU][Fingerprint] Initialized missing state fingerprint: state={state} stateFile={stateFile}", currentStateFingerprint, _modStateService.GetStateFilePath()); } catch { }
                 }
                 else
                 {
-                    try { _logger.LogDebug("[ShrinkU][Fingerprint] Unchanged=false (no state fingerprint): path={path} stateFile={stateFile}", backupDirectory, _modStateService.GetStateFilePath()); } catch { }
                     return false;
                 }
             }
 
             var currentFingerprint = ComputeBackupFolderFingerprint(backupDirectory);
             if (string.IsNullOrWhiteSpace(currentFingerprint))
-            {
-                try { _logger.LogDebug("[ShrinkU][Fingerprint] Unchanged=false (compute failed): path={path} last={last} lastUtc={lastUtc} stateFile={stateFile}", backupDirectory, lastFingerprint, _modStateService.GetBackupFolderFingerprintUtc(), _modStateService.GetStateFilePath()); } catch { }
                 return false;
-            }
 
             var folderUnchanged = string.Equals(currentFingerprint, lastFingerprint, StringComparison.OrdinalIgnoreCase);
             var stateUnchanged = !string.IsNullOrWhiteSpace(currentStateFingerprint)
                 && string.Equals(currentStateFingerprint, lastStateFingerprint, StringComparison.OrdinalIgnoreCase);
             var unchanged = folderUnchanged && stateUnchanged;
-            try
-            {
-                _logger.LogDebug("[ShrinkU][Fingerprint] Unchanged={unchanged}: path={path} folderCurrent={folderCurrent} folderLast={folderLast} folderLastUtc={folderLastUtc} stateCurrent={stateCurrent} stateLast={stateLast} stateLastUtc={stateLastUtc} stateFile={stateFile}",
-                    unchanged,
-                    backupDirectory,
-                    currentFingerprint,
-                    lastFingerprint,
-                    _modStateService.GetBackupFolderFingerprintUtc(),
-                    currentStateFingerprint ?? string.Empty,
-                    lastStateFingerprint ?? string.Empty,
-                    _modStateService.GetStateFingerprintUtc(),
-                    _modStateService.GetStateFilePath());
-            }
-            catch { }
             return unchanged;
         }
         catch
         {
-            try { _logger.LogDebug("[ShrinkU][Fingerprint] Unchanged=false (exception)"); } catch { }
             return false;
         }
     }
@@ -729,7 +702,6 @@ public sealed class TextureBackupService
                         && string.Equals(computedStateFingerprint, lastStateFingerprint, StringComparison.OrdinalIgnoreCase);
                     if (stateUnchanged)
                     {
-                        try { _logger.LogDebug("[ShrinkU][Fingerprint] RefreshAllBackupState: skip (unchanged) path={path} folder={folder} state={state}", backupDirectoryForFingerprint, computedFingerprint, computedStateFingerprint); } catch { }
                         trace.Dispose();
                         return;
                     }
@@ -737,7 +709,6 @@ public sealed class TextureBackupService
                     if (!string.IsNullOrWhiteSpace(computedStateFingerprint))
                     {
                         try { _modStateService.SetStateFingerprint(computedStateFingerprint); } catch { }
-                        try { _logger.LogDebug("[ShrinkU][Fingerprint] RefreshAllBackupState: updated state fingerprint path={path} state={state}", backupDirectoryForFingerprint, computedStateFingerprint); } catch { }
                         trace.Dispose();
                         return;
                     }
@@ -1115,7 +1086,7 @@ public sealed class TextureBackupService
                 if (!string.IsNullOrWhiteSpace(backupDirectory) && Directory.Exists(backupDirectory) && !string.IsNullOrWhiteSpace(computedFingerprint))
                 {
                     _modStateService.SetBackupFolderFingerprint(computedFingerprint);
-                    try { _logger.LogDebug("[ShrinkU][Fingerprint] RefreshAllBackupState: stored fingerprint path={path} fingerprint={fingerprint}", backupDirectory, computedFingerprint); } catch { }
+                    try { _logger.LogDebug("RefreshAllBackupState: stored backup folder fingerprint"); } catch { }
                 }
             }
             catch { }
