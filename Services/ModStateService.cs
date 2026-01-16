@@ -7,6 +7,9 @@ using System.Threading.Tasks;
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Reflection;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Diagnostics;
@@ -19,6 +22,7 @@ public sealed class ModStateService
     private readonly ShrinkUConfigService _config;
     private readonly object _lock = new();
     private Dictionary<string, ModStateEntry> _state = new(StringComparer.OrdinalIgnoreCase);
+    private ModStateMeta _meta = new();
     public event Action? OnStateSaved;
     public event Action<string>? OnEntryChanged;
     private volatile bool _savingEnabled = true;
@@ -29,6 +33,9 @@ public sealed class ModStateService
     private volatile bool _batchDirty = false;
     private DateTime _lastLoadedWriteUtc = DateTime.MinValue;
     private long _lastLoadedLength = 0;
+    private static readonly byte[] s_newLineUtf8 = new[] { (byte)'\n' };
+    private static readonly JsonSerializerOptions s_stateFingerprintJsonOptions = new JsonSerializerOptions { WriteIndented = false };
+    private static readonly PropertyInfo[] s_stateFingerprintProperties = CreateStateFingerprintProperties();
 
     public ModStateService(ILogger logger, ShrinkUConfigService config, DebugTraceService? debugTrace = null)
     {
@@ -84,6 +91,82 @@ public sealed class ModStateService
             }
             return e;
         }
+    }
+
+    public string GetBackupFolderFingerprint()
+    {
+        lock (_lock)
+        {
+            return _meta.BackupFolderFingerprint ?? string.Empty;
+        }
+    }
+
+    public DateTime GetBackupFolderFingerprintUtc()
+    {
+        lock (_lock)
+        {
+            return _meta.BackupFolderFingerprintUtc;
+        }
+    }
+
+    public void SetBackupFolderFingerprint(string fingerprint)
+    {
+        if (fingerprint == null) fingerprint = string.Empty;
+        lock (_lock)
+        {
+            if (string.Equals(_meta.BackupFolderFingerprint, fingerprint, StringComparison.OrdinalIgnoreCase))
+                return;
+
+            _meta.BackupFolderFingerprint = fingerprint;
+            _meta.BackupFolderFingerprintUtc = DateTime.UtcNow;
+            _lastSaveReason = nameof(SetBackupFolderFingerprint);
+            ScheduleSave();
+        }
+    }
+
+    public string GetStateFingerprint()
+    {
+        lock (_lock)
+        {
+            return _meta.StateFingerprint ?? string.Empty;
+        }
+    }
+
+    public DateTime GetStateFingerprintUtc()
+    {
+        lock (_lock)
+        {
+            return _meta.StateFingerprintUtc;
+        }
+    }
+
+    public void SetStateFingerprint(string fingerprint)
+    {
+        if (fingerprint == null) fingerprint = string.Empty;
+        lock (_lock)
+        {
+            if (string.Equals(_meta.StateFingerprint, fingerprint, StringComparison.OrdinalIgnoreCase))
+                return;
+
+            _meta.StateFingerprint = fingerprint;
+            _meta.StateFingerprintUtc = DateTime.UtcNow;
+            _lastSaveReason = nameof(SetStateFingerprint);
+            ScheduleSave();
+        }
+    }
+
+    public string ComputeStateFingerprintSnapshot()
+    {
+        try
+        {
+            Dictionary<string, ModStateEntry> entriesSnapshot;
+            lock (_lock)
+            {
+                entriesSnapshot = new Dictionary<string, ModStateEntry>(_state, StringComparer.OrdinalIgnoreCase);
+            }
+            return ComputeStateFingerprint(entriesSnapshot);
+        }
+        catch { return string.Empty; }
     }
 
     public void UpdateBackupFlags(string mod, bool hasTexBackup, bool hasPmpBackup)
@@ -474,10 +557,21 @@ public sealed class ModStateService
             try
             {
                 using var doc = JsonDocument.Parse(json);
-                if (doc.RootElement.ValueKind == JsonValueKind.Object && doc.RootElement.TryGetProperty("entries", out var entriesEl))
+                if (doc.RootElement.ValueKind == JsonValueKind.Object
+                    && (doc.RootElement.TryGetProperty("entries", out _)
+                        || doc.RootElement.TryGetProperty("Entries", out _)))
                 {
-                    var file = JsonSerializer.Deserialize<ModStateFile>(json) ?? new ModStateFile { Meta = new ModStateMeta(), Entries = new Dictionary<string, ModStateEntry>() };
+                    var file = JsonSerializer.Deserialize<ModStateFile>(json, new JsonSerializerOptions { PropertyNameCaseInsensitive = true })
+                        ?? new ModStateFile { Meta = new ModStateMeta(), Entries = new Dictionary<string, ModStateEntry>() };
                     dict = new Dictionary<string, ModStateEntry>(file.Entries ?? new Dictionary<string, ModStateEntry>(), StringComparer.OrdinalIgnoreCase);
+                    try
+                    {
+                        _meta = file.Meta ?? new ModStateMeta();
+                    }
+                    catch
+                    {
+                        _meta = new ModStateMeta();
+                    }
                 }
                 else
                 {
@@ -515,6 +609,8 @@ public sealed class ModStateService
                     }
                     _state = dict ?? new Dictionary<string, ModStateEntry>(StringComparer.OrdinalIgnoreCase);
                 }
+                if (_meta == null)
+                    _meta = new ModStateMeta();
             }
             List<string>? removedKeys = null;
             lock (_lock)
@@ -560,6 +656,40 @@ public sealed class ModStateService
                         e.UsedTextureCount = e.UsedTextureFiles.Count;
                     if (e.BytesSaved <= 0 && e.OriginalBytes > 0 && e.CurrentBytes >= 0)
                         e.BytesSaved = Math.Max(0, e.OriginalBytes - e.CurrentBytes);
+                }
+            }
+            catch { }
+            try
+            {
+                string currentStateFingerprint = string.Empty;
+                string existingStateFingerprint = string.Empty;
+                lock (_lock)
+                {
+                    existingStateFingerprint = _meta?.StateFingerprint ?? string.Empty;
+                }
+
+                if (string.IsNullOrWhiteSpace(existingStateFingerprint))
+                {
+                    Dictionary<string, ModStateEntry> snapshot;
+                    lock (_lock)
+                    {
+                        snapshot = new Dictionary<string, ModStateEntry>(_state, StringComparer.OrdinalIgnoreCase);
+                    }
+                    currentStateFingerprint = ComputeStateFingerprint(snapshot);
+                    if (!string.IsNullOrWhiteSpace(currentStateFingerprint))
+                    {
+                        lock (_lock)
+                        {
+                            _meta ??= new ModStateMeta();
+                            if (string.IsNullOrWhiteSpace(_meta.StateFingerprint))
+                            {
+                                _meta.StateFingerprint = currentStateFingerprint;
+                                _meta.StateFingerprintUtc = DateTime.UtcNow;
+                                _lastSaveReason = "InitializeStateFingerprint";
+                            }
+                        }
+                        try { ScheduleSave(); } catch { }
+                    }
                 }
             }
             catch { }
@@ -632,23 +762,37 @@ public sealed class ModStateService
                 try { var dir = Path.GetDirectoryName(path); if (!string.IsNullOrWhiteSpace(dir)) Directory.CreateDirectory(dir); } catch { }
                 
                 Dictionary<string, ModStateEntry> entriesSnapshot;
+                ModStateMeta metaSnapshot;
                 lock (_lock)
                 {
                     entriesSnapshot = new Dictionary<string, ModStateEntry>(_state, StringComparer.OrdinalIgnoreCase);
+                    var m = _meta ?? new ModStateMeta();
+                    metaSnapshot = new ModStateMeta
+                    {
+                        SchemaVersion = m.SchemaVersion,
+                        GeneratedBy = m.GeneratedBy,
+                        CreatedUtc = m.CreatedUtc,
+                        LastSavedUtc = m.LastSavedUtc,
+                        BackupFolderFingerprint = m.BackupFolderFingerprint,
+                        BackupFolderFingerprintUtc = m.BackupFolderFingerprintUtc,
+                        StateFingerprint = m.StateFingerprint,
+                        StateFingerprintUtc = m.StateFingerprintUtc,
+                    };
                 }
 
                 var sw = Stopwatch.StartNew();
                 using (var fs = new FileStream(tmp, FileMode.Create, FileAccess.Write, FileShare.None, 65536, FileOptions.SequentialScan))
                 {
                     using var writer = new Utf8JsonWriter(fs, new JsonWriterOptions { Indented = true });
-                    var meta = new ModStateMeta
-                    {
-                        SchemaVersion = 2,
-                        GeneratedBy = GetGeneratedBy(),
-                        CreatedUtc = _lastLoadedWriteUtc == DateTime.MinValue ? DateTime.UtcNow : _lastLoadedWriteUtc,
-                        LastSavedUtc = DateTime.UtcNow,
-                    };
-                    var file = new ModStateFile { Meta = meta, Entries = entriesSnapshot };
+                    metaSnapshot.SchemaVersion = 3;
+                    metaSnapshot.GeneratedBy = GetGeneratedBy();
+                    if (metaSnapshot.CreatedUtc == DateTime.MinValue)
+                        metaSnapshot.CreatedUtc = _lastLoadedWriteUtc == DateTime.MinValue ? DateTime.UtcNow : _lastLoadedWriteUtc;
+                    metaSnapshot.LastSavedUtc = DateTime.UtcNow;
+                    metaSnapshot.StateFingerprint = ComputeStateFingerprint(entriesSnapshot);
+                    metaSnapshot.StateFingerprintUtc = DateTime.UtcNow;
+
+                    var file = new ModStateFile { Meta = metaSnapshot, Entries = entriesSnapshot };
                     JsonSerializer.Serialize(writer, file, new JsonSerializerOptions { WriteIndented = true });
                     writer.Flush();
                 }
@@ -707,14 +851,14 @@ public sealed class ModStateService
                         using (var fs = new FileStream(path, FileMode.OpenOrCreate, FileAccess.Write, FileShare.Read, 65536, FileOptions.SequentialScan))
                         {
                             using var writer = new Utf8JsonWriter(fs, new JsonWriterOptions { Indented = true });
-                            var meta2 = new ModStateMeta
-                            {
-                                SchemaVersion = 2,
-                            GeneratedBy = GetGeneratedBy(),
-                            CreatedUtc = _lastLoadedWriteUtc == DateTime.MinValue ? DateTime.UtcNow : _lastLoadedWriteUtc,
-                            LastSavedUtc = DateTime.UtcNow,
-                        };
-                        var file2 = new ModStateFile { Meta = meta2, Entries = _state };
+                            metaSnapshot.SchemaVersion = 3;
+                            metaSnapshot.GeneratedBy = GetGeneratedBy();
+                            if (metaSnapshot.CreatedUtc == DateTime.MinValue)
+                                metaSnapshot.CreatedUtc = _lastLoadedWriteUtc == DateTime.MinValue ? DateTime.UtcNow : _lastLoadedWriteUtc;
+                            metaSnapshot.LastSavedUtc = DateTime.UtcNow;
+                            metaSnapshot.StateFingerprint = ComputeStateFingerprint(_state);
+                            metaSnapshot.StateFingerprintUtc = DateTime.UtcNow;
+                            var file2 = new ModStateFile { Meta = metaSnapshot, Entries = _state };
                         JsonSerializer.Serialize(writer, file2, new JsonSerializerOptions { WriteIndented = true });
                         writer.Flush();
                     }
@@ -905,6 +1049,75 @@ public sealed class ModStateService
         catch { return string.Empty; }
     }
 
+    private static PropertyInfo[] CreateStateFingerprintProperties()
+    {
+        var props = typeof(ModStateEntry).GetProperties(BindingFlags.Instance | BindingFlags.Public);
+        var list = new List<PropertyInfo>(props.Length);
+        for (int i = 0; i < props.Length; i++)
+        {
+            var p = props[i];
+            if (p.GetIndexParameters().Length != 0)
+                continue;
+            if (p.IsDefined(typeof(JsonIgnoreAttribute), inherit: true))
+                continue;
+            list.Add(p);
+        }
+        list.Sort(static (a, b) => string.CompareOrdinal(a.Name, b.Name));
+        return list.ToArray();
+    }
+
+    private static string ComputeStateFingerprint(IReadOnlyDictionary<string, ModStateEntry> entries)
+    {
+        try
+        {
+            var list = new List<KeyValuePair<string, ModStateEntry>>(entries.Count);
+            foreach (var kv in entries)
+            {
+                if (string.IsNullOrWhiteSpace(kv.Key))
+                    continue;
+                list.Add(kv);
+            }
+            list.Sort(static (a, b) => StringComparer.OrdinalIgnoreCase.Compare(a.Key, b.Key));
+
+            using var sha = SHA256.Create();
+            for (int i = 0; i < list.Count; i++)
+            {
+                var keyBytes = Encoding.UTF8.GetBytes(list[i].Key ?? string.Empty);
+                sha.TransformBlock(keyBytes, 0, keyBytes.Length, null, 0);
+                sha.TransformBlock(s_newLineUtf8, 0, s_newLineUtf8.Length, null, 0);
+
+                var entry = list[i].Value ?? new ModStateEntry { ModFolderName = list[i].Key ?? string.Empty };
+                for (int p = 0; p < s_stateFingerprintProperties.Length; p++)
+                {
+                    var prop = s_stateFingerprintProperties[p];
+                    var nameBytes = Encoding.UTF8.GetBytes(prop.Name);
+                    sha.TransformBlock(nameBytes, 0, nameBytes.Length, null, 0);
+                    sha.TransformBlock(s_newLineUtf8, 0, s_newLineUtf8.Length, null, 0);
+
+                    object? value = null;
+                    try { value = prop.GetValue(entry); } catch { value = null; }
+                    byte[] valueBytes;
+                    try
+                    {
+                        valueBytes = JsonSerializer.SerializeToUtf8Bytes(value, prop.PropertyType, s_stateFingerprintJsonOptions);
+                    }
+                    catch
+                    {
+                        valueBytes = Array.Empty<byte>();
+                    }
+                    sha.TransformBlock(valueBytes, 0, valueBytes.Length, null, 0);
+                    sha.TransformBlock(s_newLineUtf8, 0, s_newLineUtf8.Length, null, 0);
+                }
+            }
+            sha.TransformFinalBlock(Array.Empty<byte>(), 0, 0);
+            return Convert.ToHexString(sha.Hash ?? Array.Empty<byte>())[..12].ToLowerInvariant();
+        }
+        catch
+        {
+            return string.Empty;
+        }
+    }
+
     private static string GetGeneratedBy()
     {
         try
@@ -969,10 +1182,14 @@ public sealed class ModStateEntry
 
 public sealed class ModStateMeta
 {
-    public int SchemaVersion { get; set; } = 2;
+    public int SchemaVersion { get; set; } = 3;
     public string GeneratedBy { get; set; } = string.Empty;
     public DateTime CreatedUtc { get; set; } = DateTime.MinValue;
     public DateTime LastSavedUtc { get; set; } = DateTime.MinValue;
+    public string BackupFolderFingerprint { get; set; } = string.Empty;
+    public DateTime BackupFolderFingerprintUtc { get; set; } = DateTime.MinValue;
+    public string StateFingerprint { get; set; } = string.Empty;
+    public DateTime StateFingerprintUtc { get; set; } = DateTime.MinValue;
 }
 
 public sealed class ModStateFile

@@ -24,6 +24,7 @@ public sealed class TextureBackupService
     private readonly ModStateService _modStateService;
     private static readonly SemaphoreSlim s_backupLock = new(1, 1);
     private static readonly Regex s_hashPmpFileRegex = new("^[0-9A-Fa-f]{40}\\.pmp$", RegexOptions.Compiled);
+    private static readonly byte[] s_newLineUtf8 = new[] { (byte)'\n' };
     public event Action<(int processed, int total, int etaSeconds)>? OnPopulateOriginalBytesProgress;
 
     public TextureBackupService(ILogger logger, ShrinkUConfigService configService, PenumbraIpc penumbraIpc, ModStateService modStateService)
@@ -612,336 +613,602 @@ public sealed class TextureBackupService
         catch { return Task.FromResult(false); }
     }
 
+    public void ConfigureBackupFolderPath(string backupFolderPath)
+    {
+        try
+        {
+            var path = backupFolderPath ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(path))
+                return;
+
+            var current = _configService.Current.BackupFolderPath ?? string.Empty;
+            if (string.Equals(current, path, StringComparison.OrdinalIgnoreCase))
+                return;
+
+            try { _logger.LogDebug("[ShrinkU][Fingerprint] ConfigureBackupFolderPath: {from} -> {to}", current, path); } catch { }
+            _configService.Current.BackupFolderPath = path;
+            try { _configService.Save(); } catch { }
+            try { _modStateService.ReloadIfChanged(); } catch { }
+            try { _logger.LogDebug("[ShrinkU][Fingerprint] ConfigureBackupFolderPath: stateFile={stateFile}", _modStateService.GetStateFilePath()); } catch { }
+        }
+        catch { }
+    }
+
+    public bool IsBackupFolderFingerprintUnchanged()
+    {
+        try
+        {
+            try { _modStateService.ReloadIfChanged(); } catch { }
+
+            var backupDirectory = _configService.Current.BackupFolderPath;
+            if (string.IsNullOrWhiteSpace(backupDirectory) || !Directory.Exists(backupDirectory))
+            {
+                try { _logger.LogDebug("[ShrinkU][Fingerprint] Unchanged=false (backup dir missing): path={path} exists={exists} stateFile={stateFile}", backupDirectory ?? string.Empty, Directory.Exists(backupDirectory ?? string.Empty), _modStateService.GetStateFilePath()); } catch { }
+                return false;
+            }
+
+            var lastFingerprint = _modStateService.GetBackupFolderFingerprint();
+            if (string.IsNullOrWhiteSpace(lastFingerprint))
+            {
+                try { _logger.LogDebug("[ShrinkU][Fingerprint] Unchanged=false (no stored fingerprint): path={path} stateFile={stateFile}", backupDirectory, _modStateService.GetStateFilePath()); } catch { }
+                return false;
+            }
+
+            var currentStateFingerprint = _modStateService.ComputeStateFingerprintSnapshot();
+            var lastStateFingerprint = _modStateService.GetStateFingerprint();
+            if (string.IsNullOrWhiteSpace(lastStateFingerprint))
+            {
+                if (!string.IsNullOrWhiteSpace(currentStateFingerprint))
+                {
+                    try { _modStateService.SetStateFingerprint(currentStateFingerprint); } catch { }
+                    lastStateFingerprint = currentStateFingerprint;
+                    try { _logger.LogDebug("[ShrinkU][Fingerprint] Initialized missing state fingerprint: state={state} stateFile={stateFile}", currentStateFingerprint, _modStateService.GetStateFilePath()); } catch { }
+                }
+                else
+                {
+                    try { _logger.LogDebug("[ShrinkU][Fingerprint] Unchanged=false (no state fingerprint): path={path} stateFile={stateFile}", backupDirectory, _modStateService.GetStateFilePath()); } catch { }
+                    return false;
+                }
+            }
+
+            var currentFingerprint = ComputeBackupFolderFingerprint(backupDirectory);
+            if (string.IsNullOrWhiteSpace(currentFingerprint))
+            {
+                try { _logger.LogDebug("[ShrinkU][Fingerprint] Unchanged=false (compute failed): path={path} last={last} lastUtc={lastUtc} stateFile={stateFile}", backupDirectory, lastFingerprint, _modStateService.GetBackupFolderFingerprintUtc(), _modStateService.GetStateFilePath()); } catch { }
+                return false;
+            }
+
+            var folderUnchanged = string.Equals(currentFingerprint, lastFingerprint, StringComparison.OrdinalIgnoreCase);
+            var stateUnchanged = !string.IsNullOrWhiteSpace(currentStateFingerprint)
+                && string.Equals(currentStateFingerprint, lastStateFingerprint, StringComparison.OrdinalIgnoreCase);
+            var unchanged = folderUnchanged && stateUnchanged;
+            try
+            {
+                _logger.LogDebug("[ShrinkU][Fingerprint] Unchanged={unchanged}: path={path} folderCurrent={folderCurrent} folderLast={folderLast} folderLastUtc={folderLastUtc} stateCurrent={stateCurrent} stateLast={stateLast} stateLastUtc={stateLastUtc} stateFile={stateFile}",
+                    unchanged,
+                    backupDirectory,
+                    currentFingerprint,
+                    lastFingerprint,
+                    _modStateService.GetBackupFolderFingerprintUtc(),
+                    currentStateFingerprint ?? string.Empty,
+                    lastStateFingerprint ?? string.Empty,
+                    _modStateService.GetStateFingerprintUtc(),
+                    _modStateService.GetStateFilePath());
+            }
+            catch { }
+            return unchanged;
+        }
+        catch
+        {
+            try { _logger.LogDebug("[ShrinkU][Fingerprint] Unchanged=false (exception)"); } catch { }
+            return false;
+        }
+    }
+
     public async Task RefreshAllBackupStateAsync()
     {
         try
         {
             var trace = PerfTrace.Step(_logger, "RefreshAllBackupState total");
-            _modStateService.BeginBatch();
-            Dictionary<string, string> modPaths = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            try
+            string computedFingerprint = string.Empty;
+            string computedStateFingerprint = string.Empty;
+
+            var backupDirectoryForFingerprint = _configService.Current.BackupFolderPath;
+            if (!string.IsNullOrWhiteSpace(backupDirectoryForFingerprint) && Directory.Exists(backupDirectoryForFingerprint))
             {
-                modPaths = await _penumbraIpc.GetModPathsAsync().ConfigureAwait(false);
-                if ((modPaths == null || modPaths.Count == 0) && _penumbraIpc.APIAvailable)
+                computedFingerprint = ComputeBackupFolderFingerprint(backupDirectoryForFingerprint);
+                var lastFingerprint = _modStateService.GetBackupFolderFingerprint();
+                computedStateFingerprint = _modStateService.ComputeStateFingerprintSnapshot();
+                var lastStateFingerprint = _modStateService.GetStateFingerprint();
+                if (!string.IsNullOrWhiteSpace(computedFingerprint) &&
+                    !string.IsNullOrWhiteSpace(lastFingerprint) &&
+                    string.Equals(computedFingerprint, lastFingerprint, StringComparison.OrdinalIgnoreCase))
                 {
-                    for (var i = 0; i < 5 && (modPaths == null || modPaths.Count == 0); i++)
+                    var stateUnchanged = !string.IsNullOrWhiteSpace(computedStateFingerprint)
+                        && !string.IsNullOrWhiteSpace(lastStateFingerprint)
+                        && string.Equals(computedStateFingerprint, lastStateFingerprint, StringComparison.OrdinalIgnoreCase);
+                    if (stateUnchanged)
                     {
-                        await Task.Delay(200).ConfigureAwait(false);
-                        try { modPaths = await _penumbraIpc.GetModPathsAsync().ConfigureAwait(false); } catch { }
+                        try { _logger.LogDebug("[ShrinkU][Fingerprint] RefreshAllBackupState: skip (unchanged) path={path} folder={folder} state={state}", backupDirectoryForFingerprint, computedFingerprint, computedStateFingerprint); } catch { }
+                        trace.Dispose();
+                        return;
+                    }
+
+                    if (!string.IsNullOrWhiteSpace(computedStateFingerprint))
+                    {
+                        try { _modStateService.SetStateFingerprint(computedStateFingerprint); } catch { }
+                        try { _logger.LogDebug("[ShrinkU][Fingerprint] RefreshAllBackupState: updated state fingerprint path={path} state={state}", backupDirectoryForFingerprint, computedStateFingerprint); } catch { }
+                        trace.Dispose();
+                        return;
                     }
                 }
+            }
+
+            _modStateService.BeginBatch();
+            try
+            {
+                var stateSnapshot = _modStateService.Snapshot();
+
+                Dictionary<string, string> modPaths = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
                 try
                 {
-                    modPaths ??= new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-                    foreach (var kv in modPaths)
+                    modPaths = await _penumbraIpc.GetModPathsAsync().ConfigureAwait(false);
+                    if ((modPaths == null || modPaths.Count == 0) && _penumbraIpc.APIAvailable)
                     {
-                        var rp = (kv.Value ?? string.Empty).Replace('\\', '/').TrimEnd('/');
-                        _logger.LogDebug("PenumbraModPath mapping: {dir} -> {path}", kv.Key, rp);
+                        for (var i = 0; i < 5 && (modPaths == null || modPaths.Count == 0); i++)
+                        {
+                            await Task.Delay(200).ConfigureAwait(false);
+                            try { modPaths = await _penumbraIpc.GetModPathsAsync().ConfigureAwait(false); } catch { }
+                        }
+                    }
+                    try
+                    {
+                        modPaths ??= new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                        foreach (var kv in modPaths)
+                        {
+                            var rp = (kv.Value ?? string.Empty).Replace('\\', '/').TrimEnd('/');
+                            _logger.LogDebug("PenumbraModPath mapping: {dir} -> {path}", kv.Key, rp);
+                        }
+                    }
+                    catch { }
+                }
+                catch { }
+                Dictionary<string, string> displayByMod = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                try
+                {
+                    var list = _penumbraIpc.GetModList();
+                    foreach (var kv in list)
+                    {
+                        var dir = kv.Key ?? string.Empty;
+                        var name = kv.Value ?? string.Empty;
+                        if (!string.IsNullOrWhiteSpace(dir))
+                            displayByMod[dir] = name;
                     }
                 }
                 catch { }
-            }
-            catch { }
-            Dictionary<string, string> displayByMod = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            try
-            {
-                var list = _penumbraIpc.GetModList();
-                foreach (var kv in list)
+                var mods = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                try
                 {
-                    var dir = kv.Key ?? string.Empty;
-                    var name = kv.Value ?? string.Empty;
-                    if (!string.IsNullOrWhiteSpace(dir))
-                        displayByMod[dir] = name;
-                }
-            }
-            catch { }
-            var mods = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            try
-            {
-                foreach (var kv in _modStateService.Snapshot())
-                {
-                    if (!PenumbraIpc.ShouldSkipModRootFolder(kv.Key))
-                        mods.Add(kv.Key);
-                }
-            }
-            catch { }
-
-            try
-            {
-                var backupDirectory = _configService.Current.BackupFolderPath;
-                if (!string.IsNullOrWhiteSpace(backupDirectory) && Directory.Exists(backupDirectory))
-                {
-                    foreach (var dir in Directory.EnumerateDirectories(backupDirectory, "*", SearchOption.TopDirectoryOnly))
+                    foreach (var kv in _modStateService.Snapshot())
                     {
-                        var name = Path.GetFileName(dir);
-                        if (string.IsNullOrWhiteSpace(name)) continue;
-                        if (name.Equals("mod_state", StringComparison.OrdinalIgnoreCase)) continue;
-                        if (name.StartsWith("session_", StringComparison.OrdinalIgnoreCase)) continue;
-                        if (PenumbraIpc.ShouldSkipModRootFolder(name)) continue;
-                        mods.Add(name);
+                        if (!PenumbraIpc.ShouldSkipModRootFolder(kv.Key))
+                            mods.Add(kv.Key);
                     }
-                    foreach (var session in Directory.EnumerateDirectories(backupDirectory, "session_*", SearchOption.TopDirectoryOnly))
+                }
+                catch { }
+
+                try
+                {
+                    var backupDirectory = _configService.Current.BackupFolderPath;
+                    if (!string.IsNullOrWhiteSpace(backupDirectory) && Directory.Exists(backupDirectory))
                     {
-                        foreach (var modSub in Directory.EnumerateDirectories(session, "*", SearchOption.TopDirectoryOnly))
+                        foreach (var dir in Directory.EnumerateDirectories(backupDirectory, "*", SearchOption.TopDirectoryOnly))
                         {
-                            var name = Path.GetFileName(modSub);
+                            var name = Path.GetFileName(dir);
                             if (string.IsNullOrWhiteSpace(name)) continue;
+                            if (name.Equals("mod_state", StringComparison.OrdinalIgnoreCase)) continue;
+                            if (name.StartsWith("session_", StringComparison.OrdinalIgnoreCase)) continue;
                             if (PenumbraIpc.ShouldSkipModRootFolder(name)) continue;
                             mods.Add(name);
                         }
-                    }
-                }
-            }
-            catch { }
-
-            // Include all mods known to Penumbra so entries exist even without backups
-            try
-            {
-                var list = _penumbraIpc.GetModList();
-                foreach (var dir in list.Keys)
-                {
-                    if (!string.IsNullOrWhiteSpace(dir) && !PenumbraIpc.ShouldSkipModRootFolder(dir))
-                        mods.Add(dir);
-                }
-            }
-            catch { }
-
-            var indexTrace = PerfTrace.Step(_logger, "RefreshAllBackupState index");
-            var latestZipByMod = new Dictionary<string, (string file, DateTime created)>(StringComparer.OrdinalIgnoreCase);
-            var latestPmpByMod = new Dictionary<string, (string file, DateTime created)>(StringComparer.OrdinalIgnoreCase);
-            var modsWithZip = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            var modsWithPmp = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            var modsInSessions = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            try
-            {
-                var backupDirectory = _configService.Current.BackupFolderPath;
-                if (!string.IsNullOrWhiteSpace(backupDirectory) && Directory.Exists(backupDirectory))
-                {
-                    foreach (var dir in Directory.EnumerateDirectories(backupDirectory, "*", SearchOption.TopDirectoryOnly))
-                    {
-                        var modName = Path.GetFileName(dir);
-                        if (string.IsNullOrWhiteSpace(modName)) continue;
-                        if (modName.StartsWith("session_", StringComparison.OrdinalIgnoreCase)) continue;
-                        if (PenumbraIpc.ShouldSkipModRootFolder(modName)) continue;
-                        try
-                        {
-                            var latestZip = Directory.EnumerateFiles(dir, "backup_*.zip").OrderByDescending(f => f).FirstOrDefault();
-                            if (!string.IsNullOrEmpty(latestZip))
-                            {
-                                var created = File.GetCreationTimeUtc(latestZip);
-                                latestZipByMod[modName] = (System.IO.Path.GetFileName(latestZip), created);
-                                modsWithZip.Add(modName);
-                            }
-                        }
-                        catch { }
-                        try
-                        {
-                            var latestPmp = GetLatestPmpBackupPath(dir);
-                            if (!string.IsNullOrEmpty(latestPmp))
-                            {
-                                var created = File.GetCreationTimeUtc(latestPmp);
-                                latestPmpByMod[modName] = (System.IO.Path.GetFileName(latestPmp), created);
-                                modsWithPmp.Add(modName);
-                            }
-                        }
-                        catch { }
-                    }
-                    foreach (var session in Directory.EnumerateDirectories(backupDirectory, "session_*", SearchOption.TopDirectoryOnly))
-                    {
-                        try
+                        foreach (var session in Directory.EnumerateDirectories(backupDirectory, "session_*", SearchOption.TopDirectoryOnly))
                         {
                             foreach (var modSub in Directory.EnumerateDirectories(session, "*", SearchOption.TopDirectoryOnly))
                             {
                                 var name = Path.GetFileName(modSub);
                                 if (string.IsNullOrWhiteSpace(name)) continue;
                                 if (PenumbraIpc.ShouldSkipModRootFolder(name)) continue;
-                                var manifestPath = Path.Combine(modSub, "manifest.json");
-                                if (File.Exists(manifestPath))
-                                    modsInSessions.Add(name);
+                                mods.Add(name);
+                            }
+                        }
+                    }
+                }
+                catch { }
+
+                try
+                {
+                    var list = _penumbraIpc.GetModList();
+                    foreach (var dir in list.Keys)
+                    {
+                        if (!string.IsNullOrWhiteSpace(dir) && !PenumbraIpc.ShouldSkipModRootFolder(dir))
+                            mods.Add(dir);
+                    }
+                }
+                catch { }
+
+                var indexTrace = PerfTrace.Step(_logger, "RefreshAllBackupState index");
+                var latestZipByMod = new Dictionary<string, (string file, DateTime created)>(StringComparer.OrdinalIgnoreCase);
+                var latestPmpByMod = new Dictionary<string, (string file, DateTime created)>(StringComparer.OrdinalIgnoreCase);
+                var modsWithZip = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                var modsWithPmp = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                var modsInSessions = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                try
+                {
+                    var backupDirectory = _configService.Current.BackupFolderPath;
+                    if (!string.IsNullOrWhiteSpace(backupDirectory) && Directory.Exists(backupDirectory))
+                    {
+                        foreach (var dir in Directory.EnumerateDirectories(backupDirectory, "*", SearchOption.TopDirectoryOnly))
+                        {
+                            var modName = Path.GetFileName(dir);
+                            if (string.IsNullOrWhiteSpace(modName)) continue;
+                            if (modName.StartsWith("session_", StringComparison.OrdinalIgnoreCase)) continue;
+                            if (PenumbraIpc.ShouldSkipModRootFolder(modName)) continue;
+                            try
+                            {
+                                var latestZip = Directory.EnumerateFiles(dir, "backup_*.zip").OrderByDescending(f => f).FirstOrDefault();
+                                if (!string.IsNullOrEmpty(latestZip))
+                                {
+                                    var created = File.GetCreationTimeUtc(latestZip);
+                                    latestZipByMod[modName] = (System.IO.Path.GetFileName(latestZip), created);
+                                    modsWithZip.Add(modName);
+                                }
+                            }
+                            catch { }
+                            try
+                            {
+                                var latestPmp = GetLatestPmpBackupPath(dir);
+                                if (!string.IsNullOrEmpty(latestPmp))
+                                {
+                                    var created = File.GetCreationTimeUtc(latestPmp);
+                                    latestPmpByMod[modName] = (System.IO.Path.GetFileName(latestPmp), created);
+                                    modsWithPmp.Add(modName);
+                                }
+                            }
+                            catch { }
+                        }
+                        foreach (var session in Directory.EnumerateDirectories(backupDirectory, "session_*", SearchOption.TopDirectoryOnly))
+                        {
+                            try
+                            {
+                                foreach (var modSub in Directory.EnumerateDirectories(session, "*", SearchOption.TopDirectoryOnly))
+                                {
+                                    var name = Path.GetFileName(modSub);
+                                    if (string.IsNullOrWhiteSpace(name)) continue;
+                                    if (PenumbraIpc.ShouldSkipModRootFolder(name)) continue;
+                                    var manifestPath = Path.Combine(modSub, "manifest.json");
+                                    if (File.Exists(manifestPath))
+                                        modsInSessions.Add(name);
+                                }
+                            }
+                            catch { }
+                        }
+                    }
+                }
+                catch { }
+                indexTrace.Dispose();
+
+                var modsToProcess = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                try
+                {
+                    foreach (var mod in mods)
+                    {
+                        if (string.IsNullOrWhiteSpace(mod))
+                            continue;
+
+                        var newHasTex = modsWithZip.Contains(mod) || modsInSessions.Contains(mod);
+                        var newHasPmp = modsWithPmp.Contains(mod);
+                        var newZipName = latestZipByMod.TryGetValue(mod, out var zi) ? zi.file : string.Empty;
+                        var newZipCreated = latestZipByMod.TryGetValue(mod, out zi) ? zi.created : DateTime.MinValue;
+                        var newPmpName = latestPmpByMod.TryGetValue(mod, out var pi) ? pi.file : string.Empty;
+                        var newPmpCreated = latestPmpByMod.TryGetValue(mod, out pi) ? pi.created : DateTime.MinValue;
+
+                        if (!stateSnapshot.TryGetValue(mod, out var old) || old == null)
+                        {
+                            if (newHasTex || newHasPmp || !string.IsNullOrEmpty(newZipName) || !string.IsNullOrEmpty(newPmpName))
+                                modsToProcess.Add(mod);
+                            continue;
+                        }
+
+                        if (old.HasTextureBackup != newHasTex ||
+                            old.HasPmpBackup != newHasPmp ||
+                            !string.Equals(old.LatestZipBackupFileName ?? string.Empty, newZipName, StringComparison.Ordinal) ||
+                            old.LatestZipBackupCreatedUtc != newZipCreated ||
+                            !string.Equals(old.LatestPmpBackupFileName ?? string.Empty, newPmpName, StringComparison.Ordinal) ||
+                            old.LatestPmpBackupCreatedUtc != newPmpCreated)
+                        {
+                            modsToProcess.Add(mod);
+                        }
+                    }
+                }
+                catch { }
+
+                var metaTrace = PerfTrace.Step(_logger, "RefreshAllBackupState meta-index");
+                var versionByMod = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                var authorByMod = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                try
+                {
+                    var root = _penumbraIpc.ModDirectory ?? string.Empty;
+                    foreach (var mod in modsToProcess)
+                    {
+                        var absForMeta = string.IsNullOrWhiteSpace(root) ? string.Empty : System.IO.Path.Combine(root, mod);
+                        if (string.IsNullOrWhiteSpace(absForMeta) || !Directory.Exists(absForMeta))
+                            continue;
+                        var metaPath = System.IO.Path.Combine(absForMeta, "meta.json");
+                        if (!File.Exists(metaPath))
+                            continue;
+                        try
+                        {
+                            using var fs = new FileStream(metaPath, FileMode.Open, FileAccess.Read, FileShare.Read, 4096, FileOptions.SequentialScan);
+                            using var doc = JsonDocument.Parse(fs);
+                            if (doc.RootElement.TryGetProperty("Version", out var vers) && vers.ValueKind == JsonValueKind.String)
+                            {
+                                var v = vers.GetString() ?? string.Empty;
+                                if (!string.IsNullOrWhiteSpace(v)) versionByMod[mod] = v;
+                            }
+                            else if (doc.RootElement.TryGetProperty("FileVersion", out var fvers) && fvers.ValueKind == JsonValueKind.String)
+                            {
+                                var v = fvers.GetString() ?? string.Empty;
+                                if (!string.IsNullOrWhiteSpace(v)) versionByMod[mod] = v;
+                            }
+                            else if (doc.RootElement.TryGetProperty("VersionString", out var vstr) && vstr.ValueKind == JsonValueKind.String)
+                            {
+                                var v = vstr.GetString() ?? string.Empty;
+                                if (!string.IsNullOrWhiteSpace(v)) versionByMod[mod] = v;
+                            }
+                            if (doc.RootElement.TryGetProperty("Author", out var author) && author.ValueKind == JsonValueKind.String)
+                            {
+                                var a = author.GetString() ?? string.Empty;
+                                if (!string.IsNullOrWhiteSpace(a)) authorByMod[mod] = a;
                             }
                         }
                         catch { }
                     }
                 }
-            }
-            catch { }
-            indexTrace.Dispose();
+                catch { }
+                metaTrace.Dispose();
 
-            var metaTrace = PerfTrace.Step(_logger, "RefreshAllBackupState meta-index");
-            var versionByMod = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            var authorByMod = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            try
-            {
-                var root = _penumbraIpc.ModDirectory ?? string.Empty;
-                foreach (var mod in mods)
+                var concurrency = Math.Min(4, Environment.ProcessorCount);
+                using var gate = new SemaphoreSlim(concurrency, concurrency);
+                var tasks = new List<Task>(modsToProcess.Count);
+                foreach (var mod in modsToProcess)
                 {
-                    var absForMeta = string.IsNullOrWhiteSpace(root) ? string.Empty : System.IO.Path.Combine(root, mod);
-                    if (string.IsNullOrWhiteSpace(absForMeta) || !Directory.Exists(absForMeta))
-                        continue;
-                    var metaPath = System.IO.Path.Combine(absForMeta, "meta.json");
-                    if (!File.Exists(metaPath))
-                        continue;
-                    try
+                    tasks.Add(Task.Run(async () =>
                     {
-                        using var fs = new FileStream(metaPath, FileMode.Open, FileAccess.Read, FileShare.Read, 4096, FileOptions.SequentialScan);
-                        using var doc = JsonDocument.Parse(fs);
-                        if (doc.RootElement.TryGetProperty("Version", out var vers) && vers.ValueKind == JsonValueKind.String)
-                        {
-                            var v = vers.GetString() ?? string.Empty;
-                            if (!string.IsNullOrWhiteSpace(v)) versionByMod[mod] = v;
-                        }
-                        else if (doc.RootElement.TryGetProperty("FileVersion", out var fvers) && fvers.ValueKind == JsonValueKind.String)
-                        {
-                            var v = fvers.GetString() ?? string.Empty;
-                            if (!string.IsNullOrWhiteSpace(v)) versionByMod[mod] = v;
-                        }
-                        else if (doc.RootElement.TryGetProperty("VersionString", out var vstr) && vstr.ValueKind == JsonValueKind.String)
-                        {
-                            var v = vstr.GetString() ?? string.Empty;
-                            if (!string.IsNullOrWhiteSpace(v)) versionByMod[mod] = v;
-                        }
-                        if (doc.RootElement.TryGetProperty("Author", out var author) && author.ValueKind == JsonValueKind.String)
-                        {
-                            var a = author.GetString() ?? string.Empty;
-                            if (!string.IsNullOrWhiteSpace(a)) authorByMod[mod] = a;
-                        }
-                    }
-                    catch { }
-                }
-            }
-            catch { }
-            metaTrace.Dispose();
-
-            var concurrency = Math.Min(4, Environment.ProcessorCount);
-            using var gate = new SemaphoreSlim(concurrency, concurrency);
-            var tasks = new List<Task>(mods.Count);
-            foreach (var mod in mods)
-            {
-                tasks.Add(Task.Run(async () =>
-                {
-                    await gate.WaitAsync().ConfigureAwait(false);
-                    try
-                    {
-                        await Task.Yield();
-                        var sw = Stopwatch.StartNew();
-                        var modTrace = PerfTrace.Step(_logger, "RefreshAllBackupState mod " + mod);
-                        var hasTex = modsWithZip.Contains(mod) || modsInSessions.Contains(mod);
-                        var hasPmp = modsWithPmp.Contains(mod);
-                        _modStateService.UpdateBackupFlags(mod, hasTex, hasPmp);
-                        var abs = string.Empty;
+                        await gate.WaitAsync().ConfigureAwait(false);
                         try
                         {
-                            var root = _penumbraIpc.ModDirectory ?? string.Empty;
-                            if (!string.IsNullOrWhiteSpace(root))
-                                abs = System.IO.Path.Combine(root, mod);
-                            if (string.IsNullOrWhiteSpace(abs))
-                                abs = GetModAbsolutePath(mod) ?? string.Empty;
-                        }
-                        catch { abs = GetModAbsolutePath(mod) ?? string.Empty; }
-                        var relFolder = string.Empty;
-                        var relLeaf = string.Empty;
-                        try
-                        {
-                            var relFull = GetModPenumbraRelativePath(mod);
-                            if (!string.IsNullOrWhiteSpace(relFull))
+                            await Task.Yield();
+                            var sw = Stopwatch.StartNew();
+                            var modTrace = PerfTrace.Step(_logger, "RefreshAllBackupState mod " + mod);
+                            var hasTex = modsWithZip.Contains(mod) || modsInSessions.Contains(mod);
+                            var hasPmp = modsWithPmp.Contains(mod);
+                            _modStateService.UpdateBackupFlags(mod, hasTex, hasPmp);
+                            var abs = string.Empty;
+                            try
                             {
-                                relFull = relFull.Replace('\\', '/').TrimEnd('/');
-                                var dispName = displayByMod.TryGetValue(mod, out var dn) ? (dn ?? string.Empty) : string.Empty;
-                                if (!string.IsNullOrWhiteSpace(dispName))
+                                var root = _penumbraIpc.ModDirectory ?? string.Empty;
+                                if (!string.IsNullOrWhiteSpace(root))
+                                    abs = System.IO.Path.Combine(root, mod);
+                                if (string.IsNullOrWhiteSpace(abs))
+                                    abs = GetModAbsolutePath(mod) ?? string.Empty;
+                            }
+                            catch { abs = GetModAbsolutePath(mod) ?? string.Empty; }
+                            var relFolder = string.Empty;
+                            var relLeaf = string.Empty;
+                            try
+                            {
+                                var relFull = GetModPenumbraRelativePath(mod);
+                                if (!string.IsNullOrWhiteSpace(relFull))
                                 {
-                                    var pSegs = relFull.Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-                                    var dSegs = dispName.Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-                                    if (pSegs.Length >= dSegs.Length)
+                                    relFull = relFull.Replace('\\', '/').TrimEnd('/');
+                                    var dispName = displayByMod.TryGetValue(mod, out var dn) ? (dn ?? string.Empty) : string.Empty;
+                                    if (!string.IsNullOrWhiteSpace(dispName))
                                     {
-                                        bool tailMatches = true;
-                                        for (int i = 0; i < dSegs.Length; i++)
+                                        var pSegs = relFull.Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                                        var dSegs = dispName.Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                                        if (pSegs.Length >= dSegs.Length)
                                         {
-                                            var ps = pSegs[pSegs.Length - dSegs.Length + i];
-                                            var ds = dSegs[i];
-                                            if (!string.Equals(ps, ds, StringComparison.OrdinalIgnoreCase))
+                                            bool tailMatches = true;
+                                            for (int i = 0; i < dSegs.Length; i++)
                                             {
-                                                tailMatches = false;
-                                                break;
+                                                var ps = pSegs[pSegs.Length - dSegs.Length + i];
+                                                var ds = dSegs[i];
+                                                if (!string.Equals(ps, ds, StringComparison.OrdinalIgnoreCase))
+                                                {
+                                                    tailMatches = false;
+                                                    break;
+                                                }
+                                            }
+                                            if (tailMatches)
+                                            {
+                                                relFolder = string.Join('/', pSegs.Take(pSegs.Length - dSegs.Length));
+                                                relLeaf = dispName;
                                             }
                                         }
-                                        if (tailMatches)
+                                    }
+                                    if (string.IsNullOrWhiteSpace(relLeaf))
+                                    {
+                                        var idx = relFull.LastIndexOf('/');
+                                        if (idx >= 0)
                                         {
-                                            relFolder = string.Join('/', pSegs.Take(pSegs.Length - dSegs.Length));
-                                            relLeaf = dispName;
+                                            relFolder = relFull.Substring(0, idx);
+                                            relLeaf = relFull.Substring(idx + 1);
+                                        }
+                                        else
+                                        {
+                                            relFolder = string.Empty;
+                                            relLeaf = relFull;
                                         }
                                     }
                                 }
-                                if (string.IsNullOrWhiteSpace(relLeaf))
+                            }
+                            catch { relFolder = string.Empty; relLeaf = string.Empty; }
+                            var existingForMod = _modStateService.Get(mod);
+                            var ver = versionByMod.TryGetValue(mod, out var vv) ? vv : (existingForMod.CurrentVersion ?? string.Empty);
+                            var auth = authorByMod.TryGetValue(mod, out var aa) ? aa : (existingForMod.CurrentAuthor ?? string.Empty);
+                            _modStateService.UpdateCurrentModInfo(mod, abs, relFolder, ver, auth, relLeaf);
+                            try
+                            {
+                                var dn = displayByMod.TryGetValue(mod, out var disp) ? disp : string.Empty;
+                                if (!string.IsNullOrWhiteSpace(dn))
+                                    _modStateService.UpdateDisplayAndTags(mod, dn, Array.Empty<string>());
+                            }
+                            catch { }
+                            string zipName = string.Empty, zipVer = string.Empty;
+                            DateTime zipCreated = DateTime.MinValue;
+                            string pmpName = string.Empty, pmpVer = string.Empty;
+                            DateTime pmpCreated = DateTime.MinValue;
+                            try
+                            {
+                                if (latestZipByMod.TryGetValue(mod, out var zi))
                                 {
-                                    var idx = relFull.LastIndexOf('/');
-                                    if (idx >= 0)
-                                    {
-                                        relFolder = relFull.Substring(0, idx);
-                                        relLeaf = relFull.Substring(idx + 1);
-                                    }
-                                    else
-                                    {
-                                        relFolder = string.Empty;
-                                        relLeaf = relFull;
-                                    }
+                                    zipName = zi.file;
+                                    zipCreated = zi.created;
                                 }
                             }
-                        }
-                        catch { relFolder = string.Empty; relLeaf = string.Empty; }
-                        var existingForMod = _modStateService.Get(mod);
-                        var ver = versionByMod.TryGetValue(mod, out var vv) ? vv : (existingForMod.CurrentVersion ?? string.Empty);
-                        var auth = authorByMod.TryGetValue(mod, out var aa) ? aa : (existingForMod.CurrentAuthor ?? string.Empty);
-                        _modStateService.UpdateCurrentModInfo(mod, abs, relFolder, ver, auth, relLeaf);
-                        try
-                        {
-                            var dn = displayByMod.TryGetValue(mod, out var disp) ? disp : string.Empty;
-                            if (!string.IsNullOrWhiteSpace(dn))
-                                _modStateService.UpdateDisplayAndTags(mod, dn, Array.Empty<string>());
-                        }
-                        catch { }
-                        string zipName = string.Empty, zipVer = string.Empty;
-                        DateTime zipCreated = DateTime.MinValue;
-                        string pmpName = string.Empty, pmpVer = string.Empty;
-                        DateTime pmpCreated = DateTime.MinValue;
-                        try
-                        {
-                            if (latestZipByMod.TryGetValue(mod, out var zi))
+                            catch { }
+                            try
                             {
-                                zipName = zi.file;
-                                zipCreated = zi.created;
+                                if (latestPmpByMod.TryGetValue(mod, out var pi))
+                                {
+                                    pmpName = pi.file;
+                                    pmpCreated = pi.created;
+                                    pmpVer = _modStateService.Get(mod).LatestPmpBackupVersion;
+                                }
                             }
-                        }
-                        catch { }
-                        try
-                        {
-                            if (latestPmpByMod.TryGetValue(mod, out var pi))
+                            catch { }
+                            _modStateService.UpdateLatestBackupsInfo(mod, zipName, zipVer, zipCreated, pmpName, pmpVer, pmpCreated);
+                            var ms = (int)Math.Round(sw.Elapsed.TotalMilliseconds);
+                            if (ms > 1000)
                             {
-                                pmpName = pi.file;
-                                pmpCreated = pi.created;
-                                pmpVer = _modStateService.Get(mod).LatestPmpBackupVersion;
+                                try { _logger.LogDebug("RefreshAllBackupState mod {mod} took {ms}ms", mod, ms); } catch { }
                             }
+                            modTrace.Dispose();
                         }
                         catch { }
-                        _modStateService.UpdateLatestBackupsInfo(mod, zipName, zipVer, zipCreated, pmpName, pmpVer, pmpCreated);
-                        var ms = (int)Math.Round(sw.Elapsed.TotalMilliseconds);
-                        if (ms > 1000)
+                        finally
                         {
-                            try { _logger.LogDebug("RefreshAllBackupState mod {mod} took {ms}ms", mod, ms); } catch { }
+                            try { gate.Release(); } catch { }
                         }
-                        modTrace.Dispose();
-                    }
-                    catch { }
-                    finally
-                    {
-                        try { gate.Release(); } catch { }
-                    }
-                }));
+                    }));
+                }
+                try { await Task.WhenAll(tasks).ConfigureAwait(false); } catch { }
             }
-            try { await Task.WhenAll(tasks).ConfigureAwait(false); } catch { }
-            _modStateService.EndBatch();
+            finally
+            {
+                _modStateService.EndBatch();
+            }
+
+            try
+            {
+                var backupDirectory = _configService.Current.BackupFolderPath;
+                if (!string.IsNullOrWhiteSpace(backupDirectory) && Directory.Exists(backupDirectory) && !string.IsNullOrWhiteSpace(computedFingerprint))
+                {
+                    _modStateService.SetBackupFolderFingerprint(computedFingerprint);
+                    try { _logger.LogDebug("[ShrinkU][Fingerprint] RefreshAllBackupState: stored fingerprint path={path} fingerprint={fingerprint}", backupDirectory, computedFingerprint); } catch { }
+                }
+            }
+            catch { }
             trace.Dispose();
         }
         catch { }
+    }
+
+    private static string ComputeBackupFolderFingerprint(string backupDirectory)
+    {
+        try
+        {
+            var entries = new List<string>(4096);
+
+            foreach (var dir in Directory.EnumerateDirectories(backupDirectory, "*", SearchOption.TopDirectoryOnly))
+            {
+                var name = Path.GetFileName(dir) ?? string.Empty;
+                if (string.IsNullOrWhiteSpace(name))
+                    continue;
+                if (name.Equals("mod_state", StringComparison.OrdinalIgnoreCase))
+                    continue;
+                if (name.StartsWith("session_", StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                try
+                {
+                    var latestZip = Directory.EnumerateFiles(dir, "backup_*.zip").OrderByDescending(f => f, StringComparer.Ordinal).FirstOrDefault();
+                    if (!string.IsNullOrEmpty(latestZip) && File.Exists(latestZip))
+                    {
+                        var fi = new FileInfo(latestZip);
+                        entries.Add($"zip|{name}|{fi.Name}|{fi.CreationTimeUtc.Ticks}|{fi.Length}");
+                    }
+                }
+                catch { }
+
+                try
+                {
+                    var latestPmp = GetLatestPmpBackupPath(dir);
+                    if (!string.IsNullOrEmpty(latestPmp) && File.Exists(latestPmp))
+                    {
+                        var fi = new FileInfo(latestPmp);
+                        entries.Add($"pmp|{name}|{fi.Name}|{fi.CreationTimeUtc.Ticks}|{fi.Length}");
+                    }
+                }
+                catch { }
+            }
+
+            foreach (var session in Directory.EnumerateDirectories(backupDirectory, "session_*", SearchOption.TopDirectoryOnly))
+            {
+                var sessionName = Path.GetFileName(session) ?? string.Empty;
+                if (string.IsNullOrWhiteSpace(sessionName))
+                    continue;
+
+                try
+                {
+                    foreach (var modSub in Directory.EnumerateDirectories(session, "*", SearchOption.TopDirectoryOnly))
+                    {
+                        var modName = Path.GetFileName(modSub) ?? string.Empty;
+                        if (string.IsNullOrWhiteSpace(modName) || PenumbraIpc.ShouldSkipModRootFolder(modName))
+                            continue;
+                        var manifestPath = Path.Combine(modSub, "manifest.json");
+                        if (!File.Exists(manifestPath))
+                            continue;
+
+                        try
+                        {
+                            var fi = new FileInfo(manifestPath);
+                            entries.Add($"sess|{modName}|{sessionName}|{fi.LastWriteTimeUtc.Ticks}|{fi.Length}");
+                        }
+                        catch
+                        {
+                            entries.Add($"sess|{modName}|{sessionName}|0|0");
+                        }
+                    }
+                }
+                catch { }
+            }
+
+            entries.Sort(StringComparer.Ordinal);
+            using var sha = SHA256.Create();
+            for (int i = 0; i < entries.Count; i++)
+            {
+                var bytes = Encoding.UTF8.GetBytes(entries[i]);
+                sha.TransformBlock(bytes, 0, bytes.Length, null, 0);
+                sha.TransformBlock(s_newLineUtf8, 0, s_newLineUtf8.Length, null, 0);
+            }
+            sha.TransformFinalBlock(Array.Empty<byte>(), 0, 0);
+            return Convert.ToHexString(sha.Hash ?? Array.Empty<byte>())[..12].ToLowerInvariant();
+        }
+        catch
+        {
+            return string.Empty;
+        }
     }
 
     public async Task<bool> CreateFullModBackupAsync(string modFolderName, IProgress<(string,int,int)>? progress, CancellationToken token)
