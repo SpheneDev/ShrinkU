@@ -135,7 +135,7 @@ public sealed class Plugin : IDalamudPlugin
             var loc = asm?.Location ?? "unknown";
             var ts = File.Exists(loc) ? File.GetLastWriteTimeUtc(loc).ToString("O") : "unknown";
             var mvid = typeof(Plugin).Module?.ModuleVersionId.ToString() ?? "unknown";
-            _logger.LogDebug($"ShrinkU plugin initialized: DIAG-v3 version={ver} builtUtc={ts} mvid={mvid}");
+            _logger.LogInformation($"ShrinkU plugin initialized");
             _logger.LogDebug($"Assembly location: {loc}");
             try
             {
@@ -146,7 +146,7 @@ public sealed class Plugin : IDalamudPlugin
                 _logger.LogDebug($"Environment.CurrentDirectory: {curDir}");
                 _logger.LogDebug($"Plugin ConfigDirectory: {cfgDir}");
             }
-            catch (Exception ex) { _logger.LogDebug(ex, "Failed to log plugin environment details"); }
+            catch (Exception ex) { _logger.LogInformation(ex, "Failed to log plugin environment details"); }
         }
         catch (Exception ex) { _logger.LogError(ex, "Failed to log plugin diagnostics"); }
 
@@ -159,7 +159,7 @@ public sealed class Plugin : IDalamudPlugin
             if (!_configService.Current.FirstRunCompleted)
             {
                 _firstRunUi.IsOpen = true;
-                _logger.LogDebug("First run detected: opening setup guide window");
+                _logger.LogInformation("First run detected: opening setup guide window");
             }
             else
             {
@@ -170,44 +170,76 @@ public sealed class Plugin : IDalamudPlugin
                     _releaseChangelogUi.IsOpen = true;
                     _logger.LogDebug("Opening ShrinkU release notes window: current={cur} lastSeen={last}", currentVer, lastSeen);
                 }
+                
+                // Start background refresh with improved error handling and timeout
                 try { _conversionUi.SetStartupRefreshInProgress(true); }
                 catch (Exception ex) { _logger.LogDebug(ex, "Failed to set startup refresh flag"); }
-                try
+                
+                _initRefreshCts?.Cancel();
+                _initRefreshCts?.Dispose();
+                _initRefreshCts = new System.Threading.CancellationTokenSource(TimeSpan.FromSeconds(_configService.Current.StartupMaxDurationSeconds));
+                var token = _initRefreshCts.Token;
+                
+                try { _startupProgressUi.ResetAll(); _startupProgressUi.IsOpen = true; } catch { }
+                
+                _ = Task.Run(async () =>
                 {
-                    _initRefreshCts?.Cancel();
-                    _initRefreshCts?.Dispose();
-                    _initRefreshCts = new System.Threading.CancellationTokenSource();
-                    var token = _initRefreshCts.Token;
-                    try { _startupProgressUi.ResetAll(); _startupProgressUi.IsOpen = true; } catch { }
-                    _ = Task.Run(async () =>
+                    try
                     {
-                        try
-                        {
-                            try { _startupProgressUi.SetStep(1); } catch { }
-                            
-                            await _backupService.RefreshAllBackupStateAsync().ConfigureAwait(false);
-                            try { _startupProgressUi.MarkBackupDone(); _startupProgressUi.SetStep(2); } catch { }
-                            await _backupService.PopulateMissingOriginalBytesAsync(token).ConfigureAwait(false);
-                            try { _startupProgressUi.SetStep(3); } catch { }
-                            var threads = Math.Max(1, _configService.Current.MaxStartupThreads);
-                            await _conversionService.RunInitialParallelUpdateAsync(threads, token).ConfigureAwait(false);
-                            try { _startupProgressUi.SetStep(4); } catch { }
-                            await _conversionService.UpdateAllModUsedTextureFilesAsync().ConfigureAwait(false);
-                            try { _startupProgressUi.MarkUsedDone(); _startupProgressUi.SetStep(5); } catch { }
-                            
-                            try { _modStateService.Save(); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to save mod state"); }
-                            try { _startupProgressUi.MarkSaveDone(); } catch { }
-                            try { _conversionUi.TriggerStartupRescan(); } catch { }
-                        }
-                        catch (Exception ex) { _logger.LogError(ex, "Initial refresh failed"); }
-                        finally
-                        {
-                            try { _conversionUi.SetStartupRefreshInProgress(false); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to clear startup refresh flag"); }
-                            try { _startupProgressUi.IsOpen = false; } catch { }
-                        }
-                    }, token);
-                }
-                catch (Exception ex) { _logger.LogError(ex, "Failed to start initial refresh task"); }
+                        try { _startupProgressUi.SetStep(1); } catch { }
+
+                        var backupStopwatch = System.Diagnostics.Stopwatch.StartNew();
+                        await _backupService.RefreshAllBackupStateAsync().ConfigureAwait(false);
+                        backupStopwatch.Stop();
+                        _logger.LogInformation("Backup state refresh completed in {ms}ms", backupStopwatch.ElapsedMilliseconds);
+                        
+                        try { _startupProgressUi.MarkBackupDone(); _startupProgressUi.SetStep(2); } catch { }
+                        
+                        var populateStopwatch = System.Diagnostics.Stopwatch.StartNew();
+                        await _backupService.PopulateMissingOriginalBytesAsync(token).ConfigureAwait(false);
+                        populateStopwatch.Stop();
+                        _logger.LogInformation("Missing original bytes populated in {ms}ms", populateStopwatch.ElapsedMilliseconds);
+                        
+                        try { _startupProgressUi.SetStep(3); } catch { }
+                        
+                        var threads = Math.Max(1, _configService.Current.MaxStartupThreads);
+                        _logger.LogInformation("Starting parallel conversion update with {threads} threads", threads);
+                        var conversionStopwatch = System.Diagnostics.Stopwatch.StartNew();
+                        await _conversionService.RunInitialParallelUpdateAsync(threads, token).ConfigureAwait(false);
+                        conversionStopwatch.Stop();
+                        _logger.LogInformation("Parallel conversion update completed in {ms}ms", conversionStopwatch.ElapsedMilliseconds);
+                        
+                        try { _startupProgressUi.SetStep(4); } catch { }
+                        
+                        var updateStopwatch = System.Diagnostics.Stopwatch.StartNew();
+                        await _conversionService.UpdateAllModUsedTextureFilesAsync().ConfigureAwait(false);
+                        updateStopwatch.Stop();
+                        _logger.LogInformation("Used texture files update completed in {ms}ms", updateStopwatch.ElapsedMilliseconds);
+                        
+                        try { _startupProgressUi.MarkUsedDone(); _startupProgressUi.SetStep(5); } catch { }
+
+                        try { _modStateService.Save(); _logger.LogDebug("Mod state saved successfully"); } 
+                        catch (Exception ex) { _logger.LogInformation(ex, "Failed to save mod state"); }
+                        
+                        try { _startupProgressUi.MarkSaveDone(); } catch { }
+                        try { _conversionUi.TriggerStartupRescan(); _logger.LogDebug("Startup rescan triggered"); } 
+                        catch (Exception ex) { _logger.LogInformation(ex, "Failed to trigger startup rescan"); }
+                        
+                        _logger.LogInformation("ShrinkU startup refresh completed successfully");
+                    }
+                    catch (OperationCanceledException ex) when (token.IsCancellationRequested)
+                    {
+                        _logger.LogWarning(ex, "Startup refresh cancelled due to timeout");
+                    }
+                    catch (Exception ex) { _logger.LogError(ex, "Initial refresh failed"); }
+                    finally
+                    {
+                        try { _conversionUi.SetStartupRefreshInProgress(false); } catch (Exception ex) { _logger.LogInformation(ex, "Failed to clear startup refresh flag"); }
+                        try { _startupProgressUi.IsOpen = false; } catch { }
+                        _initRefreshCts?.Dispose();
+                        _initRefreshCts = null;
+                    }
+                }, token);
             }
         }
         catch (Exception ex) { _logger.LogError(ex, "Failed to determine initial UI state"); }
@@ -215,22 +247,28 @@ public sealed class Plugin : IDalamudPlugin
 
     public void Dispose()
     {
-        try { _modStateService.SetSavingEnabled(false); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to disable mod state saving during dispose"); }
+        try { _modStateService.SetSavingEnabled(false); } catch (Exception ex) { _logger.LogInformation(ex, "Failed to disable mod state saving during dispose"); }
         _windowSystem.RemoveAllWindows();
         _pluginInterface.UiBuilder.Draw -= DrawUi;
         _pluginInterface.UiBuilder.OpenConfigUi -= OpenConfigUi;
         _pluginInterface.UiBuilder.OpenMainUi -= OpenMainUi;
-        try { _initRefreshCts?.Cancel(); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to cancel init refresh CTS"); }
-        try { _initRefreshCts?.Dispose(); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to dispose init refresh CTS"); }
+        
+        // Cancel and dispose init refresh cancellation token source
+        try { _initRefreshCts?.Cancel(); } catch (Exception ex) { _logger.LogInformation(ex, "Failed to cancel init refresh CTS"); }
+        try { _initRefreshCts?.Dispose(); } catch (Exception ex) { _logger.LogInformation(ex, "Failed to dispose init refresh CTS"); }
         _initRefreshCts = null;
-        try { _conversionUi.ShutdownBackgroundWork(); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to shutdown conversion UI background work"); }
-        try { _conversionUi.Dispose(); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to dispose conversion UI"); }
-        try { _settingsUi.Dispose(); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to dispose settings UI"); }
-        try { _conversionService.Dispose(); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to dispose conversion service"); }
-        try { _penumbraExtension.Dispose(); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to dispose Penumbra extension"); }
-        try { _shrinkuIpc.Dispose(); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to dispose ShrinkU IPC"); }
-        try { _logger.LogDebug("ShrinkU plugin disposing: releasing Penumbra subscriptions (DIAG-v3)"); _penumbraIpc.Dispose(); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to dispose Penumbra IPC"); }
-        try { _commandManager.RemoveHandler("/shrinku"); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to remove /shrinku command handler"); }
+        
+        // Shutdown background work and dispose services in reverse order of creation
+        try { _conversionUi.ShutdownBackgroundWork(); } catch (Exception ex) { _logger.LogInformation(ex, "Failed to shutdown conversion UI background work"); }
+        try { _conversionUi.Dispose(); } catch (Exception ex) { _logger.LogInformation(ex, "Failed to dispose conversion UI"); }
+        try { _settingsUi.Dispose(); } catch (Exception ex) { _logger.LogInformation(ex, "Failed to dispose settings UI"); }
+        try { _conversionService.Dispose(); } catch (Exception ex) { _logger.LogInformation(ex, "Failed to dispose conversion service"); }
+        try { _penumbraExtension.Dispose(); } catch (Exception ex) { _logger.LogInformation(ex, "Failed to dispose Penumbra extension"); }
+        try { _shrinkuIpc.Dispose(); } catch (Exception ex) { _logger.LogInformation(ex, "Failed to dispose ShrinkU IPC"); }
+        try { _penumbraIpc.Dispose(); } catch (Exception ex) { _logger.LogInformation(ex, "Failed to dispose Penumbra IPC"); }
+        try { _commandManager.RemoveHandler("/shrinku"); } catch (Exception ex) { _logger.LogInformation(ex, "Failed to remove /shrinku command handler"); }
+        
+        _logger.LogInformation("ShrinkU plugin disposed successfully");
     }
 
     private void DrawUi()
@@ -322,9 +360,9 @@ public sealed class Plugin : IDalamudPlugin
                     }
                 }
                 catch { }
-                _logger.LogDebug("Startup privilege level: admin={admin}", isAdmin);
+                _logger.LogInformation("Startup privilege level: admin={admin}", isAdmin);
             }
-            catch (Exception ex) { _logger.LogDebug(ex, "Privilege check failed"); }
+            catch (Exception ex) { _logger.LogInformation(ex, "Privilege check failed"); }
 
             try
             {
