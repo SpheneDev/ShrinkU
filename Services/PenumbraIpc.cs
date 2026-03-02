@@ -69,6 +69,12 @@ public sealed class PenumbraIpc : IDisposable
     private int _modSettingLogBurstCount = 0;
     private ModSettingChange _modSettingLogLastChange = default;
     private string _modSettingLogLastDir = string.Empty;
+    private readonly object _groupedScanLock = new();
+    private Dictionary<string, List<string>>? _groupedScanCache;
+    private DateTime _groupedScanCacheUtc = DateTime.MinValue;
+    private string _groupedScanCacheRoot = string.Empty;
+    private Task<Dictionary<string, List<string>>>? _groupedScanInFlight;
+    private static readonly TimeSpan s_groupedScanCacheTtl = TimeSpan.FromSeconds(30);
 
     public PenumbraIpc(IDalamudPluginInterface pi, ILogger logger)
     {
@@ -112,26 +118,29 @@ public sealed class PenumbraIpc : IDisposable
         {
             _subModAdded = Penumbra.Api.IpcSubscribers.ModAdded.Subscriber(pi, dir =>
             {
-                _logger.LogDebug("Penumbra mod added: {dir}", dir);
+                _logger.LogTrace("Penumbra mod added");
                 ModAdded?.Invoke(dir);
-                _logger.LogDebug("Penumbra ModsChanged broadcast: source=ModAdded for {dir}", dir);
+                ClearGroupedScanCache();
+                _logger.LogTrace("Penumbra ModsChanged broadcast: source=ModAdded");
                 ModsChanged?.Invoke();
             });
 
             _subModDeleted = Penumbra.Api.IpcSubscribers.ModDeleted.Subscriber(pi, dir =>
             {
-                _logger.LogDebug("Penumbra mod deleted: {dir}", dir);
+                _logger.LogTrace("Penumbra mod deleted");
                 ModDeleted?.Invoke(dir);
-                _logger.LogDebug("Penumbra ModsChanged broadcast: source=ModDeleted for {dir}", dir);
+                ClearGroupedScanCache();
+                _logger.LogTrace("Penumbra ModsChanged broadcast: source=ModDeleted");
                 ModsChanged?.Invoke();
             });
 
             _subModMoved = Penumbra.Api.IpcSubscribers.ModMoved.Subscriber(pi, (oldDir, newDir) =>
             {
-                _logger.LogDebug("Penumbra mod moved: {oldDir} -> {newDir}", oldDir, newDir);
+                _logger.LogTrace("Penumbra mod moved");
                 ModMoved?.Invoke(oldDir, newDir);
+                ClearGroupedScanCache();
                 // Moving a mod changes its hierarchical path; broadcast ModsChanged so consumers refresh paths
-                _logger.LogDebug("Penumbra ModsChanged broadcast: source=ModMoved for {oldDir} -> {newDir}", oldDir, newDir);
+                _logger.LogTrace("Penumbra ModsChanged broadcast: source=ModMoved");
                 ModsChanged?.Invoke();
             });
 
@@ -159,7 +168,7 @@ public sealed class PenumbraIpc : IDisposable
                                 var lastChange = _modSettingLogLastChange;
                                 var lastDir = _modSettingLogLastDir;
                                 _modSettingLogBurstCount = 0;
-                                _logger.LogDebug("Penumbra mod setting changed: {change} for {modDir} x{count}", lastChange, lastDir, count);
+                                _logger.LogTrace("Penumbra mod setting changed: {change} x{count}", lastChange, count);
                             }
                             catch (TaskCanceledException) { }
                             catch { }
@@ -171,18 +180,19 @@ public sealed class PenumbraIpc : IDisposable
 
             _subEnabledChange = Penumbra.Api.IpcSubscribers.EnabledChange.Subscriber(pi, enabled =>
             {
-                _logger.LogDebug("Penumbra enabled state changed: {enabled}", enabled);
+                _logger.LogTrace("Penumbra enabled state changed: {enabled}", enabled);
                 PenumbraEnabledChanged?.Invoke(enabled);
                 // Re-check API availability and mod root when the plugin state changes.
                 APIAvailable = CheckApi();
-                _logger.LogDebug("Penumbra enabled change processed; no ModsChanged broadcast");
+                _logger.LogTrace("Penumbra enabled change processed; no ModsChanged broadcast");
             });
 
             _subInitialized = Penumbra.Api.IpcSubscribers.Initialized.Subscriber(pi, () =>
             {
-                _logger.LogDebug("Penumbra API initialized");
+                _logger.LogTrace("Penumbra API initialized");
                 APIAvailable = CheckApi();
-                _logger.LogDebug("Penumbra ModsChanged broadcast: source=Initialized");
+                ClearGroupedScanCache();
+                _logger.LogTrace("Penumbra ModsChanged broadcast: source=Initialized");
                 ModsChanged?.Invoke();
                 // Start path watcher when API is ready
                 StartPathWatcher();
@@ -190,9 +200,10 @@ public sealed class PenumbraIpc : IDisposable
 
             _subDisposed = Penumbra.Api.IpcSubscribers.Disposed.Subscriber(pi, () =>
             {
-                _logger.LogDebug("Penumbra API disposed");
+                _logger.LogTrace("Penumbra API disposed");
                 APIAvailable = false;
-                _logger.LogDebug("Penumbra ModsChanged broadcast: source=Disposed");
+                ClearGroupedScanCache();
+                _logger.LogTrace("Penumbra ModsChanged broadcast: source=Disposed");
                 ModsChanged?.Invoke();
                 // Stop path watcher when API is disposed
                 StopPathWatcher();
@@ -203,7 +214,7 @@ public sealed class PenumbraIpc : IDisposable
             {
                 try
                 {
-                    _logger.LogDebug("Penumbra object redrawn: index={index}", index);
+                    _logger.LogTrace("Penumbra object redrawn: index={index}", index);
                     try { RawGameObjectRedrawn?.Invoke(ptr, index); } catch { }
                     try { PlayerResourcesChanged?.Invoke(); } catch { }
                 }
@@ -372,6 +383,7 @@ public sealed class PenumbraIpc : IDisposable
                             if (confirmed && (now - lastBroadcastUtc) > TimeSpan.FromSeconds(5))
                             {
                                 _lastPaths = confirm;
+                                ClearGroupedScanCache();
                                 _logger.LogDebug("Penumbra ModsChanged broadcast: source=PathWatcher");
                                 try { ModsChanged?.Invoke(); } catch { }
                                 lastBroadcastUtc = now;
@@ -506,49 +518,95 @@ public sealed class PenumbraIpc : IDisposable
 
     public Task<Dictionary<string, List<string>>> ScanModTexturesGroupedAsync()
     {
-        return Task.Run(() =>
+        var modDir = ModDirectory;
+        if (string.IsNullOrWhiteSpace(modDir) || !Directory.Exists(modDir))
         {
-            var start = DateTime.UtcNow;
-            var result = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
-            int fileCount = 0;
-            try
-            {
-                if (string.IsNullOrWhiteSpace(ModDirectory) || !Directory.Exists(ModDirectory))
-                    return result;
+            return Task.FromResult(new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase));
+        }
 
-                var root = Path.GetFullPath(ModDirectory!);
-                foreach (var file in Directory.EnumerateFiles(root, "*.*", SearchOption.AllDirectories))
+        var root = Path.GetFullPath(modDir);
+        lock (_groupedScanLock)
+        {
+            if (_groupedScanCache != null &&
+                string.Equals(_groupedScanCacheRoot, root, StringComparison.OrdinalIgnoreCase) &&
+                DateTime.UtcNow - _groupedScanCacheUtc <= s_groupedScanCacheTtl)
+            {
+                return Task.FromResult(CloneGroupedScanCache(_groupedScanCache));
+            }
+
+            if (_groupedScanInFlight != null)
+            {
+                return _groupedScanInFlight;
+            }
+
+            _groupedScanInFlight = Task.Run(() =>
+            {
+                var start = DateTime.UtcNow;
+                var result = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+                int fileCount = 0;
+                try
                 {
-                    if (file.EndsWith(".tex", StringComparison.OrdinalIgnoreCase)
-                        || file.EndsWith(".dds", StringComparison.OrdinalIgnoreCase))
+                    foreach (var file in Directory.EnumerateFiles(root, "*.*", SearchOption.AllDirectories))
                     {
-                        var rel = Path.GetRelativePath(root, file);
-                        var parts = rel.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-                        var modName = parts.Length > 1 ? parts[0] : "<unknown>";
-                        if (ShouldSkipModRootFolder(modName))
-                            continue;
-                        if (!result.TryGetValue(modName, out var list))
+                        if (file.EndsWith(".tex", StringComparison.OrdinalIgnoreCase)
+                            || file.EndsWith(".dds", StringComparison.OrdinalIgnoreCase))
                         {
-                            list = new List<string>();
-                            result[modName] = list;
+                            var rel = Path.GetRelativePath(root, file);
+                            var parts = rel.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                            var modName = parts.Length > 1 ? parts[0] : "<unknown>";
+                            if (ShouldSkipModRootFolder(modName))
+                                continue;
+                            if (!result.TryGetValue(modName, out var list))
+                            {
+                                list = new List<string>();
+                                result[modName] = list;
+                            }
+                            list.Add(file);
+                            fileCount++;
                         }
-                        list.Add(file);
-                        fileCount++;
                     }
                 }
-            }
-            catch
-            {
-                // Ignore scan errors
-            }
-            try
-            {
-                var elapsedMs = (int)Math.Round((DateTime.UtcNow - start).TotalMilliseconds);
-                _logger.LogDebug("Grouped texture scan: mods={mods}, files={files}, elapsedMs={elapsed}", result.Count, fileCount, elapsedMs);
-            }
-            catch { }
-            return result;
-        });
+                catch
+                {
+                }
+                try
+                {
+                    var elapsedMs = (int)Math.Round((DateTime.UtcNow - start).TotalMilliseconds);
+                    _logger.LogDebug("Grouped texture scan: mods={mods}, files={files}, elapsedMs={elapsed}", result.Count, fileCount, elapsedMs);
+                }
+                catch { }
+                lock (_groupedScanLock)
+                {
+                    _groupedScanCache = CloneGroupedScanCache(result);
+                    _groupedScanCacheUtc = DateTime.UtcNow;
+                    _groupedScanCacheRoot = root;
+                    _groupedScanInFlight = null;
+                }
+                return CloneGroupedScanCache(result);
+            });
+            return _groupedScanInFlight;
+        }
+    }
+
+    private void ClearGroupedScanCache()
+    {
+        lock (_groupedScanLock)
+        {
+            _groupedScanCache = null;
+            _groupedScanCacheUtc = DateTime.MinValue;
+            _groupedScanCacheRoot = string.Empty;
+            _groupedScanInFlight = null;
+        }
+    }
+
+    private static Dictionary<string, List<string>> CloneGroupedScanCache(Dictionary<string, List<string>> source)
+    {
+        var copy = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+        foreach (var kvp in source)
+        {
+            copy[kvp.Key] = kvp.Value != null ? new List<string>(kvp.Value) : new List<string>();
+        }
+        return copy;
     }
 
     public Task<Dictionary<string, string>> GetModDisplayNamesAsync()

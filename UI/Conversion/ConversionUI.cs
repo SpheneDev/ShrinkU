@@ -1730,7 +1730,7 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                 if (allowHeavy)
                 {
                     TraceAction(origin, "GetGroupedCandidateTexturesAsync");
-                    grouped = await _conversionService.GetGroupedCandidateTexturesAsync().ConfigureAwait(false);
+                    grouped = await _conversionService.GetGroupedCandidateTexturesAsync(force).ConfigureAwait(false);
                     _lastHeavyScanAt = DateTime.UtcNow;
                     _logger.LogDebug("Heavy scan executed: origin={origin} groupedMods={mods}", origin, grouped?.Count ?? 0);
 

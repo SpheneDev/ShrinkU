@@ -392,7 +392,7 @@ public sealed class ModStateService
         }
     }
 
-    public void UpdateTextureFiles(string mod, IReadOnlyList<string>? files)
+    public void UpdateTextureFiles(string mod, IReadOnlyList<string>? files, DateTime? lastWriteUtc = null)
     {
         lock (_lock)
         {
@@ -404,6 +404,12 @@ public sealed class ModStateService
             }
             e.TotalTextures = list.Count;
             e.TextureFiles = list;
+            e.LastScanUtc = DateTime.UtcNow;
+            if (lastWriteUtc.HasValue)
+            {
+                e.LastKnownWriteUtc = lastWriteUtc.Value;
+            }
+            e.NeedsRescan = false;
             e.LastUpdatedUtc = DateTime.UtcNow;
             WriteDetail(mod, list, null);
             _lastSaveReason = nameof(UpdateTextureFiles);
@@ -1168,6 +1174,7 @@ public sealed class ModStateEntry
     public DateTime LatestPmpBackupCreatedUtc { get; set; } = DateTime.MinValue;
     public LatestBackupInfo? LatestBackup { get; set; } = null;
     public DateTime LastScanUtc { get; set; } = DateTime.MinValue;
+    public DateTime LastKnownWriteUtc { get; set; } = DateTime.MinValue;
     public DateTime LastConvertUtc { get; set; } = DateTime.MinValue;
     public DateTime LastRestoreUtc { get; set; } = DateTime.MinValue;
     public string LastChangeReason { get; set; } = string.Empty;

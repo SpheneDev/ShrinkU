@@ -3774,7 +3774,7 @@ public sealed class TextureBackupService
                 if (File.Exists(file))
                 {
                     File.Delete(file);
-                    _logger.LogDebug("Rolled back restored file {file}", file);
+                    _logger.LogTrace("Rolled back restored file {file}", file);
                 }
             }
             catch (Exception ex)
@@ -3794,7 +3794,7 @@ public sealed class TextureBackupService
             if (string.IsNullOrWhiteSpace(backupDirectory) || string.IsNullOrWhiteSpace(modFolderName))
                 return stats;
             var modDir = Path.Combine(backupDirectory, modFolderName);
-            try { _logger.LogDebug("[ShrinkU] Populate: ComputeSavings start mod={mod}", modFolderName); } catch { }
+            try { _logger.LogTrace("[ShrinkU] Populate: ComputeSavings start mod={mod}", modFolderName); } catch { }
             
 
             // Prefer latest PMP for accurate original sizes
@@ -3897,12 +3897,15 @@ public sealed class TextureBackupService
                 stats.OriginalBytes = stats.CurrentBytes;
             }
 
-            try { _logger.LogDebug("[ShrinkU] Populate: ComputeSavings done mod={mod} original={orig} current={cur} comparedFiles={cmp}", modFolderName, stats.OriginalBytes, stats.CurrentBytes, stats.ComparedFiles); } catch { }
+            try { _logger.LogTrace("[ShrinkU] Populate: ComputeSavings done mod={mod} original={orig} current={cur} comparedFiles={cmp}", modFolderName, stats.OriginalBytes, stats.CurrentBytes, stats.ComparedFiles); } catch { }
 
             try { _modStateService.UpdateSavings(modFolderName, stats.OriginalBytes, stats.CurrentBytes, stats.ComparedFiles); } catch { }
             try { _modStateService.Save(); } catch { }
         }
-        catch { }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[ShrinkU] ComputeSavings failed: mod={mod}", modFolderName);
+        }
         await Task.CompletedTask;
         return stats;
     }
@@ -3922,7 +3925,7 @@ public sealed class TextureBackupService
                 if (!string.IsNullOrWhiteSpace(mod))
                     candidates.Add(mod);
             }
-            try { _logger.LogDebug("[ShrinkU] PopulateMissingOriginalBytes: candidates={count}", candidates.Count); } catch { }
+            try { _logger.LogInformation("[ShrinkU] PopulateMissingOriginalBytes: candidates={count}", candidates.Count); } catch { }
             if (candidates.Count == 0) return;
             Dictionary<string, List<string>> grouped = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
             try { grouped = await _penumbraIpc.ScanModTexturesGroupedAsync().ConfigureAwait(false); } catch { }
@@ -3942,13 +3945,13 @@ public sealed class TextureBackupService
                         try
                         {
                             if (token.IsCancellationRequested) return;
-                            try { _logger.LogDebug("[ShrinkU] PopulateMissingOriginalBytes: compute mod={mod}", mod); } catch { }
+                            try { _logger.LogTrace("[ShrinkU] PopulateMissingOriginalBytes: compute mod={mod}", mod); } catch { }
                             var entry = snapshot.TryGetValue(mod, out var e) ? e : null;
                             bool hasBackup = entry != null && (entry.HasTextureBackup || entry.HasPmpBackup);
                             if (hasBackup)
                             {
                                 var stats = await ComputeSavingsForModAsync(mod).ConfigureAwait(false);
-                                try { _logger.LogDebug("[ShrinkU] PopulateMissingOriginalBytes: stats mod={mod} original={orig} current={cur} comparedFiles={cmp}", mod, stats.OriginalBytes, stats.CurrentBytes, stats.ComparedFiles); } catch { }
+                                try { _logger.LogTrace("[ShrinkU] PopulateMissingOriginalBytes: stats mod={mod} original={orig} current={cur} comparedFiles={cmp}", mod, stats.OriginalBytes, stats.CurrentBytes, stats.ComparedFiles); } catch { }
                                 System.Threading.Interlocked.Increment(ref updated);
                                 try { var elapsed = DateTime.UtcNow - start; var remaining = Math.Max(0, candidates.Count - updated); var eta = updated > 0 ? (int)Math.Round(elapsed.TotalSeconds / updated * remaining) : 0; OnPopulateOriginalBytesProgress?.Invoke((updated, candidates.Count, eta)); } catch { }
                                 return;
@@ -3961,7 +3964,7 @@ public sealed class TextureBackupService
                             if (totalTextures == 0 && entry != null && entry.TotalTextures > 0)
                             {
                                 skipCountUpdate = true;
-                                try { _logger.LogDebug("[ShrinkU] PopulateMissingOriginalBytes: Skip UpdateTextureCount for {mod}: new=0, old={old} (transient protection)", mod, entry.TotalTextures); } catch { }
+                                try { _logger.LogTrace("[ShrinkU] PopulateMissingOriginalBytes: Skip UpdateTextureCount for {mod}: new=0, old={old} (transient protection)", mod, entry.TotalTextures); } catch { }
                             }
 
                             for (int i = 0; i < list.Count; i++)
@@ -3974,11 +3977,14 @@ public sealed class TextureBackupService
                             if (!skipCountUpdate)
                                 try { _modStateService.UpdateTextureCount(mod, totalTextures); } catch { }
                             try { _modStateService.UpdateSavings(mod, original, current, 0); } catch { }
-                            try { _logger.LogDebug("[ShrinkU] PopulateMissingOriginalBytes: stats mod={mod} original={orig} current={cur} comparedFiles={cmp}", mod, original, current, 0); } catch { }
+                            try { _logger.LogTrace("[ShrinkU] PopulateMissingOriginalBytes: stats mod={mod} original={orig} current={cur} comparedFiles={cmp}", mod, original, current, 0); } catch { }
                             System.Threading.Interlocked.Increment(ref updated);
                             try { var elapsed = DateTime.UtcNow - start; var remaining = Math.Max(0, candidates.Count - updated); var eta = updated > 0 ? (int)Math.Round(elapsed.TotalSeconds / updated * remaining) : 0; OnPopulateOriginalBytesProgress?.Invoke((updated, candidates.Count, eta)); } catch { }
                         }
-                        catch { }
+                        catch (Exception ex)
+                        {
+                            _logger.LogWarning(ex, "[ShrinkU] PopulateMissingOriginalBytes failed: mod={mod}", mod);
+                        }
                         finally
                         {
                             try { sem.Release(); } catch { }
@@ -3986,7 +3992,7 @@ public sealed class TextureBackupService
                     }, token));
                 }
                 try { await Task.WhenAll(tasks).ConfigureAwait(false); } catch { }
-                try { _logger.LogDebug("[ShrinkU] PopulateMissingOriginalBytes: completed updated={updated}", updated); } catch { }
+                try { _logger.LogInformation("[ShrinkU] PopulateMissingOriginalBytes: completed updated={updated}", updated); } catch { }
             }
             finally
             {
