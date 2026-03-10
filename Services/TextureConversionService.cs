@@ -45,6 +45,8 @@ public sealed class TextureConversionService : IDisposable
     private bool _subscriptionsAttached = false;
     private string _lastChangedModDir = string.Empty;
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, DateTime> _recentChangedMods = new(System.StringComparer.OrdinalIgnoreCase);
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, CancellationTokenSource> _modSettingRefreshDebounceByMod = new(System.StringComparer.OrdinalIgnoreCase);
+    private readonly SemaphoreSlim _modSettingRefreshSemaphore = new(1, 1);
     private DateTime _autoPollCooldownUntilUtc = DateTime.MinValue;
 
 public TextureConversionService(ILogger logger, PenumbraIpc penumbraIpc, TextureBackupService backupService, ShrinkUConfigService configService, ModStateService modStateService)
@@ -137,28 +139,7 @@ public TextureConversionService(ILogger logger, PenumbraIpc penumbraIpc, Texture
             // When a mod setting changes (enable/disable, priority, etc.),
             // attempt an automatic conversion run if in Automatic mode.
             TryScheduleAutomaticConversion("mod-setting-changed");
-            _ = Task.Run(async () =>
-            {
-                try
-                {
-                    var coll = await GetCurrentCollectionAsync().ConfigureAwait(false);
-                    if (coll.HasValue)
-                    {
-                        var states = await GetAllModEnabledStatesAsync(coll.Value.Id).ConfigureAwait(false);
-                        if (states.TryGetValue(modDir, out var st))
-                        {
-                            _modStateService.BeginBatch();
-                            _modStateService.UpdateEnabledState(modDir, st.Enabled, st.Priority);
-                        }
-                    }
-                }
-                catch { }
-                try { await UpdateUsedTextureFilesForModAsync(modDir).ConfigureAwait(false); } catch { }
-                try { _modStateService.EndBatch(); } catch { }
-                _lastChangedModDir = modDir ?? string.Empty;
-                _lastChangeTriggerUtc = DateTime.UtcNow;
-                try { if (!string.IsNullOrWhiteSpace(modDir)) _recentChangedMods[modDir!] = DateTime.UtcNow; } catch { }
-            });
+            ScheduleModSettingRefresh(modDir);
         };
         _onModsChanged = () =>
         {
@@ -1701,8 +1682,94 @@ public TextureConversionService(ILogger logger, PenumbraIpc penumbraIpc, Texture
     {
         DetachPenumbraSubscriptions();
         StopAutoConversionWatcher();
+        foreach (var kvp in _modSettingRefreshDebounceByMod)
+        {
+            try { kvp.Value.Cancel(); } catch { }
+            try { kvp.Value.Dispose(); } catch { }
+        }
+        _modSettingRefreshDebounceByMod.Clear();
+        try { _modSettingRefreshSemaphore.Dispose(); } catch { }
         try { _cts.Cancel(); } catch { }
         try { _cts.Dispose(); } catch { }
+    }
+
+    private void ScheduleModSettingRefresh(string modDir)
+    {
+        if (string.IsNullOrWhiteSpace(modDir))
+        {
+            return;
+        }
+
+        var key = modDir.Trim();
+        var cts = new CancellationTokenSource();
+        var previous = _modSettingRefreshDebounceByMod.AddOrUpdate(key, cts, (_, old) =>
+        {
+            try { old.Cancel(); } catch { }
+            try { old.Dispose(); } catch { }
+            return cts;
+        });
+
+        if (!ReferenceEquals(previous, cts))
+        {
+            try { previous.Cancel(); } catch { }
+            try { previous.Dispose(); } catch { }
+        }
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(350, cts.Token).ConfigureAwait(false);
+                if (cts.Token.IsCancellationRequested)
+                {
+                    return;
+                }
+
+                await RefreshModSettingStateAsync(key).ConfigureAwait(false);
+            }
+            catch (TaskCanceledException) { }
+            catch { }
+            finally
+            {
+                if (_modSettingRefreshDebounceByMod.TryGetValue(key, out var active) && ReferenceEquals(active, cts))
+                {
+                    _modSettingRefreshDebounceByMod.TryRemove(key, out _);
+                }
+                try { cts.Dispose(); } catch { }
+            }
+        });
+    }
+
+    private async Task RefreshModSettingStateAsync(string modDir)
+    {
+        await _modSettingRefreshSemaphore.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            _modStateService.BeginBatch();
+            try
+            {
+                var coll = await GetCurrentCollectionAsync().ConfigureAwait(false);
+                if (coll.HasValue)
+                {
+                    var states = await GetAllModEnabledStatesAsync(coll.Value.Id).ConfigureAwait(false);
+                    if (states.TryGetValue(modDir, out var st))
+                    {
+                        _modStateService.UpdateEnabledState(modDir, st.Enabled, st.Priority);
+                    }
+                }
+            }
+            catch { }
+
+            try { await UpdateUsedTextureFilesForModAsync(modDir).ConfigureAwait(false); } catch { }
+            _lastChangedModDir = modDir;
+            _lastChangeTriggerUtc = DateTime.UtcNow;
+            try { _recentChangedMods[modDir] = DateTime.UtcNow; } catch { }
+        }
+        finally
+        {
+            try { _modStateService.EndBatch(); } catch { }
+            _modSettingRefreshSemaphore.Release();
+        }
     }
     private async Task UpdateModMetadataForModAsync(string modDir)
     {
