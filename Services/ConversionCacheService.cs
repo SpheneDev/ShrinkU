@@ -61,6 +61,27 @@ public sealed class ConversionCacheService
         try { _fileSizeCache.Clear(); } catch { }
     }
 
+    public void SeedFileSizes(IReadOnlyDictionary<string, long> sizes)
+    {
+        try
+        {
+            if (sizes == null || sizes.Count == 0)
+                return;
+            foreach (var kv in sizes)
+            {
+                var path = kv.Key;
+                var size = kv.Value;
+                if (string.IsNullOrWhiteSpace(path))
+                    continue;
+                if (size < 0)
+                    continue;
+                _fileSizeCache[path] = size;
+                _sizeComputeInFlight.TryRemove(path, out _);
+            }
+        }
+        catch { }
+    }
+
     public bool GetOrQueryModBackup(string mod)
     {
         try

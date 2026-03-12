@@ -441,6 +441,52 @@ public sealed partial class ConversionUI
                             });
                     }
                 }
+                if (ImGui.BeginPopup($"restorectx-{mod}"))
+                {
+                    var hasTexBk = GetOrQueryModTextureBackup(mod);
+                    using (var _d2 = ImRaii.Disabled(!hasTexBk))
+                    {
+                        if (ImGui.MenuItem("Restore textures"))
+                        {
+                            _running = true;
+                            _modsWithBackupCache.TryRemove(mod, out _);
+                            ResetBothProgress();
+                            _currentRestoreMod = mod;
+                            var progress = new Progress<(string, int, int)>(e => { _currentTexture = e.Item1; _backupIndex = e.Item2; _backupTotal = e.Item3; _currentRestoreModIndex = e.Item2; _currentRestoreModTotal = e.Item3; });
+                            _ = _backupService.RestoreLatestForModAsync(mod, progress, CancellationToken.None)
+                                .ContinueWith(t => {
+                                    var success = t.Status == TaskStatus.RanToCompletion && t.Result;
+                                    try { _backupService.RedrawPlayer(); }
+                                    catch (Exception ex) { _logger.LogError(ex, "RedrawPlayer after flat restore failed for {mod}", mod); }
+                                    RefreshModState(mod, "restore-flat-context");
+                                    _ = _backupService.ComputeSavingsForModAsync(mod).ContinueWith(ps =>
+                                    {
+                                        if (ps.Status == TaskStatus.RanToCompletion)
+                                        {
+                                            try { _cachedPerModSavings[mod] = ps.Result; } catch { }
+                                            _uiThreadActions.Enqueue(() => { _perModSavingsRevision++; _footerTotalsDirty = true; _needsUIRefresh = true; });
+                                        }
+                                    }, TaskScheduler.Default);
+                                    _ = _backupService.HasBackupForModAsync(mod).ContinueWith(bt =>
+                                    {
+                                        if (bt.Status == TaskStatus.RanToCompletion)
+                                        {
+                                            bool any = bt.Result;
+                                            try { any = any || _backupService.HasPmpBackupForModAsync(mod).GetAwaiter().GetResult(); }
+                                            catch (Exception ex) { _logger.LogError(ex, "HasPmpBackup check failed for {mod}", mod); }
+                                            _cacheService.SetModHasBackup(mod, any);
+                                        }
+                                    });
+                                    _uiThreadActions.Enqueue(() => { _running = false; });
+                                });
+                        }
+                    }
+                    if (ImGui.MenuItem("Restore PMP"))
+                    {
+                        TryStartPmpRestoreNewest(mod, "pmp-restore-flat-context-newest", false, true, false, false, true);
+                    }
+                    ImGui.EndPopup();
+                }
                 if ((excluded || restoreDisabledByAuto) && ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
                     ShowTooltip(excluded ? "Mod excluded by tags." : "Automatic mode: restore disabled for installed mods.");
                 ImGui.PopStyleColor(4);

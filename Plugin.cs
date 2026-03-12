@@ -29,6 +29,7 @@ public sealed class Plugin : IDalamudPlugin
     private readonly TextureConversionService _conversionService;
     private readonly ModStateService _modStateService;
     private readonly PenumbraFolderWatcherService _penumbraFolderWatcher;
+    private readonly BackupFolderWatcherService _backupFolderWatcher;
     private readonly ConversionUI _conversionUi;
     private readonly SettingsUI _settingsUi;
     private readonly FirstRunSetupUI _firstRunUi;
@@ -55,6 +56,7 @@ public sealed class Plugin : IDalamudPlugin
         _backupService = new TextureBackupService(_logger, _configService, _penumbraIpc, _modStateService);
         _conversionService = new TextureConversionService(_logger, _penumbraIpc, _backupService, _configService, _modStateService);
         _penumbraFolderWatcher = new PenumbraFolderWatcherService(_logger, _penumbraIpc, _modStateService);
+        _backupFolderWatcher = new BackupFolderWatcherService(_logger, _configService, _backupService);
         var cacheService = new ConversionCacheService(_logger, _configService, _backupService, _modStateService);
         _shrinkuIpc = new ShrinkU.Interop.ShrinkUIpc(pluginInterface, _logger, _backupService, _penumbraIpc, _configService, _conversionService, _modStateService);
         _penumbraFolderWatcher.OnFolderChanged += reason =>
@@ -94,7 +96,7 @@ public sealed class Plugin : IDalamudPlugin
         _releaseChangelogUi = new ReleaseChangelogUI(_pluginInterface, _logger, _configService, _changelogService);
 
         // Create UI windows and register
-        _debugUi = new DebugUI(_logger, _configService, _debugTrace, _penumbraFolderWatcher);
+        _debugUi = new DebugUI(_logger, _configService, _debugTrace, _penumbraFolderWatcher, _backupFolderWatcher);
         _settingsUi = new SettingsUI(_logger, _configService, _conversionService, _backupService, () => _releaseChangelogUi.OpenLatest(), _debugTrace, () => _debugUi.IsOpen = true);
         _conversionUi = new ConversionUI(_logger, _configService, _conversionService, _backupService, () => _settingsUi.IsOpen = true, _modStateService, cacheService, _debugTrace);
         _penumbraExtension = new PenumbraExtensionService(_penumbraIpc, _conversionUi, _logger);
@@ -195,25 +197,57 @@ public sealed class Plugin : IDalamudPlugin
                         try { _startupProgressUi.SetStep(1); } catch { }
 
                         var backupStopwatch = System.Diagnostics.Stopwatch.StartNew();
-                        await _backupService.RefreshAllBackupStateAsync().ConfigureAwait(false);
-                        backupStopwatch.Stop();
-                        _logger.LogInformation("Backup state refresh completed in {ms}ms", backupStopwatch.ElapsedMilliseconds);
+                        bool backupUnchanged = false;
+                        try { backupUnchanged = _backupService.IsBackupFolderFingerprintUnchanged(); } catch { }
+                        if (!backupUnchanged)
+                        {
+                            await _backupService.RefreshAllBackupStateAsync().ConfigureAwait(false);
+                            backupStopwatch.Stop();
+                            _logger.LogInformation("Backup state refresh completed in {ms}ms", backupStopwatch.ElapsedMilliseconds);
+                        }
+                        else
+                        {
+                            backupStopwatch.Stop();
+                            _logger.LogInformation("Startup fast path: skipping RefreshAllBackupState (backups unchanged)");
+                        }
                         
                         try { _startupProgressUi.MarkBackupDone(); _startupProgressUi.SetStep(2); } catch { }
                         
-                        var populateStopwatch = System.Diagnostics.Stopwatch.StartNew();
-                        await _backupService.PopulateMissingOriginalBytesAsync(token).ConfigureAwait(false);
-                        populateStopwatch.Stop();
-                        _logger.LogInformation("Missing original bytes populated in {ms}ms", populateStopwatch.ElapsedMilliseconds);
+                        bool skipHeavy = false;
+                        try
+                        {
+                            await _penumbraFolderWatcher.WaitForInitialScanAsync(TimeSpan.FromSeconds(3), token).ConfigureAwait(false);
+                            skipHeavy = _penumbraFolderWatcher.IsStartupSnapshotUnchanged();
+                        }
+                        catch { }
+
+                        if (!skipHeavy)
+                        {
+                            var populateStopwatch = System.Diagnostics.Stopwatch.StartNew();
+                            await _backupService.PopulateMissingOriginalBytesAsync(token).ConfigureAwait(false);
+                            populateStopwatch.Stop();
+                            _logger.LogInformation("Missing original bytes populated in {ms}ms", populateStopwatch.ElapsedMilliseconds);
+                        }
+                        else
+                        {
+                            _logger.LogInformation("Startup fast path: skipping PopulateMissingOriginalBytes (Penumbra unchanged)");
+                        }
                         
                         try { _startupProgressUi.SetStep(3); } catch { }
-                        
-                        var threads = Math.Max(1, _configService.Current.MaxStartupThreads);
-                        _logger.LogInformation("Starting parallel conversion update with {threads} threads", threads);
-                        var conversionStopwatch = System.Diagnostics.Stopwatch.StartNew();
-                        await _conversionService.RunInitialParallelUpdateAsync(threads, token).ConfigureAwait(false);
-                        conversionStopwatch.Stop();
-                        _logger.LogInformation("Parallel conversion update completed in {ms}ms", conversionStopwatch.ElapsedMilliseconds);
+
+                        if (!skipHeavy)
+                        {
+                            var threads = Math.Max(1, _configService.Current.MaxStartupThreads);
+                            _logger.LogInformation("Starting parallel conversion update with {threads} threads", threads);
+                            var conversionStopwatch = System.Diagnostics.Stopwatch.StartNew();
+                            await _conversionService.RunInitialParallelUpdateAsync(threads, token).ConfigureAwait(false);
+                            conversionStopwatch.Stop();
+                            _logger.LogInformation("Parallel conversion update completed in {ms}ms", conversionStopwatch.ElapsedMilliseconds);
+                        }
+                        else
+                        {
+                            _logger.LogInformation("Startup fast path: Penumbra folder unchanged, using persisted mod state");
+                        }
                         
                         try { _startupProgressUi.SetStep(4); } catch { }
                         
@@ -228,8 +262,11 @@ public sealed class Plugin : IDalamudPlugin
                         catch (Exception ex) { _logger.LogInformation(ex, "Failed to save mod state"); }
                         
                         try { _startupProgressUi.MarkSaveDone(); } catch { }
-                        try { _conversionUi.TriggerStartupRescan(); _logger.LogDebug("Startup rescan triggered"); } 
-                        catch (Exception ex) { _logger.LogInformation(ex, "Failed to trigger startup rescan"); }
+                        if (!skipHeavy)
+                        {
+                            try { _conversionUi.TriggerStartupRescan(); _logger.LogDebug("Startup rescan triggered"); }
+                            catch (Exception ex) { _logger.LogInformation(ex, "Failed to trigger startup rescan"); }
+                        }
                         
                         _logger.LogInformation("ShrinkU startup refresh completed successfully");
                     }
@@ -269,6 +306,7 @@ public sealed class Plugin : IDalamudPlugin
         try { _conversionUi.Dispose(); } catch (Exception ex) { _logger.LogInformation(ex, "Failed to dispose conversion UI"); }
         try { _settingsUi.Dispose(); } catch (Exception ex) { _logger.LogInformation(ex, "Failed to dispose settings UI"); }
         try { _conversionService.Dispose(); } catch (Exception ex) { _logger.LogInformation(ex, "Failed to dispose conversion service"); }
+        try { _backupFolderWatcher.Dispose(); } catch (Exception ex) { _logger.LogInformation(ex, "Failed to dispose backup folder watcher"); }
         try { _penumbraFolderWatcher.Dispose(); } catch (Exception ex) { _logger.LogInformation(ex, "Failed to dispose Penumbra folder watcher"); }
         try { _penumbraExtension.Dispose(); } catch (Exception ex) { _logger.LogInformation(ex, "Failed to dispose Penumbra extension"); }
         try { _shrinkuIpc.Dispose(); } catch (Exception ex) { _logger.LogInformation(ex, "Failed to dispose ShrinkU IPC"); }

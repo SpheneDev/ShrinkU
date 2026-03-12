@@ -26,6 +26,7 @@ public sealed class TextureBackupService
     private static readonly Regex s_hashPmpFileRegex = new("^[0-9A-Fa-f]{40}\\.pmp$", RegexOptions.Compiled);
     private static readonly byte[] s_newLineUtf8 = new[] { (byte)'\n' };
     public event Action<(int processed, int total, int etaSeconds)>? OnPopulateOriginalBytesProgress;
+    public event Action<string>? BackupFolderPathChanged;
 
     public TextureBackupService(ILogger logger, ShrinkUConfigService configService, PenumbraIpc penumbraIpc, ModStateService modStateService)
     {
@@ -289,6 +290,64 @@ public sealed class TextureBackupService
     public void SaveModState()
     {
         try { _modStateService.Save(); } catch { }
+    }
+
+    public void UpdateBackupFolderFingerprint(string fingerprint)
+    {
+        try { _modStateService.SetBackupFolderFingerprint(fingerprint); } catch { }
+    }
+
+    public async Task RefreshBackupStateForModAsync(string modFolderName)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(modFolderName))
+                return;
+            var backupDirectory = _configService.Current.BackupFolderPath;
+            if (string.IsNullOrWhiteSpace(backupDirectory) || !Directory.Exists(backupDirectory))
+            {
+                _modStateService.UpdateBackupFlags(modFolderName, false, false);
+                _modStateService.UpdateLatestBackupsInfo(modFolderName, string.Empty, string.Empty, DateTime.MinValue, string.Empty, string.Empty, DateTime.MinValue);
+                return;
+            }
+            var modDir = Path.Combine(backupDirectory, modFolderName);
+            bool hasTex = Directory.Exists(modDir) && Directory.EnumerateFiles(modDir, "backup_*.zip").Any();
+            bool hasPmp = Directory.Exists(modDir) && GetAllPmpBackupsInDirectory(modDir).Count > 0;
+
+            string zipName = string.Empty;
+            string zipVer = string.Empty;
+            DateTime zipCreated = DateTime.MinValue;
+            try
+            {
+                var zipMeta = await GetLatestZipMetaForModAsync(modFolderName).ConfigureAwait(false);
+                if (zipMeta.HasValue)
+                {
+                    zipVer = zipMeta.Value.version ?? string.Empty;
+                    zipCreated = zipMeta.Value.createdUtc;
+                    zipName = zipMeta.Value.zipFileName ?? string.Empty;
+                }
+            }
+            catch { }
+
+            string pmpName = string.Empty;
+            string pmpVer = string.Empty;
+            DateTime pmpCreated = DateTime.MinValue;
+            try
+            {
+                var latestPmp = Directory.Exists(modDir) ? GetLatestPmpBackupPath(modDir) : null;
+                if (!string.IsNullOrWhiteSpace(latestPmp) && File.Exists(latestPmp))
+                {
+                    pmpName = Path.GetFileName(latestPmp) ?? string.Empty;
+                    pmpCreated = File.GetCreationTimeUtc(latestPmp);
+                    pmpVer = _modStateService.Get(modFolderName).LatestPmpBackupVersion ?? string.Empty;
+                }
+            }
+            catch { }
+
+            _modStateService.UpdateBackupFlags(modFolderName, hasTex, hasPmp);
+            _modStateService.UpdateLatestBackupsInfo(modFolderName, zipName, zipVer, zipCreated, pmpName, pmpVer, pmpCreated);
+        }
+        catch { }
     }
 
     public async Task PopulateModPathsForMissingModsAsync(CancellationToken token = default)
@@ -629,6 +688,7 @@ public sealed class TextureBackupService
             _configService.Current.BackupFolderPath = path;
             try { _configService.Save(); } catch { }
             try { _modStateService.ReloadIfChanged(); } catch { }
+            try { BackupFolderPathChanged?.Invoke(path); } catch { }
         }
         catch { }
     }

@@ -441,6 +441,20 @@ public sealed class ModStateService
         {
             var e = Get(mod);
             var list = (files ?? Array.Empty<string>()).Where(f => !string.IsNullOrWhiteSpace(f)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+            Dictionary<string, long> sizes = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+            for (int i = 0; i < list.Count; i++)
+            {
+                var path = list[i];
+                if (string.IsNullOrWhiteSpace(path))
+                    continue;
+                try
+                {
+                    var fi = new FileInfo(path);
+                    if (fi.Exists)
+                        sizes[path] = fi.Length;
+                }
+                catch { }
+            }
             if (list.Count == 0 && e.TotalTextures > 0)
             {
                 try { _logger.LogDebug("[TRACE-ZERO-BUG] UpdateTextureFiles reset TotalTextures to 0 for {mod}. Prev={prev}. Trace: {trace}", mod, e.TotalTextures, Environment.StackTrace); } catch { }
@@ -454,7 +468,7 @@ public sealed class ModStateService
             }
             e.NeedsRescan = false;
             e.LastUpdatedUtc = DateTime.UtcNow;
-            WriteDetail(mod, list, null);
+            WriteDetail(mod, list, null, sizes);
             _lastSaveReason = nameof(UpdateTextureFiles);
             _lastChangedMod = mod;
             ScheduleSave();
@@ -479,7 +493,7 @@ public sealed class ModStateService
             e.UsedTextureCount = list.Count;
             e.UsedTextureFiles = list;
             e.LastUpdatedUtc = DateTime.UtcNow;
-            WriteDetail(mod, null, list);
+            WriteDetail(mod, null, list, null);
             _lastSaveReason = nameof(UpdateUsedTextureFiles);
             _lastChangedMod = mod;
             ScheduleSave();
@@ -524,7 +538,7 @@ public sealed class ModStateService
         return s;
     }
 
-    private void WriteDetail(string mod, List<string>? textures, List<string>? used)
+    private void WriteDetail(string mod, List<string>? textures, List<string>? used, Dictionary<string, long>? sizes)
     {
         try
         {
@@ -535,7 +549,8 @@ public sealed class ModStateService
             var path = Path.Combine(dir, Sanitize(mod) + ".json");
             List<string> t = textures ?? ReadDetailTextures(mod);
             List<string> u = used ?? ReadDetailUsed(mod);
-            var obj = new ModDetail { TextureFiles = t, UsedTextureFiles = u };
+            Dictionary<string, long> s = sizes ?? ReadDetailTextureSizes(mod);
+            var obj = new ModDetail { TextureFiles = t, UsedTextureFiles = u, TextureFileSizes = s };
             var json = JsonSerializer.Serialize(obj, new JsonSerializerOptions { WriteIndented = true });
             File.WriteAllText(path, json);
             trace.Dispose();
@@ -575,10 +590,27 @@ public sealed class ModStateService
         catch { return new List<string>(); }
     }
 
+    public Dictionary<string, long> ReadDetailTextureSizes(string mod)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(mod))
+                return new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+            var dir = GetDetailDir();
+            var path = Path.Combine(dir, Sanitize(mod) + ".json");
+            if (!File.Exists(path)) return new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+            var json = File.ReadAllText(path);
+            var obj = JsonSerializer.Deserialize<ModDetail>(json) ?? new ModDetail();
+            return obj.TextureFileSizes ?? new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+        }
+        catch { return new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase); }
+    }
+
     private sealed class ModDetail
     {
         public List<string>? TextureFiles { get; set; }
         public List<string>? UsedTextureFiles { get; set; }
+        public Dictionary<string, long>? TextureFileSizes { get; set; }
     }
 
     public void Load()

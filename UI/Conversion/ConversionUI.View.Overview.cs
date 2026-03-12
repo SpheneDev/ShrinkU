@@ -332,6 +332,14 @@ public sealed partial class ConversionUI
             {
                 try
                 {
+                    foreach (var mod in _visibleByMod.Keys)
+                    {
+                        if (string.IsNullOrWhiteSpace(mod))
+                            continue;
+                        var sizes = _modStateService.ReadDetailTextureSizes(mod);
+                        if (sizes.Count > 0)
+                            _cacheService.SeedFileSizes(sizes);
+                    }
                     var allFiles = _visibleByMod.Values.SelectMany(v => v).Take(2000).ToList();
                     _cacheService.WarmupFileSizeCache(allFiles);
                     _fileSizeWarmupSig = warmSig;

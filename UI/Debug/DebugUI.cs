@@ -15,15 +15,17 @@ public sealed class DebugUI : Window
     private readonly ShrinkUConfigService _configService;
     private readonly DebugTraceService _debugTrace;
     private readonly PenumbraFolderWatcherService _penumbraFolderWatcher;
+    private readonly BackupFolderWatcherService _backupFolderWatcher;
     private string _actionFilter = string.Empty;
 
-    public DebugUI(ILogger logger, ShrinkUConfigService configService, DebugTraceService debugTrace, PenumbraFolderWatcherService penumbraFolderWatcher)
+    public DebugUI(ILogger logger, ShrinkUConfigService configService, DebugTraceService debugTrace, PenumbraFolderWatcherService penumbraFolderWatcher, BackupFolderWatcherService backupFolderWatcher)
         : base("ShrinkU Debug###ShrinkUDebugUI")
     {
         _logger = logger;
         _configService = configService;
         _debugTrace = debugTrace;
         _penumbraFolderWatcher = penumbraFolderWatcher;
+        _backupFolderWatcher = backupFolderWatcher;
 
         SizeConstraints = new WindowSizeConstraints
         {
@@ -46,6 +48,11 @@ public sealed class DebugUI : Window
             if (ImGui.BeginTabItem("Penumbra Watcher"))
             {
                 DrawPenumbraWatcherTab();
+                ImGui.EndTabItem();
+            }
+            if (ImGui.BeginTabItem("Backup Watcher"))
+            {
+                DrawBackupWatcherTab();
                 ImGui.EndTabItem();
             }
             ImGui.EndTabBar();
@@ -117,6 +124,26 @@ public sealed class DebugUI : Window
         ImGui.Text($"Startup Root Match: {FormatBool(status.StartupStoredRootMatchesCurrent)}");
         ImGui.Text($"Startup Diff: {FormatBool(status.StartupDiffDetected)}");
         ImGui.TextWrapped($"Last Reason: {SafeText(status.LastChangeReason)}");
+        ImGui.TextWrapped($"Last Error: {SafeText(status.LastError)}");
+    }
+
+    private void DrawBackupWatcherTab()
+    {
+        var status = _backupFolderWatcher.GetStatus();
+        ImGui.TextColored(ShrinkUColors.Accent, "Backup Folder Watcher");
+        ImGui.Separator();
+
+        ImGui.Text($"Active: {FormatBool(status.WatcherActive)}");
+        ImGui.Text($"Root: {SafeText(status.RootPath)}");
+        ImGui.Text($"Last Event: {FormatUtc(status.LastEventUtc)}");
+        ImGui.Text($"Last Event Kind: {SafeText(status.LastEventKind)}");
+        ImGui.TextWrapped($"Last Event Path: {SafeText(status.LastEventPath)}");
+        ImGui.Text($"Event Burst Count: {status.EventBurstCount}");
+        ImGui.Text($"Last Refresh: {FormatUtc(status.LastRefreshUtc)} ({status.LastRefreshDurationMs} ms)");
+        ImGui.Text($"Directories Scanned: {status.LastScanDirectoryCount}");
+        ImGui.Text($"Max Directory Write: {FormatUtc(status.LastScanMaxWriteUtc)}");
+        ImGui.Text($"Stored Snapshot: {FormatUtc(status.StoredFingerprintUtc)}");
+        ImGui.Text($"Snapshot Unchanged: {FormatBool(status.StoredFingerprintMatchesCurrent)}");
         ImGui.TextWrapped($"Last Error: {SafeText(status.LastError)}");
     }
 

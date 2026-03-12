@@ -854,57 +854,61 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
             try { _lastExternalChangeReason = reason ?? string.Empty; _lastExternalChangeAt = DateTime.UtcNow; } catch { }
             try { ClearAllCaches(); } catch { }
             try { TriggerMetricsRefresh(); } catch { }
+            var isPenumbraFolderChange = !string.IsNullOrWhiteSpace(reason) && reason.StartsWith("penumbra-folder-", StringComparison.OrdinalIgnoreCase);
 
             // Persist per-mod external-change markers so indicators survive restarts
             try
             {
-                _ = Task.Run(async () =>
+                if (!isPenumbraFolderChange)
                 {
-                    try
+                    _ = Task.Run(async () =>
                     {
-                        var candidates = await _conversionService.GetAutomaticCandidateTexturesAsync().ConfigureAwait(false);
-                        var now = DateTime.UtcNow;
-                        if (candidates != null && candidates.Count > 0)
+                        try
                         {
-                            var modsToMark = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                            foreach (var file in candidates.Keys)
+                            var candidates = await _conversionService.GetAutomaticCandidateTexturesAsync().ConfigureAwait(false);
+                            var now = DateTime.UtcNow;
+                            if (candidates != null && candidates.Count > 0)
                             {
-                                try
+                                var modsToMark = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                                foreach (var file in candidates.Keys)
                                 {
-                                    string? mod = null;
-                                    if (!_fileOwnerMod.TryGetValue(file, out var modTmp) || string.IsNullOrWhiteSpace(modTmp))
+                                    try
                                     {
-                                        foreach (var kvp in _modPaths)
+                                        string? mod = null;
+                                        if (!_fileOwnerMod.TryGetValue(file, out var modTmp) || string.IsNullOrWhiteSpace(modTmp))
                                         {
-                                            var abs = kvp.Value ?? string.Empty;
-                                            if (string.IsNullOrWhiteSpace(abs)) continue;
-                                            if (file.StartsWith(abs, StringComparison.OrdinalIgnoreCase)) { mod = kvp.Key; break; }
+                                            foreach (var kvp in _modPaths)
+                                            {
+                                                var abs = kvp.Value ?? string.Empty;
+                                                if (string.IsNullOrWhiteSpace(abs)) continue;
+                                                if (file.StartsWith(abs, StringComparison.OrdinalIgnoreCase)) { mod = kvp.Key; break; }
+                                            }
                                         }
+                                        else
+                                        {
+                                            mod = modTmp;
+                                        }
+                                        if (!string.IsNullOrWhiteSpace(mod)) modsToMark.Add(mod);
                                     }
-                                    else
-                                    {
-                                        mod = modTmp;
-                                    }
-                                    if (!string.IsNullOrWhiteSpace(mod)) modsToMark.Add(mod);
+                                    catch { }
                                 }
-                                catch { }
-                            }
-                            foreach (var mod in modsToMark)
-                            {
-                                try
+                                foreach (var mod in modsToMark)
                                 {
-                                    _modStateService.UpdateExternalChange(mod, new ShrinkU.Configuration.ExternalChangeMarker
+                                    try
                                     {
-                                        Reason = string.IsNullOrWhiteSpace(reason) ? "external" : reason,
-                                        AtUtc = now,
-                                    });
+                                        _modStateService.UpdateExternalChange(mod, new ShrinkU.Configuration.ExternalChangeMarker
+                                        {
+                                            Reason = string.IsNullOrWhiteSpace(reason) ? "external" : reason,
+                                            AtUtc = now,
+                                        });
+                                    }
+                                    catch { }
                                 }
-                                catch { }
                             }
                         }
-                    }
-                    catch { }
-                });
+                        catch { }
+                    });
+                }
             }
             catch { }
 
@@ -916,7 +920,7 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
                 return;
             }
             _scanInProgress = true;
-            try { RefreshScanResults(true, $"external-{reason}"); }
+            try { RefreshScanResults(!isPenumbraFolderChange, $"external-{reason}"); }
             catch (Exception ex) { _logger.LogError(ex, "RefreshScanResults failed for external change {reason}", reason); }
             RequestUiRefresh("external-change-refresh");
         };
@@ -938,7 +942,7 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
         };
         _conversionService.OnPlayerResourcesChanged += _onPlayerResourcesChanged;
 
-        // Heavy refresh only on actual mod add/delete, coalesced with trailing edge
+        // Targeted refresh on actual mod add/delete, coalesced with trailing edge
         _onPenumbraModAdded = dir =>
         {
             lock (_modsChangedLock)
@@ -954,7 +958,7 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
                 {
                     try
                     {
-                        await Task.Delay(1000, token).ConfigureAwait(false);
+                        await Task.Delay(350, token).ConfigureAwait(false);
                         if (token.IsCancellationRequested)
                             return;
                         // Ensure only the latest scheduled task runs (trailing edge)
@@ -963,34 +967,16 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
                             if (mySeq != _modsChangedDebounceSeq)
                                 return;
                         }
-                        // Check whether the actual set of mods has changed before heavy scan.
-                        var currentFolders = await _conversionService.GetAllModFoldersAsync().ConfigureAwait(false);
-                        // Compare against snapshot under lock to avoid races.
-                        bool modsChanged;
-                        lock (_modsChangedLock)
+                        _uiThreadActions.Enqueue(() =>
                         {
-                            var snapshot = _knownModFolders;
-                            modsChanged = currentFolders.Count != snapshot.Count
-                                || currentFolders.Any(f => !snapshot.Contains(f));
-                        }
-                        if (!modsChanged)
-                        {
-                            // No actual mod set change; just mark UI refresh.
-                            _uiThreadActions.Enqueue(() =>
-                            {
-                                ClearModCaches(dir);
-                                _logger.LogDebug("Suppressed heavy scan: mod folders unchanged after ModAdded");
-                                _needsUIRefresh = true;
-                                RefreshModState(dir, "mod-added-targeted");
-                            });
-                            return;
-                        }
-                        if (_scanInProgress)
-                            return;
-                        _scanInProgress = true;
-                        _logger.LogDebug("Heavy scan triggered: ModAdded detected changes");
-                        await Task.Delay(500, token).ConfigureAwait(false);
-                        RefreshScanResults(true, "mod-added");
+                            if (string.IsNullOrWhiteSpace(dir))
+                                return;
+                            ClearModCaches(dir);
+                            _knownModFolders.Add(dir);
+                            _needsUIRefresh = true;
+                            RefreshModState(dir, "mod-added-targeted");
+                            RequestUiRefresh("mod-added-targeted");
+                        });
                     }
                     catch (TaskCanceledException) { }
                     catch (Exception ex) { _logger.LogError(ex, "ModAdded debounce task failed"); }
@@ -1027,14 +1013,33 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
                         {
                             try
                             {
-                                var snap = _modStateService.Snapshot();
-                                _knownModFolders = new HashSet<string>(snap.Keys, StringComparer.OrdinalIgnoreCase);
-                                _modPaths = snap.ToDictionary(kv => kv.Key, kv => kv.Value?.PenumbraRelativePath ?? string.Empty, StringComparer.OrdinalIgnoreCase);
+                                if (!string.IsNullOrWhiteSpace(modDir))
+                                {
+                                    _knownModFolders.Remove(modDir);
+                                    _modDisplayNames.Remove(modDir);
+                                    _modTags.Remove(modDir);
+                                    _modEnabledStates.Remove(modDir);
+                                    _modPathsStable.Remove(modDir);
+                                    _modPaths.Remove(modDir);
+                                    _visibleByMod.Remove(modDir);
+                                    _selectedCountByMod.Remove(modDir);
+                                    _selectedEmptyMods.Remove(modDir);
+                                    if (_scannedByMod.TryGetValue(modDir, out var files) && files != null)
+                                    {
+                                        foreach (var f in files)
+                                        {
+                                            _texturesToConvert.Remove(f);
+                                            _fileOwnerMod.Remove(f);
+                                            _selectedTextures.Remove(f);
+                                        }
+                                    }
+                                    _scannedByMod.Remove(modDir);
+                                }
                                 ClearModCaches(modDir);
                                 _needsUIRefresh = true;
                             }
                             catch { }
-                            RequestUiRefresh("mod-deleted-light");
+                            RequestUiRefresh("mod-deleted-targeted");
                         });
 
                         try
@@ -1660,6 +1665,9 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                                 continue;
                             known.Add(folder);
                             var files = _modStateService.ReadDetailTextures(leaf);
+                            var sizes = _modStateService.ReadDetailTextureSizes(leaf);
+                            if (sizes.Count > 0)
+                                _cacheService.SeedFileSizes(sizes);
                             _scannedByMod[leaf] = files ?? new List<string>();
                             foreach (var file in (files ?? new List<string>()))
                             {
@@ -1781,6 +1789,18 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                         }
                     }
                     catch { }
+                }
+
+                if (grouped != null && grouped.Count > 0)
+                {
+                    foreach (var mod in grouped.Keys)
+                    {
+                        if (string.IsNullOrWhiteSpace(mod))
+                            continue;
+                        var sizes = _modStateService.ReadDetailTextureSizes(mod);
+                        if (sizes.Count > 0)
+                            _cacheService.SeedFileSizes(sizes);
+                    }
                 }
 
                 _uiThreadActions.Enqueue(() =>
