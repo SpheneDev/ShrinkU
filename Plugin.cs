@@ -28,6 +28,7 @@ public sealed class Plugin : IDalamudPlugin
     private readonly TextureBackupService _backupService;
     private readonly TextureConversionService _conversionService;
     private readonly ModStateService _modStateService;
+    private readonly PenumbraFolderWatcherService _penumbraFolderWatcher;
     private readonly ConversionUI _conversionUi;
     private readonly SettingsUI _settingsUi;
     private readonly FirstRunSetupUI _firstRunUi;
@@ -53,8 +54,13 @@ public sealed class Plugin : IDalamudPlugin
         _modStateService = new ModStateService(_logger, _configService, _debugTrace);
         _backupService = new TextureBackupService(_logger, _configService, _penumbraIpc, _modStateService);
         _conversionService = new TextureConversionService(_logger, _penumbraIpc, _backupService, _configService, _modStateService);
+        _penumbraFolderWatcher = new PenumbraFolderWatcherService(_logger, _penumbraIpc, _modStateService);
         var cacheService = new ConversionCacheService(_logger, _configService, _backupService, _modStateService);
         _shrinkuIpc = new ShrinkU.Interop.ShrinkUIpc(pluginInterface, _logger, _backupService, _penumbraIpc, _configService, _conversionService, _modStateService);
+        _penumbraFolderWatcher.OnFolderChanged += reason =>
+        {
+            try { _conversionService.NotifyExternalTextureChange($"penumbra-folder-{reason}"); } catch { }
+        };
 
         // Ensure standalone ShrinkU is not marked as controlled by Sphene
         try
@@ -88,7 +94,7 @@ public sealed class Plugin : IDalamudPlugin
         _releaseChangelogUi = new ReleaseChangelogUI(_pluginInterface, _logger, _configService, _changelogService);
 
         // Create UI windows and register
-        _debugUi = new DebugUI(_logger, _configService, _debugTrace);
+        _debugUi = new DebugUI(_logger, _configService, _debugTrace, _penumbraFolderWatcher);
         _settingsUi = new SettingsUI(_logger, _configService, _conversionService, _backupService, () => _releaseChangelogUi.OpenLatest(), _debugTrace, () => _debugUi.IsOpen = true);
         _conversionUi = new ConversionUI(_logger, _configService, _conversionService, _backupService, () => _settingsUi.IsOpen = true, _modStateService, cacheService, _debugTrace);
         _penumbraExtension = new PenumbraExtensionService(_penumbraIpc, _conversionUi, _logger);
@@ -263,6 +269,7 @@ public sealed class Plugin : IDalamudPlugin
         try { _conversionUi.Dispose(); } catch (Exception ex) { _logger.LogInformation(ex, "Failed to dispose conversion UI"); }
         try { _settingsUi.Dispose(); } catch (Exception ex) { _logger.LogInformation(ex, "Failed to dispose settings UI"); }
         try { _conversionService.Dispose(); } catch (Exception ex) { _logger.LogInformation(ex, "Failed to dispose conversion service"); }
+        try { _penumbraFolderWatcher.Dispose(); } catch (Exception ex) { _logger.LogInformation(ex, "Failed to dispose Penumbra folder watcher"); }
         try { _penumbraExtension.Dispose(); } catch (Exception ex) { _logger.LogInformation(ex, "Failed to dispose Penumbra extension"); }
         try { _shrinkuIpc.Dispose(); } catch (Exception ex) { _logger.LogInformation(ex, "Failed to dispose ShrinkU IPC"); }
         try { _penumbraIpc.Dispose(); } catch (Exception ex) { _logger.LogInformation(ex, "Failed to dispose Penumbra IPC"); }

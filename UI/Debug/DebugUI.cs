@@ -14,14 +14,16 @@ public sealed class DebugUI : Window
     private readonly ILogger _logger;
     private readonly ShrinkUConfigService _configService;
     private readonly DebugTraceService _debugTrace;
+    private readonly PenumbraFolderWatcherService _penumbraFolderWatcher;
     private string _actionFilter = string.Empty;
 
-    public DebugUI(ILogger logger, ShrinkUConfigService configService, DebugTraceService debugTrace)
+    public DebugUI(ILogger logger, ShrinkUConfigService configService, DebugTraceService debugTrace, PenumbraFolderWatcherService penumbraFolderWatcher)
         : base("ShrinkU Debug###ShrinkUDebugUI")
     {
         _logger = logger;
         _configService = configService;
         _debugTrace = debugTrace;
+        _penumbraFolderWatcher = penumbraFolderWatcher;
 
         SizeConstraints = new WindowSizeConstraints
         {
@@ -34,6 +36,24 @@ public sealed class DebugUI : Window
     {
         UiHeader.DrawAccentHeaderBar();
 
+        if (ImGui.BeginTabBar("DebugTabs"))
+        {
+            if (ImGui.BeginTabItem("Trace"))
+            {
+                DrawTraceTab();
+                ImGui.EndTabItem();
+            }
+            if (ImGui.BeginTabItem("Penumbra Watcher"))
+            {
+                DrawPenumbraWatcherTab();
+                ImGui.EndTabItem();
+            }
+            ImGui.EndTabBar();
+        }
+    }
+
+    private void DrawTraceTab()
+    {
         var avail = ImGui.GetContentRegionAvail();
         var leftWidth = Math.Max(200f, avail.X * 0.5f - 4f);
         var rightWidth = Math.Max(200f, avail.X - leftWidth - 8f);
@@ -75,6 +95,31 @@ public sealed class DebugUI : Window
         ImGui.EndChild();
     }
 
+    private void DrawPenumbraWatcherTab()
+    {
+        var status = _penumbraFolderWatcher.GetStatus();
+        ImGui.TextColored(ShrinkUColors.Accent, "Penumbra Folder Watcher");
+        ImGui.Separator();
+
+        ImGui.Text($"Active: {FormatBool(status.WatcherActive)}");
+        ImGui.Text($"Root: {SafeText(status.RootPath)}");
+        ImGui.Text($"Last Event: {FormatUtc(status.LastEventUtc)}");
+        ImGui.Text($"Last Event Kind: {SafeText(status.LastEventKind)}");
+        ImGui.TextWrapped($"Last Event Path: {SafeText(status.LastEventPath)}");
+        ImGui.Text($"Event Burst Count: {status.EventBurstCount}");
+        ImGui.Text($"Last Scan: {FormatUtc(status.LastScanUtc)} ({status.LastScanDurationMs} ms)");
+        ImGui.Text($"Directories Scanned: {status.LastScanDirectoryCount}");
+        ImGui.Text($"Max Directory Write: {FormatUtc(status.LastScanMaxWriteUtc)}");
+        ImGui.Text($"Stored Snapshot: {FormatUtc(status.StoredFingerprintUtc)}");
+        ImGui.Text($"Startup Stored Snapshot: {FormatUtc(status.StartupStoredFingerprintUtc)}");
+        ImGui.Text($"Startup Stored Root: {SafeText(status.StartupStoredRootPath)}");
+        ImGui.Text($"Startup Fingerprint Match: {FormatBool(status.StartupStoredFingerprintMatchesCurrent)}");
+        ImGui.Text($"Startup Root Match: {FormatBool(status.StartupStoredRootMatchesCurrent)}");
+        ImGui.Text($"Startup Diff: {FormatBool(status.StartupDiffDetected)}");
+        ImGui.TextWrapped($"Last Reason: {SafeText(status.LastChangeReason)}");
+        ImGui.TextWrapped($"Last Error: {SafeText(status.LastError)}");
+    }
+
     private void DrawList(System.Collections.Generic.IReadOnlyList<(DateTime atUtc, string message)> entries)
     {
         var style = ImGui.GetStyle();
@@ -102,5 +147,22 @@ public sealed class DebugUI : Window
             ImGui.SameLine();
             ImGui.TextWrapped(e.message);
         }
+    }
+
+    private static string FormatUtc(DateTime utc)
+    {
+        if (utc == DateTime.MinValue)
+            return "n/a";
+        return utc.ToLocalTime().ToString("HH:mm:ss.fff", CultureInfo.InvariantCulture);
+    }
+
+    private static string FormatBool(bool value)
+    {
+        return value ? "Yes" : "No";
+    }
+
+    private static string SafeText(string? value)
+    {
+        return string.IsNullOrWhiteSpace(value) ? "-" : value;
     }
 }

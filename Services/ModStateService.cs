@@ -109,6 +109,30 @@ public sealed class ModStateService
         }
     }
 
+    public string GetPenumbraFolderFingerprint()
+    {
+        lock (_lock)
+        {
+            return _meta.PenumbraFolderFingerprint ?? string.Empty;
+        }
+    }
+
+    public DateTime GetPenumbraFolderFingerprintUtc()
+    {
+        lock (_lock)
+        {
+            return _meta.PenumbraFolderFingerprintUtc;
+        }
+    }
+
+    public string GetPenumbraRootPath()
+    {
+        lock (_lock)
+        {
+            return _meta.PenumbraRootPath ?? string.Empty;
+        }
+    }
+
     public void SetBackupFolderFingerprint(string fingerprint)
     {
         if (fingerprint == null) fingerprint = string.Empty;
@@ -120,6 +144,25 @@ public sealed class ModStateService
             _meta.BackupFolderFingerprint = fingerprint;
             _meta.BackupFolderFingerprintUtc = DateTime.UtcNow;
             _lastSaveReason = nameof(SetBackupFolderFingerprint);
+            ScheduleSave();
+        }
+    }
+
+    public void SetPenumbraFolderFingerprint(string fingerprint, string rootPath)
+    {
+        if (fingerprint == null) fingerprint = string.Empty;
+        if (rootPath == null) rootPath = string.Empty;
+        lock (_lock)
+        {
+            bool sameFingerprint = string.Equals(_meta.PenumbraFolderFingerprint, fingerprint, StringComparison.OrdinalIgnoreCase);
+            bool sameRoot = string.Equals(_meta.PenumbraRootPath, rootPath, StringComparison.OrdinalIgnoreCase);
+            if (sameFingerprint && sameRoot)
+                return;
+
+            _meta.PenumbraFolderFingerprint = fingerprint;
+            _meta.PenumbraRootPath = rootPath;
+            _meta.PenumbraFolderFingerprintUtc = DateTime.UtcNow;
+            _lastSaveReason = nameof(SetPenumbraFolderFingerprint);
             ScheduleSave();
         }
     }
@@ -783,6 +826,9 @@ public sealed class ModStateService
                         BackupFolderFingerprintUtc = m.BackupFolderFingerprintUtc,
                         StateFingerprint = m.StateFingerprint,
                         StateFingerprintUtc = m.StateFingerprintUtc,
+                        PenumbraFolderFingerprint = m.PenumbraFolderFingerprint,
+                        PenumbraFolderFingerprintUtc = m.PenumbraFolderFingerprintUtc,
+                        PenumbraRootPath = m.PenumbraRootPath,
                     };
                 }
 
@@ -790,7 +836,7 @@ public sealed class ModStateService
                 using (var fs = new FileStream(tmp, FileMode.Create, FileAccess.Write, FileShare.None, 65536, FileOptions.SequentialScan))
                 {
                     using var writer = new Utf8JsonWriter(fs, new JsonWriterOptions { Indented = true });
-                    metaSnapshot.SchemaVersion = 3;
+                    metaSnapshot.SchemaVersion = 4;
                     metaSnapshot.GeneratedBy = GetGeneratedBy();
                     if (metaSnapshot.CreatedUtc == DateTime.MinValue)
                         metaSnapshot.CreatedUtc = _lastLoadedWriteUtc == DateTime.MinValue ? DateTime.UtcNow : _lastLoadedWriteUtc;
@@ -1189,7 +1235,7 @@ public sealed class ModStateEntry
 
 public sealed class ModStateMeta
 {
-    public int SchemaVersion { get; set; } = 3;
+    public int SchemaVersion { get; set; } = 4;
     public string GeneratedBy { get; set; } = string.Empty;
     public DateTime CreatedUtc { get; set; } = DateTime.MinValue;
     public DateTime LastSavedUtc { get; set; } = DateTime.MinValue;
@@ -1197,6 +1243,9 @@ public sealed class ModStateMeta
     public DateTime BackupFolderFingerprintUtc { get; set; } = DateTime.MinValue;
     public string StateFingerprint { get; set; } = string.Empty;
     public DateTime StateFingerprintUtc { get; set; } = DateTime.MinValue;
+    public string PenumbraFolderFingerprint { get; set; } = string.Empty;
+    public DateTime PenumbraFolderFingerprintUtc { get; set; } = DateTime.MinValue;
+    public string PenumbraRootPath { get; set; } = string.Empty;
 }
 
 public sealed class ModStateFile
