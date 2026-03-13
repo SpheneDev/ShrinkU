@@ -20,7 +20,7 @@ public readonly struct PerfStep : IDisposable
     public void Dispose()
     {
         _sw.Stop();
-        try { _logger.LogDebug("[TRACE] {name} took {ms} ms", _name, (int)_sw.Elapsed.TotalMilliseconds); } catch { }
+        try { _logger.LogTrace("{name} took {ms} ms", _name, (int)_sw.Elapsed.TotalMilliseconds); } catch { }
     }
 }
 
