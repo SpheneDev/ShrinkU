@@ -32,6 +32,8 @@ public sealed partial class ConversionUI
         var root = new TableCatNode("/");
         foreach (var mod in mods)
         {
+            if (string.IsNullOrWhiteSpace(mod))
+                continue;
             var isOrphan = _orphaned.Any(x => string.Equals(x.ModFolderName, mod, StringComparison.OrdinalIgnoreCase));
             if (isOrphan)
             {
@@ -132,6 +134,8 @@ public sealed partial class ConversionUI
         }
         foreach (var mod in node.Mods)
         {
+            if (string.IsNullOrWhiteSpace(mod))
+                continue;
             if (!visibleByMod.ContainsKey(mod))
                 continue;
             _flatRows.Add(new FlatRow { Kind = FlatRowKind.Mod, Node = node, Mod = mod, Depth = depth });

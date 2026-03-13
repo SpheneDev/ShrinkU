@@ -347,7 +347,7 @@ public sealed partial class ConversionUI
         var hasTexBackup = GetOrQueryModTextureBackup(mod);
         var hasPmpBackup = GetOrQueryModPmp(mod);
         var anyBackup = hasBackup || hasTexBackup || hasPmpBackup;
-        if (totalAll > 0)
+        if (totalAll > 0 && !isOrphan)
         {
             var autoMode = _configService.Current.TextureProcessingMode == TextureProcessingMode.Automatic;
             var showRestore = anyBackup && !(modState != null && modState.InstalledButNotConverted);
@@ -690,7 +690,6 @@ public sealed partial class ConversionUI
             }
             ShowTooltip("Install mod from PMP backup if Penumbra removed it.");
             ImGui.PopStyleColor(4);
-            ImGui.SameLine();
         }
 
         // No backup creation button for non-convertible mods without backups

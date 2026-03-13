@@ -430,6 +430,40 @@ public sealed partial class ConversionUI : Window, IDisposable
         catch { }
         _needsUIRefresh = true;
     }
+
+    private void ScheduleOrphanScan(string reason, bool force)
+    {
+        if (_orphanScanInFlight)
+            return;
+        if (!force && _lastOrphanScanUtc != DateTime.MinValue && (DateTime.UtcNow - _lastOrphanScanUtc) < TimeSpan.FromSeconds(15))
+            return;
+
+        _orphanScanInFlight = true;
+        try { _orphanScanCts?.Cancel(); } catch { }
+        try { _orphanScanCts?.Dispose(); } catch { }
+        _orphanScanCts = new System.Threading.CancellationTokenSource();
+        var token = _orphanScanCts.Token;
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                var orphans = await _backupService.FindOrphanedBackupsAsync(token).ConfigureAwait(false);
+                if (token.IsCancellationRequested) return;
+                _uiThreadActions.Enqueue(() =>
+                {
+                    _orphaned = orphans ?? new List<TextureBackupService.OrphanBackupInfo>();
+                    _orphanRevision++;
+                    _lastOrphanScanUtc = DateTime.UtcNow;
+                    RequestUiRefresh(string.Concat("orphaned-backups-", reason ?? "refresh"));
+                });
+            }
+            catch (System.OperationCanceledException) { }
+            finally
+            {
+                _orphanScanInFlight = false;
+            }
+        }, token);
+    }
     private void TraceAction(string action, string function, string path = "")
     {
         try
@@ -772,34 +806,7 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
         {
             _logger.LogDebug("Penumbra mods changed (DIAG-v3); refreshing UI state");
             RequestUiRefresh("penumbra-mods-changed");
-            if (!_orphanScanInFlight)
-            {
-                _orphanScanInFlight = true;
-                try { _orphanScanCts?.Cancel(); } catch { }
-                try { _orphanScanCts?.Dispose(); } catch { }
-                _orphanScanCts = new System.Threading.CancellationTokenSource();
-                var token = _orphanScanCts.Token;
-                _ = Task.Run(async () =>
-                {
-                    try
-                    {
-                        var orphans = await _backupService.FindOrphanedBackupsAsync(token).ConfigureAwait(false);
-                        if (token.IsCancellationRequested) return;
-                        _uiThreadActions.Enqueue(() =>
-                        {
-                            _orphaned = orphans ?? new List<TextureBackupService.OrphanBackupInfo>();
-                            _orphanRevision++;
-                            _lastOrphanScanUtc = DateTime.UtcNow;
-                            RequestUiRefresh("orphaned-backups-refreshed");
-                        });
-                    }
-                    catch (System.OperationCanceledException) { }
-                    finally
-                    {
-                        _orphanScanInFlight = false;
-                    }
-                }, token);
-            }
+            ScheduleOrphanScan("mods-changed", true);
             // Refresh hierarchical mod paths from mod_state snapshot
             if (!_loadingModPaths)
             {
@@ -846,6 +853,7 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
             _uiThreadActions.Enqueue(() => { _needsUIRefresh = true; RequestUiRefresh("mods-changed-light"); });
         };
         _conversionService.OnPenumbraModsChanged += _onPenumbraModsChanged;
+        ScheduleOrphanScan("startup", true);
 
         // React to external texture changes (e.g., conversions/restores initiated by Sphene)
         _onExternalTexturesChanged = reason =>

@@ -184,6 +184,11 @@ public sealed partial class ConversionUI
 
     private void DrawScannedFilesTable_ViewImpl()
     {
+        if (!_orphanScanInFlight)
+        {
+            if (_orphaned.Count == 0 || _lastOrphanScanUtc == DateTime.MinValue || (DateTime.UtcNow - _lastOrphanScanUtc) > TimeSpan.FromSeconds(45))
+                ScheduleOrphanScan("view-poll", false);
+        }
         var snapForSig = _modStateService.Snapshot();
         var modCountSig = snapForSig.Count;
         var usedCountSig = 0;
@@ -217,6 +222,8 @@ public sealed partial class ConversionUI
                 : snap.Keys.ToList();
             foreach (var mod in sourceKeys)
             {
+                if (string.IsNullOrWhiteSpace(mod) || string.Equals(mod, "mod_state", StringComparison.OrdinalIgnoreCase))
+                    continue;
                 var files = (_scannedByMod.TryGetValue(mod, out var list) && list != null)
                     ? list
                     : (_modStateService.ReadDetailTextures(mod) ?? new List<string>());
@@ -318,6 +325,8 @@ public sealed partial class ConversionUI
                 : _visibleByMod.Keys.ToList();
             foreach (var mod in sourceKeysCount)
             {
+                if (string.IsNullOrWhiteSpace(mod) || string.Equals(mod, "mod_state", StringComparison.OrdinalIgnoreCase))
+                    continue;
                 var allFiles = GetAllFilesForModDisplay(mod, _visibleByMod.TryGetValue(mod, out var vis) ? vis : null);
                 int c = 0;
                 if (allFiles != null && allFiles.Count > 0)
@@ -349,7 +358,7 @@ public sealed partial class ConversionUI
         }
         var visibleByMod = _visibleByMod;
 
-        var mods = visibleByMod.Keys.Where(m => !string.Equals(m, "mod_state", StringComparison.OrdinalIgnoreCase)).ToList();
+        var mods = visibleByMod.Keys.Where(m => !string.IsNullOrWhiteSpace(m) && !string.Equals(m, "mod_state", StringComparison.OrdinalIgnoreCase)).ToList();
         if (_scanSortKind == ScanSortKind.ModName)
             mods = (_scanSortAsc ? mods.OrderBy(m => ResolveModDisplayName(m)) : mods.OrderByDescending(m => ResolveModDisplayName(m))).ToList();
         else
