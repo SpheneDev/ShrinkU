@@ -416,6 +416,8 @@ public sealed partial class ConversionUI : Window, IDisposable
     private int _modsChangedDebounceSeq = 0;
     // Timestamp of last heavy scan to rate-limit repeated rescans
     private DateTime _lastHeavyScanAt = DateTime.MinValue;
+    private const int MaxUiActionsPerDraw = 64;
+    private int _modStateSnapshotRefreshQueued = 0;
     
     private void RequestUiRefresh(string reason)
     {
@@ -429,6 +431,26 @@ public sealed partial class ConversionUI : Window, IDisposable
         }
         catch { }
         _needsUIRefresh = true;
+    }
+
+    private void EnqueueModStateSnapshotRefresh()
+    {
+        if (Interlocked.Exchange(ref _modStateSnapshotRefreshQueued, 1) != 0)
+            return;
+
+        _uiThreadActions.Enqueue(() =>
+        {
+            try
+            {
+                _modStateSnapshot = _modStateService.Snapshot();
+                _footerTotalsDirty = true;
+                _needsUIRefresh = true;
+            }
+            finally
+            {
+                Interlocked.Exchange(ref _modStateSnapshotRefreshQueued, 0);
+            }
+        });
     }
 
     private void ScheduleOrphanScan(string reason, bool force)
@@ -579,9 +601,13 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
         catch (Exception ex) { _logger.LogError(ex, "Subscribe OnStateSaved failed"); }
         _onModStateEntryChanged = m =>
         {
-            try { RefreshModState(m, "mod-state-changed"); }
+            try
+            {
+                if (IsOpen)
+                    RefreshModState(m, "mod-state-changed");
+            }
             catch (Exception ex) { _logger.LogError(ex, "RefreshModState failed for {mod}", m); }
-            try { _uiThreadActions.Enqueue(() => { _modStateSnapshot = _modStateService.Snapshot(); _footerTotalsDirty = true; _needsUIRefresh = true; }); }
+            try { EnqueueModStateSnapshotRefresh(); }
             catch (Exception ex) { _logger.LogError(ex, "Snapshot refresh failed for {mod}", m); }
         };
         try { _modStateService.OnEntryChanged += _onModStateEntryChanged; }
@@ -1244,11 +1270,15 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
             ImGui.Separator();
         }
         // Apply any background-computed UI state updates on the main thread
-        while (_uiThreadActions.TryDequeue(out var action))
+        var processedUiActions = 0;
+        while (processedUiActions < MaxUiActionsPerDraw && _uiThreadActions.TryDequeue(out var action))
         {
             try { action(); }
             catch (Exception ex) { _logger.LogError(ex, "UI thread action failed"); }
+            processedUiActions++;
         }
+        if (!_uiThreadActions.IsEmpty)
+            _needsUIRefresh = true;
         var showStartupProgress = (_startupTotalMods > 0) && (_startupProcessedMods < _startupTotalMods || _startupEtaSeconds > 0);
         if (showStartupProgress)
         {
@@ -1627,6 +1657,24 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                 var names = await _conversionService.GetModDisplayNamesAsync().ConfigureAwait(false);
                 var tags = await _conversionService.GetModTagsAsync().ConfigureAwait(false);
                 var folders = await _conversionService.GetAllModFoldersAsync().ConfigureAwait(false);
+                var prefetchedFilesByMod = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+                var prefetchedSizesByMod = new Dictionary<string, Dictionary<string, long>>(StringComparer.OrdinalIgnoreCase);
+                var known = new List<string>(folders?.Count ?? 0);
+                if (folders != null)
+                {
+                    foreach (var folder in folders)
+                    {
+                        var leaf = TextureConversionService.NormalizeLeafKey(folder);
+                        if (string.IsNullOrWhiteSpace(leaf))
+                            continue;
+                        known.Add(folder);
+                        var files = _modStateService.ReadDetailTextures(leaf) ?? new List<string>();
+                        var sizes = _modStateService.ReadDetailTextureSizes(leaf);
+                        prefetchedFilesByMod[leaf] = files;
+                        if (sizes.Count > 0)
+                            prefetchedSizesByMod[leaf] = sizes;
+                    }
+                }
 
                 _uiThreadActions.Enqueue(() =>
                 {
@@ -1643,6 +1691,7 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                         {
                             var existingKnown = _configService.Current.KnownModTags ?? new List<string>();
                             var normalizedExisting = new HashSet<string>(existingKnown.Select(NormalizeTag).Where(s => s.Length > 0), StringComparer.OrdinalIgnoreCase);
+                            var tagsChanged = false;
                             foreach (var kv in _modTags)
                             {
                                 var tagList = kv.Value;
@@ -1655,32 +1704,31 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                                     {
                                         existingKnown.Add(nt);
                                         normalizedExisting.Add(nt);
+                                        tagsChanged = true;
                                     }
                                 }
                             }
-                            _configService.Current.KnownModTags = existingKnown;
-                            _configService.Save();
+                            if (tagsChanged)
+                            {
+                                _configService.Current.KnownModTags = existingKnown;
+                                _configService.Save();
+                            }
                         }
                         catch { }
                     }
-                    if (folders != null)
+                    if (known.Count > 0)
                     {
-                        var known = new List<string>(folders.Count);
-                        foreach (var folder in folders)
+                        foreach (var kv in prefetchedSizesByMod)
                         {
-                            var leaf = TextureConversionService.NormalizeLeafKey(folder);
-                            if (string.IsNullOrWhiteSpace(leaf))
-                                continue;
-                            known.Add(folder);
-                            var files = _modStateService.ReadDetailTextures(leaf);
-                            var sizes = _modStateService.ReadDetailTextureSizes(leaf);
-                            if (sizes.Count > 0)
-                                _cacheService.SeedFileSizes(sizes);
-                            _scannedByMod[leaf] = files ?? new List<string>();
-                            foreach (var file in (files ?? new List<string>()))
+                            _cacheService.SeedFileSizes(kv.Value);
+                        }
+                        foreach (var kv in prefetchedFilesByMod)
+                        {
+                            _scannedByMod[kv.Key] = kv.Value;
+                            foreach (var file in kv.Value)
                             {
                                 _texturesToConvert[file] = Array.Empty<string>();
-                                _fileOwnerMod[file] = leaf;
+                                _fileOwnerMod[file] = kv.Key;
                             }
                         }
                         _knownModFolders = new HashSet<string>(known, StringComparer.OrdinalIgnoreCase);
@@ -1856,6 +1904,7 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                             // Persistently expand known tags list with newly discovered tags
                             var existingKnown = _configService.Current.KnownModTags ?? new List<string>();
                             var normalizedExisting = new HashSet<string>(existingKnown.Select(NormalizeTag).Where(s => s.Length > 0), StringComparer.OrdinalIgnoreCase);
+                            var tagsChanged = false;
                             foreach (var kv in _modTags)
                             {
                                 var tagList = kv.Value;
@@ -1868,11 +1917,15 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                                     {
                                         existingKnown.Add(nt);
                                         normalizedExisting.Add(nt);
+                                        tagsChanged = true;
                                     }
                                 }
                             }
-                            _configService.Current.KnownModTags = existingKnown;
-                            _configService.Save();
+                            if (tagsChanged)
+                            {
+                                _configService.Current.KnownModTags = existingKnown;
+                                _configService.Save();
+                            }
                         }
                         catch { }
                     }
@@ -2227,6 +2280,8 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
 
     private void RefreshModState(string mod, string origin)
     {
+        if (!IsOpen)
+            return;
         if (_startupRefreshInProgress)
             return;
         try

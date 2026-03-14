@@ -180,7 +180,7 @@ public sealed class DebugUI : Window
     {
         if (utc == DateTime.MinValue)
             return "n/a";
-        return utc.ToLocalTime().ToString("HH:mm:ss.fff", CultureInfo.InvariantCulture);
+        return utc.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss.fff", CultureInfo.InvariantCulture);
     }
 
     private static string FormatBool(bool value)

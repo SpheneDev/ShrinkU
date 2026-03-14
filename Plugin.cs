@@ -216,7 +216,8 @@ public sealed class Plugin : IDalamudPlugin
                         bool skipHeavy = false;
                         try
                         {
-                            await _penumbraFolderWatcher.WaitForInitialScanAsync(TimeSpan.FromSeconds(3), token).ConfigureAwait(false);
+                            var folderTimeoutSeconds = Math.Max(3, Math.Min(120, _configService.Current.StartupFolderTimeoutSeconds));
+                            await _penumbraFolderWatcher.WaitForInitialScanAsync(TimeSpan.FromSeconds(folderTimeoutSeconds), token).ConfigureAwait(false);
                             skipHeavy = _penumbraFolderWatcher.IsStartupSnapshotUnchanged();
                         }
                         catch { }

@@ -75,6 +75,15 @@ public sealed class PenumbraIpc : IDisposable
     private string _groupedScanCacheRoot = string.Empty;
     private Task<Dictionary<string, List<string>>>? _groupedScanInFlight;
     private static readonly TimeSpan s_groupedScanCacheTtl = TimeSpan.FromSeconds(30);
+    private readonly object _modMetaCacheLock = new();
+    private Dictionary<string, string> _modDisplayNameCache = new(StringComparer.OrdinalIgnoreCase);
+    private DateTime _modDisplayNameCacheUtc = DateTime.MinValue;
+    private Dictionary<string, List<string>> _modTagsCache = new(StringComparer.OrdinalIgnoreCase);
+    private Dictionary<string, long> _modTagsMetaStampCache = new(StringComparer.OrdinalIgnoreCase);
+    private DateTime _modTagsCacheUtc = DateTime.MinValue;
+    private static readonly TimeSpan s_modTagsCacheFastTtl = TimeSpan.FromSeconds(2);
+    private readonly object _modMetaSaveDebounceLock = new();
+    private CancellationTokenSource? _modMetaSaveCts;
 
     public PenumbraIpc(IDalamudPluginInterface pi, ILogger logger)
     {
@@ -105,6 +114,7 @@ public sealed class PenumbraIpc : IDisposable
         catch { _penumbraDeleteMod = null; }
 
         APIAvailable = CheckApi();
+        LoadModMetaCache();
 
         try
         {
@@ -121,6 +131,7 @@ public sealed class PenumbraIpc : IDisposable
                 _logger.LogTrace("Penumbra mod added");
                 ModAdded?.Invoke(dir);
                 ClearGroupedScanCache();
+                ClearModMetaCaches();
                 _logger.LogTrace("Penumbra ModsChanged broadcast: source=ModAdded");
                 ModsChanged?.Invoke();
             });
@@ -130,6 +141,7 @@ public sealed class PenumbraIpc : IDisposable
                 _logger.LogTrace("Penumbra mod deleted");
                 ModDeleted?.Invoke(dir);
                 ClearGroupedScanCache();
+                ClearModMetaCaches();
                 _logger.LogTrace("Penumbra ModsChanged broadcast: source=ModDeleted");
                 ModsChanged?.Invoke();
             });
@@ -139,6 +151,7 @@ public sealed class PenumbraIpc : IDisposable
                 _logger.LogTrace("Penumbra mod moved");
                 ModMoved?.Invoke(oldDir, newDir);
                 ClearGroupedScanCache();
+                ClearModMetaCaches();
                 // Moving a mod changes its hierarchical path; broadcast ModsChanged so consumers refresh paths
                 _logger.LogTrace("Penumbra ModsChanged broadcast: source=ModMoved");
                 ModsChanged?.Invoke();
@@ -192,6 +205,7 @@ public sealed class PenumbraIpc : IDisposable
                 _logger.LogTrace("Penumbra API initialized");
                 APIAvailable = CheckApi();
                 ClearGroupedScanCache();
+                ClearModMetaCaches();
                 _logger.LogTrace("Penumbra ModsChanged broadcast: source=Initialized");
                 ModsChanged?.Invoke();
                 // Start path watcher when API is ready
@@ -203,6 +217,7 @@ public sealed class PenumbraIpc : IDisposable
                 _logger.LogTrace("Penumbra API disposed");
                 APIAvailable = false;
                 ClearGroupedScanCache();
+                ClearModMetaCaches();
                 _logger.LogTrace("Penumbra ModsChanged broadcast: source=Disposed");
                 ModsChanged?.Invoke();
                 // Stop path watcher when API is disposed
@@ -265,6 +280,10 @@ public sealed class PenumbraIpc : IDisposable
         try { _subDisposed?.Dispose(); } catch { }
         try { _subGameObjectRedrawn?.Dispose(); } catch { }
         try { _subPostEnabledDraw?.Dispose(); } catch { }
+        try { _modMetaSaveCts?.Cancel(); } catch { }
+        try { _modMetaSaveCts?.Dispose(); } catch { }
+        _modMetaSaveCts = null;
+        try { SaveModMetaCacheNow(); } catch { }
         StopPathWatcher();
         _logger.LogDebug("Penumbra IPC subscribers disposed");
     }
@@ -384,6 +403,7 @@ public sealed class PenumbraIpc : IDisposable
                             {
                                 _lastPaths = confirm;
                                 ClearGroupedScanCache();
+                                ClearModMetaCaches();
                                 _logger.LogDebug("Penumbra ModsChanged broadcast: source=PathWatcher");
                                 try { ModsChanged?.Invoke(); } catch { }
                                 lastBroadcastUtc = now;
@@ -599,6 +619,165 @@ public sealed class PenumbraIpc : IDisposable
         }
     }
 
+    private void ClearModMetaCaches()
+    {
+        lock (_modMetaCacheLock)
+        {
+            _modDisplayNameCacheUtc = DateTime.MinValue;
+            _modTagsCacheUtc = DateTime.MinValue;
+        }
+    }
+
+    private string GetModMetaCachePath()
+    {
+        try
+        {
+            var cfgDir = _pi.ConfigDirectory?.FullName ?? string.Empty;
+            if (!string.IsNullOrWhiteSpace(cfgDir))
+            {
+                Directory.CreateDirectory(cfgDir);
+                return Path.Combine(cfgDir, "ShrinkU.mod_meta_cache.json");
+            }
+        }
+        catch { }
+
+        try
+        {
+            var fallback = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "XIVLauncher", "pluginConfigs");
+            Directory.CreateDirectory(fallback);
+            return Path.Combine(fallback, "ShrinkU.mod_meta_cache.json");
+        }
+        catch
+        {
+            return string.Empty;
+        }
+    }
+
+    private static string NormalizeRootPath(string path)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(path))
+                return string.Empty;
+            return Path.GetFullPath(path).Replace('/', '\\').TrimEnd('\\');
+        }
+        catch
+        {
+            return path ?? string.Empty;
+        }
+    }
+
+    private void LoadModMetaCache()
+    {
+        try
+        {
+            var path = GetModMetaCachePath();
+            if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+                return;
+            var json = File.ReadAllText(path);
+            var file = JsonSerializer.Deserialize<ModMetaCacheFile>(json, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            if (file == null)
+                return;
+
+            var currentRoot = NormalizeRootPath(ModDirectory ?? string.Empty);
+            var savedRoot = NormalizeRootPath(file.ModRootPath ?? string.Empty);
+            if (!string.IsNullOrWhiteSpace(currentRoot) && !string.IsNullOrWhiteSpace(savedRoot)
+                && !string.Equals(currentRoot, savedRoot, StringComparison.OrdinalIgnoreCase))
+                return;
+
+            lock (_modMetaCacheLock)
+            {
+                _modDisplayNameCache = new Dictionary<string, string>(file.DisplayNames ?? new Dictionary<string, string>(), StringComparer.OrdinalIgnoreCase);
+                _modTagsCache = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+                foreach (var kv in file.TagsByMod ?? new Dictionary<string, List<string>>())
+                    _modTagsCache[kv.Key] = kv.Value != null ? new List<string>(kv.Value) : new List<string>();
+                _modTagsMetaStampCache = new Dictionary<string, long>(file.TagMetaStamps ?? new Dictionary<string, long>(), StringComparer.OrdinalIgnoreCase);
+                _modDisplayNameCacheUtc = DateTime.UtcNow;
+                _modTagsCacheUtc = DateTime.UtcNow;
+            }
+        }
+        catch { }
+    }
+
+    private void ScheduleSaveModMetaCache()
+    {
+        lock (_modMetaSaveDebounceLock)
+        {
+            try { _modMetaSaveCts?.Cancel(); } catch { }
+            try { _modMetaSaveCts?.Dispose(); } catch { }
+            _modMetaSaveCts = new CancellationTokenSource();
+            var token = _modMetaSaveCts.Token;
+            Task.Run(async () =>
+            {
+                try
+                {
+                    await Task.Delay(500, token).ConfigureAwait(false);
+                    if (token.IsCancellationRequested)
+                        return;
+                    SaveModMetaCacheNow();
+                }
+                catch (TaskCanceledException) { }
+                catch { }
+            }, token);
+        }
+    }
+
+    private void SaveModMetaCacheNow()
+    {
+        try
+        {
+            var path = GetModMetaCachePath();
+            if (string.IsNullOrWhiteSpace(path))
+                return;
+
+            Dictionary<string, string> names;
+            Dictionary<string, List<string>> tags;
+            Dictionary<string, long> stamps;
+            lock (_modMetaCacheLock)
+            {
+                names = new Dictionary<string, string>(_modDisplayNameCache, StringComparer.OrdinalIgnoreCase);
+                tags = new Dictionary<string, List<string>>(_modTagsCache.Count, StringComparer.OrdinalIgnoreCase);
+                foreach (var kv in _modTagsCache)
+                    tags[kv.Key] = kv.Value != null ? new List<string>(kv.Value) : new List<string>();
+                stamps = new Dictionary<string, long>(_modTagsMetaStampCache, StringComparer.OrdinalIgnoreCase);
+            }
+
+            var file = new ModMetaCacheFile
+            {
+                SchemaVersion = 1,
+                ModRootPath = NormalizeRootPath(ModDirectory ?? string.Empty),
+                SavedUtc = DateTime.UtcNow,
+                DisplayNames = names,
+                TagsByMod = tags,
+                TagMetaStamps = stamps,
+            };
+
+            var tmp = path + ".tmp";
+            var json = JsonSerializer.Serialize(file, new JsonSerializerOptions { WriteIndented = true });
+            File.WriteAllText(tmp, json);
+            if (File.Exists(path))
+                File.Replace(tmp, path, null);
+            else
+                File.Move(tmp, path);
+        }
+        catch { }
+    }
+
+    private static long GetMetaStamp(string metaPath)
+    {
+        try
+        {
+            if (!File.Exists(metaPath))
+                return -1;
+            var fi = new FileInfo(metaPath);
+            return fi.LastWriteTimeUtc.Ticks ^ fi.Length;
+        }
+        catch
+        {
+            return -1;
+        }
+    }
+
     private static Dictionary<string, List<string>> CloneGroupedScanCache(Dictionary<string, List<string>> source)
     {
         var copy = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
@@ -614,6 +793,37 @@ public sealed class PenumbraIpc : IDisposable
         var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         try
         {
+            if (APIAvailable)
+            {
+                try
+                {
+                    var list = _penumbraGetModList.Invoke();
+                    foreach (var kv in list)
+                    {
+                        var folderName = kv.Key ?? string.Empty;
+                        if (ShouldSkipModRootFolder(folderName))
+                            continue;
+                        map[folderName] = string.IsNullOrWhiteSpace(kv.Value) ? folderName : kv.Value;
+                    }
+                    lock (_modMetaCacheLock)
+                    {
+                        _modDisplayNameCache = new Dictionary<string, string>(map, StringComparer.OrdinalIgnoreCase);
+                        _modDisplayNameCacheUtc = DateTime.UtcNow;
+                    }
+                    ScheduleSaveModMetaCache();
+                    return Task.FromResult(map);
+                }
+                catch { }
+            }
+
+            lock (_modMetaCacheLock)
+            {
+                if (_modDisplayNameCache.Count > 0)
+                {
+                    return Task.FromResult(new Dictionary<string, string>(_modDisplayNameCache, StringComparer.OrdinalIgnoreCase));
+                }
+            }
+
             if (string.IsNullOrWhiteSpace(ModDirectory) || !Directory.Exists(ModDirectory))
                 return Task.FromResult(map);
 
@@ -623,36 +833,17 @@ public sealed class PenumbraIpc : IDisposable
                 var folderName = Path.GetFileName(dir);
                 if (ShouldSkipModRootFolder(folderName))
                     continue;
-                var metaPath = Path.Combine(dir, "meta.json");
-                if (!File.Exists(metaPath))
-                {
-                    map[folderName] = folderName;
-                    continue;
-                }
-
-                try
-                {
-                    using var s = File.OpenRead(metaPath);
-                    using var doc = JsonDocument.Parse(s);
-                    if (doc.RootElement.TryGetProperty("Name", out var nameProp) && nameProp.ValueKind == JsonValueKind.String)
-                    {
-                        var display = nameProp.GetString();
-                        map[folderName] = string.IsNullOrWhiteSpace(display) ? folderName : display;
-                    }
-                    else
-                    {
-                        map[folderName] = folderName;
-                    }
-                }
-                catch
-                {
-                    map[folderName] = folderName;
-                }
+                map[folderName] = folderName;
             }
+            lock (_modMetaCacheLock)
+            {
+                _modDisplayNameCache = new Dictionary<string, string>(map, StringComparer.OrdinalIgnoreCase);
+                _modDisplayNameCacheUtc = DateTime.UtcNow;
+            }
+            ScheduleSaveModMetaCache();
         }
         catch
         {
-            // Ignore errors
         }
         return Task.FromResult(map);
     }
@@ -669,10 +860,23 @@ public sealed class PenumbraIpc : IDisposable
                     continue;
                 normalized[kv.Key] = string.IsNullOrWhiteSpace(kv.Value) ? kv.Key : kv.Value;
             }
+            lock (_modMetaCacheLock)
+            {
+                _modDisplayNameCache = new Dictionary<string, string>(normalized, StringComparer.OrdinalIgnoreCase);
+                _modDisplayNameCacheUtc = DateTime.UtcNow;
+            }
+            ScheduleSaveModMetaCache();
             return normalized;
         }
         catch
         {
+            lock (_modMetaCacheLock)
+            {
+                if (_modDisplayNameCache.Count > 0)
+                {
+                    return new Dictionary<string, string>(_modDisplayNameCache, StringComparer.OrdinalIgnoreCase);
+                }
+            }
             return new Dictionary<string, string>();
         }
     }
@@ -810,6 +1014,11 @@ public sealed class PenumbraIpc : IDisposable
         var name = modDirectory ?? string.Empty;
         try
         {
+            lock (_modMetaCacheLock)
+            {
+                if (_modDisplayNameCache.TryGetValue(name, out var cachedName) && !string.IsNullOrWhiteSpace(cachedName))
+                    return Task.FromResult(cachedName);
+            }
             if (string.IsNullOrWhiteSpace(ModDirectory) || !Directory.Exists(ModDirectory))
                 return Task.FromResult(name);
             var root = Path.GetFullPath(ModDirectory!);
@@ -826,7 +1035,14 @@ public sealed class PenumbraIpc : IDisposable
                 if (doc.RootElement.TryGetProperty("Name", out var nameProp) && nameProp.ValueKind == JsonValueKind.String)
                 {
                     var display = nameProp.GetString();
-                    return Task.FromResult(string.IsNullOrWhiteSpace(display) ? name : display);
+                    var resolved = string.IsNullOrWhiteSpace(display) ? name : display;
+                    lock (_modMetaCacheLock)
+                    {
+                        _modDisplayNameCache[name] = resolved;
+                        _modDisplayNameCacheUtc = DateTime.UtcNow;
+                    }
+                    ScheduleSaveModMetaCache();
+                    return Task.FromResult(resolved);
                 }
             }
             catch { }
@@ -840,13 +1056,27 @@ public sealed class PenumbraIpc : IDisposable
         var list = new List<string>();
         try
         {
+            var modKey = modDirectory ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(modKey))
+                return Task.FromResult(list);
+
             if (string.IsNullOrWhiteSpace(ModDirectory) || !Directory.Exists(ModDirectory))
                 return Task.FromResult(list);
             var root = Path.GetFullPath(ModDirectory!);
-            var dir = Path.Combine(root, modDirectory ?? string.Empty);
+            var dir = Path.Combine(root, modKey);
             if (!Directory.Exists(dir))
                 return Task.FromResult(list);
             var metaPath = Path.Combine(dir, "meta.json");
+            var stamp = GetMetaStamp(metaPath);
+            lock (_modMetaCacheLock)
+            {
+                if (_modTagsMetaStampCache.TryGetValue(modKey, out var cachedStamp)
+                    && cachedStamp == stamp
+                    && _modTagsCache.TryGetValue(modKey, out var cachedTags))
+                {
+                    return Task.FromResult(new List<string>(cachedTags));
+                }
+            }
             if (File.Exists(metaPath))
             {
                 try
@@ -868,6 +1098,13 @@ public sealed class PenumbraIpc : IDisposable
                 }
                 catch { }
             }
+            lock (_modMetaCacheLock)
+            {
+                _modTagsCache[modKey] = new List<string>(list);
+                _modTagsMetaStampCache[modKey] = stamp;
+                _modTagsCacheUtc = DateTime.UtcNow;
+            }
+            ScheduleSaveModMetaCache();
         }
         catch { }
         return Task.FromResult(list);
@@ -999,9 +1236,32 @@ public sealed class PenumbraIpc : IDisposable
         var tagsByMod = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
         try
         {
+            var now = DateTime.UtcNow;
+            lock (_modMetaCacheLock)
+            {
+                if (_modTagsCache.Count > 0 && (now - _modTagsCacheUtc) <= s_modTagsCacheFastTtl)
+                {
+                    var fast = new Dictionary<string, List<string>>(_modTagsCache.Count, StringComparer.OrdinalIgnoreCase);
+                    foreach (var kv in _modTagsCache)
+                        fast[kv.Key] = kv.Value != null ? new List<string>(kv.Value) : new List<string>();
+                    return Task.FromResult(fast);
+                }
+            }
+
             if (string.IsNullOrWhiteSpace(ModDirectory) || !Directory.Exists(ModDirectory))
                 return Task.FromResult(tagsByMod);
 
+            Dictionary<string, List<string>> previousTags;
+            Dictionary<string, long> previousStamps;
+            lock (_modMetaCacheLock)
+            {
+                previousTags = new Dictionary<string, List<string>>(_modTagsCache.Count, StringComparer.OrdinalIgnoreCase);
+                foreach (var kv in _modTagsCache)
+                    previousTags[kv.Key] = kv.Value != null ? new List<string>(kv.Value) : new List<string>();
+                previousStamps = new Dictionary<string, long>(_modTagsMetaStampCache, StringComparer.OrdinalIgnoreCase);
+            }
+
+            var currentStamps = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
             var root = Path.GetFullPath(ModDirectory!);
             foreach (var dir in Directory.EnumerateDirectories(root, "*", SearchOption.TopDirectoryOnly))
             {
@@ -1009,6 +1269,17 @@ public sealed class PenumbraIpc : IDisposable
                 if (ShouldSkipModRootFolder(folderName))
                     continue;
                 var metaPath = Path.Combine(dir, "meta.json");
+                var stamp = GetMetaStamp(metaPath);
+                currentStamps[folderName] = stamp;
+
+                if (previousStamps.TryGetValue(folderName, out var oldStamp)
+                    && oldStamp == stamp
+                    && previousTags.TryGetValue(folderName, out var oldTags))
+                {
+                    tagsByMod[folderName] = oldTags;
+                    continue;
+                }
+
                 var list = new List<string>();
                 if (File.Exists(metaPath))
                 {
@@ -1031,17 +1302,45 @@ public sealed class PenumbraIpc : IDisposable
                     }
                     catch
                     {
-                        // Ignore malformed meta.json
                     }
                 }
                 tagsByMod[folderName] = list;
             }
+
+            lock (_modMetaCacheLock)
+            {
+                _modTagsCache = new Dictionary<string, List<string>>(tagsByMod.Count, StringComparer.OrdinalIgnoreCase);
+                foreach (var kv in tagsByMod)
+                    _modTagsCache[kv.Key] = kv.Value != null ? new List<string>(kv.Value) : new List<string>();
+                _modTagsMetaStampCache = currentStamps;
+                _modTagsCacheUtc = DateTime.UtcNow;
+            }
+            ScheduleSaveModMetaCache();
         }
         catch
         {
-            // Ignore errors
+            lock (_modMetaCacheLock)
+            {
+                if (_modTagsCache.Count > 0)
+                {
+                    var fallback = new Dictionary<string, List<string>>(_modTagsCache.Count, StringComparer.OrdinalIgnoreCase);
+                    foreach (var kv in _modTagsCache)
+                        fallback[kv.Key] = kv.Value != null ? new List<string>(kv.Value) : new List<string>();
+                    return Task.FromResult(fallback);
+                }
+            }
         }
         return Task.FromResult(tagsByMod);
+    }
+
+    private sealed class ModMetaCacheFile
+    {
+        public int SchemaVersion { get; set; } = 1;
+        public string ModRootPath { get; set; } = string.Empty;
+        public DateTime SavedUtc { get; set; } = DateTime.MinValue;
+        public Dictionary<string, string> DisplayNames { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+        public Dictionary<string, List<string>> TagsByMod { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+        public Dictionary<string, long> TagMetaStamps { get; set; } = new(StringComparer.OrdinalIgnoreCase);
     }
 
     public void RedrawPlayer()
@@ -1093,6 +1392,11 @@ public sealed class PenumbraIpc : IDisposable
                 return false;
             var result = _penumbraAddMod.Invoke(modFolderName);
             try { _logger.LogDebug("Penumbra AddMod result for {mod}: {result}", modFolderName, result); } catch { }
+            if (result == Penumbra.Api.Enums.PenumbraApiEc.Success)
+            {
+                try { ClearGroupedScanCache(); } catch { }
+                try { ClearModMetaCaches(); } catch { }
+            }
             return result == Penumbra.Api.Enums.PenumbraApiEc.Success;
         }
         catch
@@ -1117,6 +1421,11 @@ public sealed class PenumbraIpc : IDisposable
                 return false;
             var result = m.Invoke(_penumbraDeleteMod, new object[] { modFolderName, string.Empty });
             try { _logger.LogDebug("Penumbra DeleteMod result for {mod}: {result}", modFolderName, result); } catch { }
+            if (result != null && result.ToString() == Penumbra.Api.Enums.PenumbraApiEc.Success.ToString())
+            {
+                try { ClearGroupedScanCache(); } catch { }
+                try { ClearModMetaCaches(); } catch { }
+            }
             return result != null && result.ToString() == Penumbra.Api.Enums.PenumbraApiEc.Success.ToString();
         }
         catch
@@ -1153,6 +1462,11 @@ public sealed class PenumbraIpc : IDisposable
             if (_penumbraSetModPath == null)
                 return false;
             var ec = _penumbraSetModPath.Invoke(modDirectory, fullPath, "");
+            if (ec == Penumbra.Api.Enums.PenumbraApiEc.Success)
+            {
+                try { ClearGroupedScanCache(); } catch { }
+                try { ClearModMetaCaches(); } catch { }
+            }
             return ec == Penumbra.Api.Enums.PenumbraApiEc.Success;
         }
         catch
@@ -1189,6 +1503,7 @@ public sealed class PenumbraIpc : IDisposable
             
             try { Directory.SetLastWriteTimeUtc(modPath, DateTime.UtcNow); } catch { }
             
+            try { ClearModMetaCaches(); } catch { }
             try { var _ = GetModPathsAsync(); } catch { }
             try { ModsChanged?.Invoke(); } catch { }
         }
