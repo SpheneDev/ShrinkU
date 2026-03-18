@@ -82,6 +82,8 @@ public sealed class ModStateService
     {
         if (string.IsNullOrWhiteSpace(mod))
             return new ModStateEntry { ModFolderName = string.Empty, LastUpdatedUtc = DateTime.UtcNow };
+        if (IsTempModStateArtifactName(mod))
+            return new ModStateEntry { ModFolderName = mod, LastUpdatedUtc = DateTime.UtcNow };
         lock (_lock)
         {
             if (!_state.TryGetValue(mod, out var e))
@@ -696,11 +698,14 @@ public sealed class ModStateService
             List<string>? removedKeys = null;
             lock (_lock)
             {
-                foreach (var key in _state.Keys)
+                foreach (var kv in _state)
                 {
+                    var key = kv.Key;
+                    var entry = kv.Value;
                     if (string.IsNullOrWhiteSpace(key)
                         || string.Equals(key, "Entries", StringComparison.OrdinalIgnoreCase)
-                        || string.Equals(key, "Meta", StringComparison.OrdinalIgnoreCase))
+                        || string.Equals(key, "Meta", StringComparison.OrdinalIgnoreCase)
+                        || IsTempModStateArtifact(key, entry))
                     {
                         removedKeys ??= new List<string>();
                         removedKeys.Add(key);
@@ -791,6 +796,27 @@ public sealed class ModStateService
             catch { }
             try { ScheduleSave(); } catch { }
         }
+    }
+
+    private static bool IsTempModStateArtifact(string key, ModStateEntry? entry)
+    {
+        if (IsTempModStateArtifactName(key)) return true;
+        if (entry == null) return false;
+        if (IsTempModStateArtifactName(entry.ModFolderName)) return true;
+        if (IsTempModStateArtifactName(entry.RelativeModName)) return true;
+        if (IsTempModStateArtifactName(entry.DisplayName)) return true;
+        if (IsTempModStateArtifactName(Path.GetFileName(entry.ModAbsolutePath ?? string.Empty))) return true;
+        return false;
+    }
+
+    private static bool IsTempModStateArtifactName(string? name)
+    {
+        if (string.IsNullOrWhiteSpace(name)) return false;
+        var n = name.Trim();
+        if (n.StartsWith("mod_state.json~", StringComparison.OrdinalIgnoreCase)) return true;
+        if (n.Contains("mod_state.json~", StringComparison.OrdinalIgnoreCase)) return true;
+        if (n.EndsWith(".tmp", StringComparison.OrdinalIgnoreCase) && n.Contains("~rf", StringComparison.OrdinalIgnoreCase)) return true;
+        return false;
     }
 
     private DateTime _lastSaveScheduledUtc = DateTime.MinValue;
