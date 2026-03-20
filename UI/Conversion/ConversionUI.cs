@@ -1106,6 +1106,19 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
         // Lightweight handling for mod setting changes: only affect current collection and debounce enabled-state reloads.
         _onPenumbraModSettingChanged = (change, collectionId, modDir, inherited) =>
         {
+            if (!string.IsNullOrWhiteSpace(modDir))
+            {
+                _uiThreadActions.Enqueue(() =>
+                {
+                    ClearModCaches(modDir);
+                    _modDisplayNames.Remove(modDir);
+                    _modTags.Remove(modDir);
+                    _needsUIRefresh = true;
+                    RefreshModState(modDir, "mod-setting-metadata");
+                    RequestUiRefresh("mod-setting-metadata");
+                });
+            }
+
             // Ignore changes not belonging to the currently selected collection.
             if (!_selectedCollectionId.HasValue || collectionId != _selectedCollectionId.Value)
             {

@@ -191,6 +191,7 @@ public sealed class PenumbraIpc : IDisposable
                             catch { }
                         });
                     }
+                    InvalidateModMetaCache(modDir);
                     // Forward specific change details to consumers on every event to preserve behavior.
                     ModSettingChanged?.Invoke(change, collectionId, modDir, inherited);
                 });
@@ -351,6 +352,7 @@ public sealed class PenumbraIpc : IDisposable
 
                         var current = await GetModPathsAsync().ConfigureAwait(false);
                         bool anyChange = false;
+                        bool membershipChanged = false;
 
                         // Detect moved mods
                         foreach (var kv in current)
@@ -363,6 +365,7 @@ public sealed class PenumbraIpc : IDisposable
                                 if (!string.Equals(oldNorm, path, StringComparison.Ordinal))
                                 {
                                     anyChange = true;
+                                    InvalidateModMetaCache(dir);
                                     _logger.LogDebug("Penumbra mod path changed (watcher): {dir} : {old} -> {new}", dir, oldPath, path);
                                     try { ModPathChanged?.Invoke(dir, path); } catch { }
                                 }
@@ -370,6 +373,7 @@ public sealed class PenumbraIpc : IDisposable
                             else
                             {
                                 anyChange = true;
+                                membershipChanged = true;
                                 _logger.LogDebug("Penumbra mod path discovered (watcher): {dir} : {new}", dir, path);
                                 try { ModPathChanged?.Invoke(dir, path); } catch { }
                             }
@@ -381,6 +385,7 @@ public sealed class PenumbraIpc : IDisposable
                             if (!current.ContainsKey(dir))
                             {
                                 anyChange = true;
+                                membershipChanged = true;
                                 _logger.LogDebug("Penumbra mod path missing (watcher): {dir} previously {old}", dir, _lastPaths[dir]);
                             }
                         }
@@ -406,10 +411,13 @@ public sealed class PenumbraIpc : IDisposable
                             if (confirmed && (now - lastBroadcastUtc) > TimeSpan.FromSeconds(5))
                             {
                                 _lastPaths = confirm;
-                                ClearGroupedScanCache();
-                                ClearModMetaCaches();
-                                _logger.LogDebug("Penumbra ModsChanged broadcast: source=PathWatcher");
-                                try { ModsChanged?.Invoke(); } catch { }
+                                if (membershipChanged)
+                                {
+                                    ClearGroupedScanCache();
+                                    ClearModMetaCaches();
+                                    _logger.LogDebug("Penumbra ModsChanged broadcast: source=PathWatcher");
+                                    try { ModsChanged?.Invoke(); } catch { }
+                                }
                                 lastBroadcastUtc = now;
                             }
                             else
@@ -627,8 +635,35 @@ public sealed class PenumbraIpc : IDisposable
     {
         lock (_modMetaCacheLock)
         {
+            _modDisplayNameCache.Clear();
+            _modTagsCache.Clear();
+            _modTagsMetaStampCache.Clear();
             _modDisplayNameCacheUtc = DateTime.MinValue;
             _modTagsCacheUtc = DateTime.MinValue;
+        }
+        lock (_modMetadataSourceLogLock)
+        {
+            _modMetadataSourceLast.Clear();
+        }
+    }
+
+    private void InvalidateModMetaCache(string? modDirectory)
+    {
+        if (string.IsNullOrWhiteSpace(modDirectory))
+            return;
+
+        var modKey = modDirectory.Trim();
+        lock (_modMetaCacheLock)
+        {
+            _modDisplayNameCache.Remove(modKey);
+            _modTagsCache.Remove(modKey);
+            _modTagsMetaStampCache.Remove(modKey);
+            _modDisplayNameCacheUtc = DateTime.MinValue;
+            _modTagsCacheUtc = DateTime.MinValue;
+        }
+        lock (_modMetadataSourceLogLock)
+        {
+            _modMetadataSourceLast.Remove(modKey);
         }
     }
 
@@ -1000,15 +1035,8 @@ public sealed class PenumbraIpc : IDisposable
                 LogMetadataSource(modDirectory, "api-miss", apiReason);
             }
 
-            if (string.IsNullOrWhiteSpace(ModDirectory) || !Directory.Exists(ModDirectory))
-            {
-                LogMetadataSource(modDirectory, "none", "penumbra-mod-root-missing");
-                return Task.FromResult<ModMetadata?>(null);
-            }
-
-            var root = Path.GetFullPath(ModDirectory!);
-            var dir = Path.Combine(root, modDirectory ?? string.Empty);
-            if (!Directory.Exists(dir))
+            var dir = ResolveModDirectoryAbsolutePath(modDirectory);
+            if (string.IsNullOrWhiteSpace(dir) || !Directory.Exists(dir))
             {
                 LogMetadataSource(modDirectory, "none", "mod-folder-missing-under-root");
                 return Task.FromResult<ModMetadata?>(null);
@@ -1175,11 +1203,8 @@ public sealed class PenumbraIpc : IDisposable
                 if (_modDisplayNameCache.TryGetValue(name, out var cachedName) && !string.IsNullOrWhiteSpace(cachedName))
                     return Task.FromResult(cachedName);
             }
-            if (string.IsNullOrWhiteSpace(ModDirectory) || !Directory.Exists(ModDirectory))
-                return Task.FromResult(name);
-            var root = Path.GetFullPath(ModDirectory!);
-            var dir = Path.Combine(root, modDirectory ?? string.Empty);
-            if (!Directory.Exists(dir))
+            var dir = ResolveModDirectoryAbsolutePath(modDirectory);
+            if (string.IsNullOrWhiteSpace(dir) || !Directory.Exists(dir))
                 return Task.FromResult(name);
             var metaPath = Path.Combine(dir, "meta.json");
             if (!File.Exists(metaPath))
@@ -1216,11 +1241,8 @@ public sealed class PenumbraIpc : IDisposable
             if (string.IsNullOrWhiteSpace(modKey))
                 return Task.FromResult(list);
 
-            if (string.IsNullOrWhiteSpace(ModDirectory) || !Directory.Exists(ModDirectory))
-                return Task.FromResult(list);
-            var root = Path.GetFullPath(ModDirectory!);
-            var dir = Path.Combine(root, modKey);
-            if (!Directory.Exists(dir))
+            var dir = ResolveModDirectoryAbsolutePath(modKey);
+            if (string.IsNullOrWhiteSpace(dir) || !Directory.Exists(dir))
                 return Task.FromResult(list);
             var metaPath = Path.Combine(dir, "meta.json");
             var stamp = GetMetaStamp(metaPath);
@@ -1264,6 +1286,34 @@ public sealed class PenumbraIpc : IDisposable
         }
         catch { }
         return Task.FromResult(list);
+    }
+
+    private string? ResolveModDirectoryAbsolutePath(string? modDirectory)
+    {
+        if (string.IsNullOrWhiteSpace(modDirectory))
+            return null;
+
+        try
+        {
+            var tuple = GetModPath(modDirectory);
+            var fullPath = tuple.FullPath ?? string.Empty;
+            if (!string.IsNullOrWhiteSpace(fullPath) && Directory.Exists(fullPath))
+                return Path.GetFullPath(fullPath);
+        }
+        catch { }
+
+        try
+        {
+            if (string.IsNullOrWhiteSpace(ModDirectory) || !Directory.Exists(ModDirectory))
+                return null;
+            var root = Path.GetFullPath(ModDirectory!);
+            var combined = Path.Combine(root, modDirectory);
+            if (Directory.Exists(combined))
+                return combined;
+        }
+        catch { }
+
+        return null;
     }
 
     // Get all collections and their names.

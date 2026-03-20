@@ -100,17 +100,11 @@ public TextureConversionService(ILogger logger, PenumbraIpc penumbraIpc, Texture
         {
             try
             {
-                var names = _penumbraIpc.GetModList();
-                var disp = names.TryGetValue(modDir, out var dn) ? (dn ?? string.Empty) : string.Empty;
-                var (folder, leaf) = SplitFolderAndLeaf(newPath, string.IsNullOrWhiteSpace(disp) ? (_modStateService.Get(modDir).RelativeModName ?? string.Empty) : disp);
-                var e = _modStateService.Get(modDir);
-                _modStateService.BeginBatch();
-                _modStateService.UpdateCurrentModInfo(modDir, e.ModAbsolutePath ?? string.Empty, folder, e.CurrentVersion ?? string.Empty, e.CurrentAuthor ?? string.Empty, string.IsNullOrWhiteSpace(leaf) ? (e.RelativeModName ?? string.Empty) : leaf);
-                _modStateService.EndBatch();
-                try { OnPenumbraModsChanged?.Invoke(); } catch { }
                 _lastChangedModDir = modDir ?? string.Empty;
                 _lastChangeTriggerUtc = DateTime.UtcNow;
                 try { if (!string.IsNullOrWhiteSpace(modDir)) _recentChangedMods[modDir!] = DateTime.UtcNow; } catch { }
+                _ = Task.Run(async () => { try { if (!string.IsNullOrWhiteSpace(modDir)) await UpdateModMetadataForModAsync(modDir, newPath).ConfigureAwait(false); } catch { } });
+                ScheduleModFileRefresh(modDir, "mod-path-changed");
                 _ = Task.Run(async () => { try { await ReconcileModPathsAndCategoriesAsync("mod-path-changed", false).ConfigureAwait(false); } catch { } });
             }
             catch { }
@@ -1059,7 +1053,10 @@ public TextureConversionService(ILogger logger, PenumbraIpc penumbraIpc, Texture
             _lastPathCategoryFingerprint = fp;
             _lastPathSyncUtc = DateTime.UtcNow;
             try { _logger.LogDebug("Path/category sync completed: reason={reason}", reason); } catch { }
-            try { OnPenumbraModsChanged?.Invoke(); } catch { }
+            if (!string.Equals(reason, "mod-path-changed", StringComparison.OrdinalIgnoreCase))
+            {
+                try { OnPenumbraModsChanged?.Invoke(); } catch { }
+            }
         }
         catch (Exception ex)
         {
@@ -2309,6 +2306,7 @@ public TextureConversionService(ILogger logger, PenumbraIpc penumbraIpc, Texture
             catch { }
 
             try { await UpdateUsedTextureFilesForModAsync(modDir).ConfigureAwait(false); } catch { }
+            try { await UpdateModMetadataForModAsync(modDir).ConfigureAwait(false); } catch { }
             _lastChangedModDir = modDir;
             _lastChangeTriggerUtc = DateTime.UtcNow;
             try { _recentChangedMods[modDir] = DateTime.UtcNow; } catch { }
@@ -2319,14 +2317,19 @@ public TextureConversionService(ILogger logger, PenumbraIpc penumbraIpc, Texture
             _modSettingRefreshSemaphore.Release();
         }
     }
-    private async Task UpdateModMetadataForModAsync(string modDir)
+    private async Task UpdateModMetadataForModAsync(string modDir, string? preferredPath = null)
     {
         try
         {
             var display = await GetModDisplayNameAsync(modDir).ConfigureAwait(false);
             var tags = await GetModTagsAsync(modDir).ConfigureAwait(false);
-            var tuple = _penumbraIpc.GetModPath(modDir);
-            var (folder, leaf) = SplitFolderAndLeaf(tuple.FullPath ?? string.Empty, display);
+            var pathForState = preferredPath ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(pathForState))
+            {
+                var tuple = _penumbraIpc.GetModPath(modDir);
+                pathForState = tuple.FullPath ?? string.Empty;
+            }
+            var (folder, leaf) = SplitFolderAndLeaf(pathForState, display);
             var existing = _modStateService.Get(modDir);
             var version = existing.CurrentVersion ?? string.Empty;
             var author = existing.CurrentAuthor ?? string.Empty;
@@ -2344,7 +2347,8 @@ public TextureConversionService(ILogger logger, PenumbraIpc penumbraIpc, Texture
             catch { }
             _modStateService.BeginBatch();
             _modStateService.UpdateDisplayAndTags(modDir, display, tags);
-            _modStateService.UpdateCurrentModInfo(modDir, existing.ModAbsolutePath ?? string.Empty, folder, version, author, leaf);
+            var absolutePath = !string.IsNullOrWhiteSpace(pathForState) ? pathForState : existing.ModAbsolutePath ?? string.Empty;
+            _modStateService.UpdateCurrentModInfo(modDir, absolutePath, folder, version, author, leaf);
             var coll = await GetCurrentCollectionAsync().ConfigureAwait(false);
             if (coll.HasValue)
             {
