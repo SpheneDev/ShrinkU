@@ -14,6 +14,7 @@ public sealed class PenumbraFolderWatcherService : IDisposable
     private readonly ILogger _logger;
     private readonly PenumbraIpc _penumbraIpc;
     private readonly ModStateService _modStateService;
+    private readonly bool _enableRealtimeWatcher;
     private readonly object _lock = new();
     private FileSystemWatcher? _watcher;
     private CancellationTokenSource? _debounceCts;
@@ -51,6 +52,7 @@ public sealed class PenumbraFolderWatcherService : IDisposable
         _logger = logger;
         _penumbraIpc = penumbraIpc;
         _modStateService = modStateService;
+        _enableRealtimeWatcher = string.Equals(Environment.GetEnvironmentVariable("SHRINKU_ENABLE_PENUMBRA_FSW"), "1", StringComparison.OrdinalIgnoreCase);
         try
         {
             _storedFingerprint = _modStateService.GetPenumbraFolderFingerprint();
@@ -64,6 +66,7 @@ public sealed class PenumbraFolderWatcherService : IDisposable
         _penumbraIpc.PenumbraEnabledChanged += OnPenumbraEnabledChanged;
         _penumbraIpc.ModsChanged += OnPenumbraModsChanged;
         _penumbraIpc.ModPathChanged += OnPenumbraModPathChanged;
+        try { _logger.LogDebug("Penumbra folder watcher realtime mode: {mode}", _enableRealtimeWatcher ? "enabled" : "fallback-api-only"); } catch { }
         TryStartOrUpdate("init");
     }
 
@@ -74,6 +77,7 @@ public sealed class PenumbraFolderWatcherService : IDisposable
             return new PenumbraFolderWatcherStatus
             {
                 WatcherActive = _watcherActive,
+                RealtimeWatcherEnabled = _enableRealtimeWatcher,
                 RootPath = _rootPath,
                 LastEventUtc = _lastEventUtc,
                 LastEventKind = _lastEventKind,
@@ -152,6 +156,16 @@ public sealed class PenumbraFolderWatcherService : IDisposable
         if (string.IsNullOrWhiteSpace(root) || !Directory.Exists(root))
         {
             StopWatcher("root-missing");
+            return;
+        }
+
+        _rootPath = root;
+
+        if (!_enableRealtimeWatcher)
+        {
+            if (_watcher != null || _watcherActive)
+                StopWatcher("api-fallback-mode");
+            ScheduleResync(reason, force: forceResync);
             return;
         }
 
@@ -673,6 +687,7 @@ public sealed class PenumbraFolderWatcherService : IDisposable
 public sealed class PenumbraFolderWatcherStatus
 {
     public bool WatcherActive { get; set; }
+    public bool RealtimeWatcherEnabled { get; set; }
     public string RootPath { get; set; } = string.Empty;
     public DateTime LastEventUtc { get; set; }
     public string LastEventKind { get; set; } = string.Empty;

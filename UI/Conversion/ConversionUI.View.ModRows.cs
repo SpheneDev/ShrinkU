@@ -53,7 +53,7 @@ public sealed partial class ConversionUI
         ImGui.SetNextItemOpen(open, ImGuiCond.Always);
         ImGui.PushFont(UiBuilder.IconFont);
         Vector4 iconColor = new Vector4(1f, 1f, 1f, 1f);
-        if (_modStateSnapshot != null && _modStateSnapshot.TryGetValue(mod, out var msEnabledPre) && msEnabledPre != null && msEnabledPre.Enabled)
+        if (_modEnabledStates.TryGetValue(mod, out var stEnabledPre) && stEnabledPre.Enabled)
             iconColor = new Vector4(0.40f, 0.85f, 0.40f, 1f);
         if (excluded)
             iconColor = new Vector4(0.85f, 0.60f, 0.20f, 1f);
@@ -64,6 +64,7 @@ public sealed partial class ConversionUI
         if (excluded)
             header = string.Concat(header, " [Excluded]");
         open = ImGui.TreeNodeEx($"{header}##mod-{mod}", nodeFlags);
+        DrawPenumbraUsedIndicator(mod, modState, totalAll);
         var modToggled = ImGui.IsItemToggledOpen();
         if (modToggled)
         {
@@ -257,6 +258,8 @@ public sealed partial class ConversionUI
             ImGui.BeginTooltip();
             ImGui.TextUnformatted($"{ResolveModDisplayName(mod)}");
             ImGui.Separator();
+            ImGui.TextUnformatted($"Penumbra ModDir: {mod}");
+            ImGui.TextUnformatted($"Used by Penumbra: {(IsModUsedByPenumbra(mod, modState) ? "Yes" : "No")}");
             var showConvertedCountTip = hasBackup && !(modState != null && modState.InstalledButNotConverted);
             ImGui.TextUnformatted($"Textures: {(showConvertedCountTip ? convertedAll : 0)}/{totalAll} converted");
             if (comparedFilesTip > 0)

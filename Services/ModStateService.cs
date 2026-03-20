@@ -439,24 +439,42 @@ public sealed class ModStateService
 
     public void UpdateTextureFiles(string mod, IReadOnlyList<string>? files, DateTime? lastWriteUtc = null)
     {
+        var list = (files ?? Array.Empty<string>()).Where(f => !string.IsNullOrWhiteSpace(f)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        Dictionary<string, long> sizes = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+        for (int i = 0; i < list.Count; i++)
+        {
+            var path = list[i];
+            if (string.IsNullOrWhiteSpace(path))
+                continue;
+            try
+            {
+                var fi = new FileInfo(path);
+                if (fi.Exists)
+                    sizes[path] = fi.Length;
+            }
+            catch { }
+        }
+
+        var shouldNotify = false;
         lock (_lock)
         {
             var e = Get(mod);
-            var list = (files ?? Array.Empty<string>()).Where(f => !string.IsNullOrWhiteSpace(f)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
-            Dictionary<string, long> sizes = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
-            for (int i = 0; i < list.Count; i++)
+            bool sameList = e.TextureFiles != null && e.TextureFiles.Count == list.Count;
+            if (sameList)
             {
-                var path = list[i];
-                if (string.IsNullOrWhiteSpace(path))
-                    continue;
-                try
+                var prevSet = new HashSet<string>(e.TextureFiles ?? new List<string>(), StringComparer.OrdinalIgnoreCase);
+                for (int i = 0; i < list.Count; i++)
                 {
-                    var fi = new FileInfo(path);
-                    if (fi.Exists)
-                        sizes[path] = fi.Length;
+                    if (!prevSet.Contains(list[i]))
+                    {
+                        sameList = false;
+                        break;
+                    }
                 }
-                catch { }
             }
+            var sameWrite = !lastWriteUtc.HasValue || e.LastKnownWriteUtc == lastWriteUtc.Value;
+            if (sameList && e.TotalTextures == list.Count && sameWrite && !e.NeedsRescan)
+                return;
             if (list.Count == 0 && e.TotalTextures > 0)
             {
                 try { _logger.LogDebug("[TRACE-ZERO-BUG] UpdateTextureFiles reset TotalTextures to 0 for {mod}. Prev={prev}. Trace: {trace}", mod, e.TotalTextures, Environment.StackTrace); } catch { }
@@ -470,13 +488,14 @@ public sealed class ModStateService
             }
             e.NeedsRescan = false;
             e.LastUpdatedUtc = DateTime.UtcNow;
-            WriteDetail(mod, list, null, sizes);
             _lastSaveReason = nameof(UpdateTextureFiles);
             _lastChangedMod = mod;
             ScheduleSave();
-            if (!_batching)
-                try { OnEntryChanged?.Invoke(mod); } catch { }
+            shouldNotify = !_batching;
         }
+        WriteDetail(mod, list, null, sizes);
+        if (shouldNotify)
+            try { OnEntryChanged?.Invoke(mod); } catch { }
     }
 
     public void UpdateUsedTextureFiles(string mod, IReadOnlyList<string>? files)
@@ -1043,9 +1062,88 @@ public sealed class ModStateService
         {
             if (string.IsNullOrWhiteSpace(mod)) return;
             if (!_state.Remove(mod)) return;
+            try
+            {
+                var dir = GetDetailDir();
+                var p = Path.Combine(dir, Sanitize(mod) + ".json");
+                if (File.Exists(p))
+                    File.Delete(p);
+            }
+            catch { }
             ScheduleSave();
             if (!_batching)
                 try { OnEntryChanged?.Invoke(mod); } catch { }
+        }
+    }
+
+    public void MoveEntry(string fromMod, string toMod)
+    {
+        lock (_lock)
+        {
+            if (string.IsNullOrWhiteSpace(fromMod) || string.IsNullOrWhiteSpace(toMod))
+                return;
+            if (string.Equals(fromMod, toMod, StringComparison.OrdinalIgnoreCase))
+                return;
+            if (!_state.TryGetValue(fromMod, out var fromEntry) || fromEntry == null)
+                return;
+
+            if (_state.TryGetValue(toMod, out var toEntry) && toEntry != null)
+            {
+                if ((toEntry.TotalTextures <= 0 && fromEntry.TotalTextures > 0) || (toEntry.ComparedFiles <= 0 && fromEntry.ComparedFiles > 0))
+                {
+                    toEntry.TotalTextures = Math.Max(toEntry.TotalTextures, fromEntry.TotalTextures);
+                    toEntry.ComparedFiles = Math.Max(toEntry.ComparedFiles, fromEntry.ComparedFiles);
+                    toEntry.OriginalBytes = Math.Max(toEntry.OriginalBytes, fromEntry.OriginalBytes);
+                    toEntry.CurrentBytes = Math.Max(toEntry.CurrentBytes, fromEntry.CurrentBytes);
+                    toEntry.BytesSaved = Math.Max(toEntry.BytesSaved, fromEntry.BytesSaved);
+                }
+                if (string.IsNullOrWhiteSpace(toEntry.ModAbsolutePath) && !string.IsNullOrWhiteSpace(fromEntry.ModAbsolutePath))
+                    toEntry.ModAbsolutePath = fromEntry.ModAbsolutePath;
+                if (string.IsNullOrWhiteSpace(toEntry.PenumbraRelativePath) && !string.IsNullOrWhiteSpace(fromEntry.PenumbraRelativePath))
+                    toEntry.PenumbraRelativePath = fromEntry.PenumbraRelativePath;
+                if (string.IsNullOrWhiteSpace(toEntry.RelativeModName) && !string.IsNullOrWhiteSpace(fromEntry.RelativeModName))
+                    toEntry.RelativeModName = fromEntry.RelativeModName;
+                if (string.IsNullOrWhiteSpace(toEntry.CurrentVersion) && !string.IsNullOrWhiteSpace(fromEntry.CurrentVersion))
+                    toEntry.CurrentVersion = fromEntry.CurrentVersion;
+                if (string.IsNullOrWhiteSpace(toEntry.CurrentAuthor) && !string.IsNullOrWhiteSpace(fromEntry.CurrentAuthor))
+                    toEntry.CurrentAuthor = fromEntry.CurrentAuthor;
+                if ((toEntry.UsedTextureFiles == null || toEntry.UsedTextureFiles.Count == 0) && fromEntry.UsedTextureFiles != null && fromEntry.UsedTextureFiles.Count > 0)
+                    toEntry.UsedTextureFiles = fromEntry.UsedTextureFiles;
+                toEntry.UsedTextureCount = Math.Max(toEntry.UsedTextureCount, fromEntry.UsedTextureCount);
+                toEntry.LastUpdatedUtc = DateTime.UtcNow;
+            }
+            else
+            {
+                _state.Remove(fromMod);
+                fromEntry.ModFolderName = toMod;
+                fromEntry.LastUpdatedUtc = DateTime.UtcNow;
+                _state[toMod] = fromEntry;
+            }
+
+            _state.Remove(fromMod);
+            try
+            {
+                var dir = GetDetailDir();
+                var oldPath = Path.Combine(dir, Sanitize(fromMod) + ".json");
+                var newPath = Path.Combine(dir, Sanitize(toMod) + ".json");
+                if (File.Exists(oldPath))
+                {
+                    if (!File.Exists(newPath))
+                        File.Move(oldPath, newPath);
+                    else
+                        File.Delete(oldPath);
+                }
+            }
+            catch { }
+
+            _lastSaveReason = nameof(MoveEntry);
+            _lastChangedMod = toMod;
+            ScheduleSave();
+            if (!_batching)
+            {
+                try { OnEntryChanged?.Invoke(fromMod); } catch { }
+                try { OnEntryChanged?.Invoke(toMod); } catch { }
+            }
         }
     }
 
