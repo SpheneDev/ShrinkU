@@ -11,6 +11,12 @@ public enum TextureProcessingMode
     Automatic = 1,
 }
 
+public enum ModStateStorageMode
+{
+    JsonStateFiles = 0,
+    SqliteDatabase = 1,
+}
+
 public sealed class ShrinkUConfig : IPluginConfiguration
 {
     public int Version { get; set; } = 1;
@@ -31,6 +37,7 @@ public sealed class ShrinkUConfig : IPluginConfiguration
     
     // Backup folder configuration
     public string BackupFolderPath { get; set; } = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "ShrinkU", "Backups");
+    public ModStateStorageMode ModStateStorageMode { get; set; } = ModStateStorageMode.JsonStateFiles;
 
     // UI layout persistence
     public float LeftPanelWidthPx { get; set; } = 0f;

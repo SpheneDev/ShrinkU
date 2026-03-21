@@ -20,6 +20,7 @@ public sealed class SettingsUI : Window
     private readonly ShrinkUConfigService _configService;
     private readonly TextureConversionService _conversionService;
     private readonly TextureBackupService _backupService;
+    private readonly ModStateService _modStateService;
     private readonly Action? _openReleaseNotes;
     private readonly DebugTraceService _debugTrace;
     private readonly Action? _openDebugUi;
@@ -31,13 +32,14 @@ public sealed class SettingsUI : Window
     private DateTime _lastOrphanScanUtc = DateTime.MinValue;
     private System.Threading.CancellationTokenSource? _orphanScanCts;
 
-    public SettingsUI(ILogger logger, ShrinkUConfigService configService, TextureConversionService conversionService, TextureBackupService backupService, Action? openReleaseNotes = null, DebugTraceService? debugTrace = null, Action? openDebugUi = null)
+    public SettingsUI(ILogger logger, ShrinkUConfigService configService, TextureConversionService conversionService, TextureBackupService backupService, ModStateService modStateService, Action? openReleaseNotes = null, DebugTraceService? debugTrace = null, Action? openDebugUi = null)
     : base("ShrinkU Settings###ShrinkUSettingsUI")
     {
         _logger = logger;
         _configService = configService;
         _conversionService = conversionService;
         _backupService = backupService;
+        _modStateService = modStateService;
         _openReleaseNotes = openReleaseNotes;
         _debugTrace = debugTrace ?? throw new ArgumentNullException(nameof(debugTrace));
         _openDebugUi = openDebugUi;
@@ -153,6 +155,32 @@ public sealed class SettingsUI : Window
                     ImGui.EndCombo();
                 }
                 UiTooltip.Show("Select how ShrinkU processes textures. When integrated with Sphene, only the Sphene-handled automatic mode is available.");
+
+                ImGui.Separator();
+                ImGui.TextColored(ShrinkUColors.Accent, "State Storage");
+                ImGui.Spacing();
+                var storageMode = _configService.Current.ModStateStorageMode;
+                var storageLabel = storageMode == ModStateStorageMode.SqliteDatabase ? "SQLite Database (plugin directory)" : "JSON State Files (backup cache)";
+                if (ImGui.BeginCombo("Mod state storage", storageLabel))
+                {
+                    if (ImGui.Selectable("JSON State Files (backup cache)", storageMode == ModStateStorageMode.JsonStateFiles))
+                    {
+                        _configService.Current.ModStateStorageMode = ModStateStorageMode.JsonStateFiles;
+                        _configService.Save();
+                    }
+
+                    if (ImGui.Selectable("SQLite Database (plugin directory)", storageMode == ModStateStorageMode.SqliteDatabase))
+                    {
+                        _configService.Current.ModStateStorageMode = ModStateStorageMode.SqliteDatabase;
+                        _configService.Save();
+                    }
+
+                    ImGui.EndCombo();
+                }
+                UiTooltip.Show("Switches the mod state backend. The selected mode is applied on next plugin start.");
+                ImGui.TextColored(ShrinkUColors.WarningLight, "Applies after restart.");
+                ImGui.Spacing();
+                DrawStateMigrationPanel();
 
                 ImGui.Separator();
                 ImGui.TextColored(ShrinkUColors.Accent, "Backups");
@@ -511,6 +539,117 @@ public sealed class SettingsUI : Window
     }
 
     private Action? _penumbraModsChangedHandler;
+    private volatile bool _sqliteMigrationInProgress = false;
+    private float _sqliteMigrationProgress = 0f;
+    private string _sqliteMigrationStage = string.Empty;
+    private string _sqliteMigrationSummary = string.Empty;
+    private DateTime _sqliteMigrationFinishedUtc = DateTime.MinValue;
+    private int _sqliteMigrationEntries = 0;
+    private int _sqliteMigrationDetails = 0;
+    private int _sqliteMigrationMissingDetails = 0;
+    private int _sqliteMigrationDetailErrors = 0;
+
+    private void DrawStateMigrationPanel()
+    {
+        ImGui.TextColored(ShrinkUColors.Accent, "JSON to SQLite Migration");
+        ImGui.TextWrapped("Copies current JSON state data into the SQLite database without removing JSON files.");
+        var sourcePath = _modStateService.GetPathForLegacyJsonState();
+        var targetPath = _modStateService.GetSqliteFilePath();
+        ImGui.TextWrapped($"Source JSON: {sourcePath}");
+        ImGui.TextWrapped($"Target SQLite: {targetPath}");
+
+        if (!_sqliteMigrationInProgress)
+        {
+            if (ImGui.Button("Migrate JSON to SQLite"))
+            {
+                StartSqliteMigration();
+            }
+        }
+        else
+        {
+            ImGui.BeginDisabled();
+            ImGui.Button("Migration running...");
+            ImGui.EndDisabled();
+        }
+
+        if (_sqliteMigrationInProgress)
+        {
+            ImGui.ProgressBar(Math.Clamp(_sqliteMigrationProgress, 0f, 1f), new Vector2(-1f, 0f), $"{_sqliteMigrationProgress * 100f:0}%");
+            if (!string.IsNullOrWhiteSpace(_sqliteMigrationStage))
+            {
+                ImGui.TextWrapped(_sqliteMigrationStage);
+            }
+        }
+
+        if (!string.IsNullOrWhiteSpace(_sqliteMigrationSummary))
+        {
+            ImGui.Spacing();
+            ImGui.TextWrapped(_sqliteMigrationSummary);
+            if (_sqliteMigrationFinishedUtc != DateTime.MinValue)
+            {
+                ImGui.Text($"Finished: {_sqliteMigrationFinishedUtc:yyyy-MM-dd HH:mm:ss} UTC");
+            }
+            ImGui.Text($"Entries migrated: {_sqliteMigrationEntries}");
+            ImGui.Text($"Detail files migrated: {_sqliteMigrationDetails}");
+            ImGui.Text($"Detail files missing: {_sqliteMigrationMissingDetails}");
+            ImGui.Text($"Detail file errors: {_sqliteMigrationDetailErrors}");
+        }
+    }
+
+    private void StartSqliteMigration()
+    {
+        if (_sqliteMigrationInProgress)
+            return;
+
+        _sqliteMigrationInProgress = true;
+        _sqliteMigrationProgress = 0f;
+        _sqliteMigrationStage = "Starting migration...";
+        _sqliteMigrationSummary = string.Empty;
+        _sqliteMigrationFinishedUtc = DateTime.MinValue;
+        _sqliteMigrationEntries = 0;
+        _sqliteMigrationDetails = 0;
+        _sqliteMigrationMissingDetails = 0;
+        _sqliteMigrationDetailErrors = 0;
+
+        var progress = new Progress<ModStateMigrationProgress>(p =>
+        {
+            var total = Math.Max(1, p.TotalSteps);
+            var completed = Math.Clamp(p.CompletedSteps, 0, total);
+            _sqliteMigrationProgress = completed / (float)total;
+            _sqliteMigrationStage = p.Stage ?? string.Empty;
+            _sqliteMigrationEntries = p.MigratedEntries;
+            _sqliteMigrationDetails = p.MigratedDetailFiles;
+            _sqliteMigrationMissingDetails = p.MissingDetailFiles;
+            _sqliteMigrationDetailErrors = p.DetailReadErrors;
+        });
+
+        System.Threading.Tasks.Task.Run(async () =>
+        {
+            try
+            {
+                var result = await _modStateService.MigrateJsonStateToSqliteAsync(progress).ConfigureAwait(false);
+                _sqliteMigrationSummary = result.Message;
+                _sqliteMigrationEntries = result.MigratedEntries;
+                _sqliteMigrationDetails = result.MigratedDetailFiles;
+                _sqliteMigrationMissingDetails = result.MissingDetailFiles;
+                _sqliteMigrationDetailErrors = result.DetailReadErrors;
+                _sqliteMigrationProgress = 1f;
+                _sqliteMigrationStage = result.Success ? "Completed" : "Failed";
+                _sqliteMigrationFinishedUtc = result.FinishedUtc;
+            }
+            catch (Exception ex)
+            {
+                _sqliteMigrationSummary = $"Migration failed: {ex.Message}";
+                _sqliteMigrationStage = "Failed";
+                _sqliteMigrationFinishedUtc = DateTime.UtcNow;
+                try { _logger.LogError(ex, "State migration to SQLite failed"); } catch { }
+            }
+            finally
+            {
+                _sqliteMigrationInProgress = false;
+            }
+        });
+    }
 
     public void Dispose()
     {
