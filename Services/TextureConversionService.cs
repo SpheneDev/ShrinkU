@@ -37,6 +37,7 @@ public sealed class TextureConversionService : IDisposable
     public event Action<bool>? OnPenumbraEnabledChanged;
     public event Action<string>? OnExternalTexturesChanged;
     public event Action? OnPlayerResourcesChanged;
+    public event Action<string>? OnPenumbraModPathsChanged;
     private DateTime _lastModSettingChangedAt = DateTime.MinValue;
     private DateTime _lastAutoAttemptUtc = DateTime.MinValue;
     private Dictionary<string, string[]>? _lastAutoCandidates;
@@ -47,6 +48,19 @@ public sealed class TextureConversionService : IDisposable
     private readonly SemaphoreSlim _pathSyncSemaphore = new(1, 1);
     private DateTime _lastPathSyncUtc = DateTime.MinValue;
     private string _lastPathCategoryFingerprint = string.Empty;
+    private int _pathSyncPending;
+    private string _pathSyncPendingReason = string.Empty;
+    private bool _pathSyncPendingPeriodic;
+    private long _pathSyncQueuedCount;
+    private long _pathSyncRunCount;
+    private long _pathSyncAppliedCount;
+    private long _pathSyncSkippedCount;
+    private long _pathSyncErrorCount;
+    private long _pathSyncLastElapsedMs;
+    private DateTime _pathSyncLastRunUtc = DateTime.MinValue;
+    private string _pathSyncLastReason = string.Empty;
+    private bool _pathSyncLastPeriodic;
+    private bool _pathSyncLastFromPendingQueue;
     private CancellationTokenSource? _backupRefreshCts;
     private bool _subscriptionsAttached = false;
     private string _lastChangedModDir = string.Empty;
@@ -1030,8 +1044,19 @@ public TextureConversionService(ILogger logger, PenumbraIpc penumbraIpc, Texture
             return;
         if (periodic && (DateTime.UtcNow - _lastPathSyncUtc) < TimeSpan.FromSeconds(20))
             return;
+        var fromPendingQueue = string.Equals(reason, "path-sync-pending", StringComparison.OrdinalIgnoreCase);
         if (!await _pathSyncSemaphore.WaitAsync(0).ConfigureAwait(false))
+        {
+            _pathSyncPendingReason = string.IsNullOrWhiteSpace(reason) ? "path-sync-pending" : reason;
+            _pathSyncPendingPeriodic = _pathSyncPendingPeriodic || periodic;
+            Interlocked.Exchange(ref _pathSyncPending, 1);
+            Interlocked.Increment(ref _pathSyncQueuedCount);
             return;
+        }
+        var syncReason = string.IsNullOrWhiteSpace(reason) ? "path-sync" : reason;
+        var changed = false;
+        var runSw = System.Diagnostics.Stopwatch.StartNew();
+        Interlocked.Increment(ref _pathSyncRunCount);
         try
         {
             var paths = await _penumbraIpc.GetModPathsAsync().ConfigureAwait(false);
@@ -1039,38 +1064,85 @@ public TextureConversionService(ILogger logger, PenumbraIpc penumbraIpc, Texture
             if (paths.Count == 0 && names.Count == 0)
             {
                 _lastPathSyncUtc = DateTime.UtcNow;
-                try { _logger.LogDebug("Path/category sync skipped: reason={reason} empty-penumbra-set", reason); } catch { }
+                Interlocked.Increment(ref _pathSyncSkippedCount);
+                try { _logger.LogDebug("Path/category sync skipped: reason={reason} empty-penumbra-set", syncReason); } catch { }
                 return;
             }
             var fp = BuildPathCategoryFingerprint(paths, names);
             if (periodic && !string.IsNullOrWhiteSpace(_lastPathCategoryFingerprint) && string.Equals(_lastPathCategoryFingerprint, fp, StringComparison.Ordinal))
             {
                 _lastPathSyncUtc = DateTime.UtcNow;
-                try { _logger.LogDebug("Path/category sync skipped: reason={reason} unchanged", reason); } catch { }
+                Interlocked.Increment(ref _pathSyncSkippedCount);
+                try { _logger.LogDebug("Path/category sync skipped: reason={reason} unchanged", syncReason); } catch { }
                 return;
             }
             await UpdateAllModPathsAsync(paths, names).ConfigureAwait(false);
+            changed = !string.IsNullOrWhiteSpace(_lastPathCategoryFingerprint) && !string.Equals(_lastPathCategoryFingerprint, fp, StringComparison.Ordinal);
+            if (string.IsNullOrWhiteSpace(_lastPathCategoryFingerprint))
+                changed = true;
             _lastPathCategoryFingerprint = fp;
             _lastPathSyncUtc = DateTime.UtcNow;
-            try { _logger.LogDebug("Path/category sync completed: reason={reason}", reason); } catch { }
-            if (!string.Equals(reason, "mod-path-changed", StringComparison.OrdinalIgnoreCase))
+            try { _logger.LogDebug("Path/category sync completed: reason={reason}", syncReason); } catch { }
+            if (changed)
             {
-                try { OnPenumbraModsChanged?.Invoke(); } catch { }
+                Interlocked.Increment(ref _pathSyncAppliedCount);
+                try { OnPenumbraModPathsChanged?.Invoke(syncReason); } catch { }
+                if (!string.Equals(syncReason, "mod-path-changed", StringComparison.OrdinalIgnoreCase))
+                {
+                    try { OnPenumbraModsChanged?.Invoke(); } catch { }
+                }
             }
         }
         catch (Exception ex)
         {
-            try { _logger.LogDebug(ex, "Path/category sync failed: reason={reason}", reason); } catch { }
+            Interlocked.Increment(ref _pathSyncErrorCount);
+            try { _logger.LogDebug(ex, "Path/category sync failed: reason={reason}", syncReason); } catch { }
         }
         finally
         {
+            runSw.Stop();
+            _pathSyncLastElapsedMs = (long)Math.Round(runSw.Elapsed.TotalMilliseconds);
+            _pathSyncLastRunUtc = DateTime.UtcNow;
+            _pathSyncLastReason = syncReason;
+            _pathSyncLastPeriodic = periodic;
+            _pathSyncLastFromPendingQueue = fromPendingQueue;
             _pathSyncSemaphore.Release();
+            if (Interlocked.Exchange(ref _pathSyncPending, 0) == 1)
+            {
+                var pendingReason = _pathSyncPendingReason;
+                var pendingPeriodic = _pathSyncPendingPeriodic;
+                _pathSyncPendingReason = string.Empty;
+                _pathSyncPendingPeriodic = false;
+                _ = Task.Run(async () =>
+                {
+                    try { await ReconcileModPathsAndCategoriesAsync(string.IsNullOrWhiteSpace(pendingReason) ? "path-sync-pending" : pendingReason, pendingPeriodic).ConfigureAwait(false); } catch { }
+                });
+            }
         }
     }
 
     public Task ForcePathAndCategorySyncAsync(string reason)
     {
         return ReconcileModPathsAndCategoriesAsync(string.IsNullOrWhiteSpace(reason) ? "manual-path-sync" : reason, false);
+    }
+
+    public PathSyncDebugStats GetPathSyncDebugStats()
+    {
+        return new PathSyncDebugStats
+        {
+            LastSyncUtc = _pathSyncLastRunUtc,
+            LastReason = _pathSyncLastReason,
+            LastElapsedMs = _pathSyncLastElapsedMs,
+            LastPeriodic = _pathSyncLastPeriodic,
+            LastSyncFromPendingQueue = _pathSyncLastFromPendingQueue,
+            QueuedCount = _pathSyncQueuedCount,
+            RunCount = _pathSyncRunCount,
+            AppliedCount = _pathSyncAppliedCount,
+            SkippedCount = _pathSyncSkippedCount,
+            ErrorCount = _pathSyncErrorCount,
+            PendingNow = _pathSyncPending != 0,
+            PendingReason = _pathSyncPendingReason,
+        };
     }
 
     public async Task StartConversionAsync(Dictionary<string, string[]> textures)
@@ -2402,4 +2474,20 @@ public TextureConversionService(ILogger logger, PenumbraIpc penumbraIpc, Texture
         }
         catch { }
     }
+}
+
+public sealed class PathSyncDebugStats
+{
+    public DateTime LastSyncUtc { get; set; } = DateTime.MinValue;
+    public string LastReason { get; set; } = string.Empty;
+    public long LastElapsedMs { get; set; } = 0;
+    public bool LastPeriodic { get; set; } = false;
+    public bool LastSyncFromPendingQueue { get; set; } = false;
+    public long QueuedCount { get; set; } = 0;
+    public long RunCount { get; set; } = 0;
+    public long AppliedCount { get; set; } = 0;
+    public long SkippedCount { get; set; } = 0;
+    public long ErrorCount { get; set; } = 0;
+    public bool PendingNow { get; set; } = false;
+    public string PendingReason { get; set; } = string.Empty;
 }

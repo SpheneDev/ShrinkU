@@ -48,6 +48,8 @@ public sealed partial class ConversionUI : Window, IDisposable
     private Dictionary<string, string> _modPathsStable = new(StringComparer.OrdinalIgnoreCase);
     private string _modPathsSig = string.Empty;
     private bool _loadingModPaths = false;
+    private bool _pendingModPathsRefresh = false;
+    private string _pendingModPathsReason = string.Empty;
     private Dictionary<Guid, string> _collections = new();
     private Guid? _selectedCollectionId = null;
     private Dictionary<string, (bool Enabled, int Priority, bool Inherited, bool Temporary)> _modEnabledStates
@@ -628,6 +630,7 @@ public sealed partial class ConversionUI : Window, IDisposable
     private readonly Action _onExcludedModsUpdated;
     private readonly Action _onPlayerResourcesChanged;
     private readonly Action<string> _onModStateEntryChanged;
+    private readonly Action<string> _onPenumbraModPathsChanged;
     
     // Track last external conversion/restore notification to surface UI indicator
     private DateTime _lastExternalChangeAt = DateTime.MinValue;
@@ -885,6 +888,13 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
             _uiThreadActions.Enqueue(() => { _needsUIRefresh = true; RequestUiRefresh("mods-changed-light"); });
         };
         _conversionService.OnPenumbraModsChanged += _onPenumbraModsChanged;
+        _onPenumbraModPathsChanged = reason =>
+        {
+            RequestUiRefresh("penumbra-mod-paths-changed");
+            RefreshModPathsFromPenumbra(string.IsNullOrWhiteSpace(reason) ? "path-changed" : reason);
+            _uiThreadActions.Enqueue(() => { _needsUIRefresh = true; });
+        };
+        _conversionService.OnPenumbraModPathsChanged += _onPenumbraModPathsChanged;
         ScheduleOrphanScan("startup", true);
 
         // React to external texture changes (e.g., conversions/restores initiated by Sphene)
@@ -1399,6 +1409,8 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
         catch (Exception ex) { _logger.LogError(ex, "Unsubscribe OnModProgress failed"); }
         try { _conversionService.OnPenumbraModsChanged -= _onPenumbraModsChanged; }
         catch (Exception ex) { _logger.LogError(ex, "Unsubscribe OnPenumbraModsChanged failed"); }
+        try { _conversionService.OnPenumbraModPathsChanged -= _onPenumbraModPathsChanged; }
+        catch (Exception ex) { _logger.LogError(ex, "Unsubscribe OnPenumbraModPathsChanged failed"); }
         try { _conversionService.OnPenumbraModAdded -= _onPenumbraModAdded; }
         catch (Exception ex) { _logger.LogError(ex, "Unsubscribe OnPenumbraModAdded failed"); }
         try { _conversionService.OnPenumbraModDeleted -= _onPenumbraModDeleted; }
@@ -2441,7 +2453,11 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
     private void RefreshModPathsFromPenumbra(string reason)
     {
         if (_loadingModPaths)
+        {
+            _pendingModPathsRefresh = true;
+            _pendingModPathsReason = string.IsNullOrWhiteSpace(reason) ? "queued" : reason;
             return;
+        }
         _loadingModPaths = true;
         _ = Task.Run(async () =>
         {
@@ -2475,11 +2491,28 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                     ApplyModPathsState(live);
                     _loadingModPaths = false;
                     RequestUiRefresh(string.Concat("mod-paths-refresh-", reason));
+                    if (_pendingModPathsRefresh)
+                    {
+                        var pendingReason = _pendingModPathsReason;
+                        _pendingModPathsRefresh = false;
+                        _pendingModPathsReason = string.Empty;
+                        RefreshModPathsFromPenumbra(string.IsNullOrWhiteSpace(pendingReason) ? "queued" : pendingReason);
+                    }
                 });
             }
             catch
             {
-                _uiThreadActions.Enqueue(() => { _loadingModPaths = false; });
+                _uiThreadActions.Enqueue(() =>
+                {
+                    _loadingModPaths = false;
+                    if (_pendingModPathsRefresh)
+                    {
+                        var pendingReason = _pendingModPathsReason;
+                        _pendingModPathsRefresh = false;
+                        _pendingModPathsReason = string.Empty;
+                        RefreshModPathsFromPenumbra(string.IsNullOrWhiteSpace(pendingReason) ? "queued" : pendingReason);
+                    }
+                });
             }
         });
     }

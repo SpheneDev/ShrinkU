@@ -179,6 +179,7 @@ public sealed class SettingsUI : Window
                 }
                 UiTooltip.Show("Switches the mod state backend. The selected mode is applied on next plugin start.");
                 ImGui.TextColored(ShrinkUColors.WarningLight, "Applies after restart.");
+                ImGui.TextWrapped("SQLite storage is currently a transition rollout. If you run into issues, switch back to JSON state files and restart.");
                 ImGui.Spacing();
                 DrawStateMigrationPanel();
 

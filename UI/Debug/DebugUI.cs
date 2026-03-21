@@ -2,12 +2,14 @@ using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Windowing;
 using Microsoft.Extensions.Logging;
 using ShrinkU.Configuration;
+using ShrinkU.Helpers;
 using ShrinkU.Services;
 using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Numerics;
+using System.Diagnostics;
 using System.Threading.Tasks;
 
 namespace ShrinkU.UI;
@@ -20,6 +22,7 @@ public sealed class DebugUI : Window
     private readonly PenumbraFolderWatcherService _penumbraFolderWatcher;
     private readonly BackupFolderWatcherService _backupFolderWatcher;
     private readonly TextureConversionService _conversionService;
+    private readonly ModStateService _modStateService;
     private string _actionFilter = string.Empty;
     private bool _penumbraModListLoading = false;
     private Dictionary<string, string> _penumbraModPaths = new(StringComparer.OrdinalIgnoreCase);
@@ -28,6 +31,23 @@ public sealed class DebugUI : Window
     private string _penumbraModDataError = string.Empty;
     private PenumbraModDebugSnapshot? _penumbraModData;
     private int _penumbraModLoadVersion = 0;
+    private readonly Queue<SystemPerfSample> _systemPerfSamples = new();
+    private DateTime _lastSystemPerfSampleUtc = DateTime.MinValue;
+    private TimeSpan _lastProcessCpuTime = TimeSpan.Zero;
+    private bool _systemPerfInitialized = false;
+    private readonly int _gcGen0Baseline;
+    private readonly int _gcGen1Baseline;
+    private readonly int _gcGen2Baseline;
+
+    private sealed class SystemPerfSample
+    {
+        public DateTime AtUtc { get; init; }
+        public double CpuPercent { get; init; }
+        public long WorkingSetBytes { get; init; }
+        public long PrivateBytes { get; init; }
+        public long GcHeapBytes { get; init; }
+        public int ThreadCount { get; init; }
+    }
 
     private sealed class PenumbraModDebugSnapshot
     {
@@ -51,7 +71,7 @@ public sealed class DebugUI : Window
         public DateTime LoadedAtUtc { get; init; }
     }
 
-    public DebugUI(ILogger logger, ShrinkUConfigService configService, DebugTraceService debugTrace, PenumbraFolderWatcherService penumbraFolderWatcher, BackupFolderWatcherService backupFolderWatcher, TextureConversionService conversionService)
+    public DebugUI(ILogger logger, ShrinkUConfigService configService, DebugTraceService debugTrace, PenumbraFolderWatcherService penumbraFolderWatcher, BackupFolderWatcherService backupFolderWatcher, TextureConversionService conversionService, ModStateService modStateService)
         : base("ShrinkU Debug###ShrinkUDebugUI")
     {
         _logger = logger;
@@ -60,6 +80,10 @@ public sealed class DebugUI : Window
         _penumbraFolderWatcher = penumbraFolderWatcher;
         _backupFolderWatcher = backupFolderWatcher;
         _conversionService = conversionService;
+        _modStateService = modStateService;
+        _gcGen0Baseline = GC.CollectionCount(0);
+        _gcGen1Baseline = GC.CollectionCount(1);
+        _gcGen2Baseline = GC.CollectionCount(2);
 
         SizeConstraints = new WindowSizeConstraints
         {
@@ -87,6 +111,16 @@ public sealed class DebugUI : Window
             if (ImGui.BeginTabItem("Backup Watcher"))
             {
                 DrawBackupWatcherTab();
+                ImGui.EndTabItem();
+            }
+            if (ImGui.BeginTabItem("Storage"))
+            {
+                DrawStorageTab();
+                ImGui.EndTabItem();
+            }
+            if (ImGui.BeginTabItem("System"))
+            {
+                DrawSystemTab();
                 ImGui.EndTabItem();
             }
             if (ImGui.BeginTabItem("Penumbra Mod Debug"))
@@ -144,6 +178,7 @@ public sealed class DebugUI : Window
     private void DrawPenumbraWatcherTab()
     {
         var status = _penumbraFolderWatcher.GetStatus();
+        var pathSync = _conversionService.GetPathSyncDebugStats();
         ImGui.TextColored(ShrinkUColors.Accent, "Penumbra Folder Watcher");
         ImGui.Separator();
 
@@ -165,6 +200,21 @@ public sealed class DebugUI : Window
         ImGui.Text($"Startup Diff: {FormatBool(status.StartupDiffDetected)}");
         ImGui.TextWrapped($"Last Reason: {SafeText(status.LastChangeReason)}");
         ImGui.TextWrapped($"Last Error: {SafeText(status.LastError)}");
+        ImGui.Separator();
+        ImGui.TextColored(ShrinkUColors.Accent, "Path-Sync Queue Stats");
+        ImGui.Text($"Queued While Busy: {pathSync.QueuedCount}");
+        ImGui.Text($"Sync Runs: {pathSync.RunCount}");
+        ImGui.Text($"Applied Changes: {pathSync.AppliedCount}");
+        ImGui.Text($"Skipped Runs: {pathSync.SkippedCount}");
+        ImGui.Text($"Errors: {pathSync.ErrorCount}");
+        ImGui.Text($"Pending Now: {FormatBool(pathSync.PendingNow)}");
+        ImGui.TextWrapped($"Pending Reason: {SafeText(pathSync.PendingReason)}");
+        ImGui.Text($"Last Sync UTC: {FormatUtc(pathSync.LastSyncUtc)}");
+        ImGui.Text($"Last Sync Reason: {SafeText(pathSync.LastReason)}");
+        ImGui.Text($"Last Sync Duration: {pathSync.LastElapsedMs} ms");
+        ImGui.Text($"Last Sync Periodic: {FormatBool(pathSync.LastPeriodic)}");
+        ImGui.Text($"Last Sync Was Queued: {FormatBool(pathSync.LastSyncFromPendingQueue)}");
+        ImGui.Text("Dropped Events: 0");
     }
 
     private void DrawBackupWatcherTab()
@@ -185,6 +235,124 @@ public sealed class DebugUI : Window
         ImGui.Text($"Stored Snapshot: {FormatUtc(status.StoredFingerprintUtc)}");
         ImGui.Text($"Snapshot Unchanged: {FormatBool(status.StoredFingerprintMatchesCurrent)}");
         ImGui.TextWrapped($"Last Error: {SafeText(status.LastError)}");
+    }
+
+    private void DrawStorageTab()
+    {
+        var s = _modStateService.GetStorageDebugStats();
+        ImGui.TextColored(ShrinkUColors.Accent, "Mod State Storage");
+        ImGui.Separator();
+        ImGui.Text($"Mode: {SafeText(s.StorageMode)}");
+        ImGui.TextWrapped($"Path: {SafeText(s.StatePath)}");
+        ImGui.Text($"Save In Progress: {FormatBool(s.SaveInProgress)}");
+        ImGui.Text($"Force Full Sync Pending: {FormatBool(s.ForceFullSyncPending)}");
+        ImGui.Text($"Pending Dirty Mods: {s.PendingDirtyCount}");
+        ImGui.Text($"Pending Deleted Mods: {s.PendingDeletedCount}");
+        ImGui.Separator();
+        ImGui.TextColored(ShrinkUColors.Accent, "SQLite Save Throughput");
+        ImGui.Text($"Saves: {s.SqliteSaveCount}");
+        ImGui.Text($"Skipped Saves: {s.SqliteSaveSkippedCount}");
+        ImGui.Text($"Full Saves: {s.SqliteFullSaveCount}");
+        ImGui.Text($"Incremental Saves: {s.SqliteIncrementalSaveCount}");
+        ImGui.Text($"Total Upserts: {s.SqliteUpsertCount}");
+        ImGui.Text($"Total Deletes: {s.SqliteDeleteCount}");
+        ImGui.Text($"Avg Save Duration: {s.SqliteAverageElapsedMs.ToString("0.0", CultureInfo.InvariantCulture)} ms");
+        ImGui.Text($"Max Save Duration: {s.SqliteMaxElapsedMs} ms");
+        ImGui.Separator();
+        ImGui.TextColored(ShrinkUColors.Accent, "Last Save");
+        ImGui.Text($"UTC: {FormatUtc(s.LastSaveUtc)}");
+        ImGui.Text($"Duration: {s.LastSaveElapsedMs} ms");
+        ImGui.Text($"Full Sync: {FormatBool(s.LastSaveWasFullSync)}");
+        ImGui.Text($"Dirty Mods Seen: {s.LastSaveDirtyCount}");
+        ImGui.Text($"Deleted Mods Seen: {s.LastSaveDeletedCount}");
+        ImGui.Text($"Rows Upserted: {s.LastSaveUpsertedCount}");
+        ImGui.Text($"Rows Deleted: {s.LastSaveDeletedRowsCount}");
+    }
+
+    private void DrawSystemTab()
+    {
+        CaptureSystemPerfSample();
+        var perfSummary = PerfTrace.GetSummary(TimeSpan.FromSeconds(60), 8);
+        if (_systemPerfSamples.Count == 0)
+        {
+            ImGui.TextUnformatted("No system samples captured yet.");
+            return;
+        }
+
+        var samples = _systemPerfSamples.ToArray();
+        var latest = samples[^1];
+        var avgCpu = samples.Average(static x => x.CpuPercent);
+        var maxCpu = samples.Max(static x => x.CpuPercent);
+        var maxWorkingSet = samples.Max(static x => x.WorkingSetBytes);
+        var maxPrivate = samples.Max(static x => x.PrivateBytes);
+        var maxGcHeap = samples.Max(static x => x.GcHeapBytes);
+        var avgThreads = samples.Average(static x => x.ThreadCount);
+        var maxThreads = samples.Max(static x => x.ThreadCount);
+
+        ImGui.TextColored(ShrinkUColors.Accent, "Process Utilization (Sphene host process)");
+        ImGui.Separator();
+        ImGui.Text($"Sample Count: {samples.Length}");
+        ImGui.Text($"Last Sample UTC: {FormatUtc(latest.AtUtc)}");
+        ImGui.Text($"CPU (current): {latest.CpuPercent.ToString("0.0", CultureInfo.InvariantCulture)}%");
+        ImGui.Text($"CPU (avg/max): {avgCpu.ToString("0.0", CultureInfo.InvariantCulture)}% / {maxCpu.ToString("0.0", CultureInfo.InvariantCulture)}%");
+        ImGui.Text($"Working Set (current/peak): {FormatMiB(latest.WorkingSetBytes)} / {FormatMiB(maxWorkingSet)}");
+        ImGui.Text($"Private Bytes (current/peak): {FormatMiB(latest.PrivateBytes)} / {FormatMiB(maxPrivate)}");
+        ImGui.Text($"GC Heap (current/peak): {FormatMiB(latest.GcHeapBytes)} / {FormatMiB(maxGcHeap)}");
+        ImGui.Text($"Threads (current/avg/max): {latest.ThreadCount} / {avgThreads.ToString("0.0", CultureInfo.InvariantCulture)} / {maxThreads}");
+        ImGui.Text($"GC Collections since tab init (Gen0/Gen1/Gen2): {GC.CollectionCount(0) - _gcGen0Baseline}/{GC.CollectionCount(1) - _gcGen1Baseline}/{GC.CollectionCount(2) - _gcGen2Baseline}");
+        ImGui.TextWrapped("These values are process-level and include game host workload.");
+        ImGui.Separator();
+        ImGui.TextColored(ShrinkUColors.Accent, "ShrinkU Attributed Workload (PerfTrace, last 60s)");
+        ImGui.Text($"Operations in window: {perfSummary.WindowOperationCount}");
+        ImGui.Text($"Tracked work time: {perfSummary.WindowTotalMs} ms");
+        ImGui.Text($"Attribution utilization: {perfSummary.WindowUtilizationPercent.ToString("0.0", CultureInfo.InvariantCulture)}%");
+        ImGui.TextWrapped("Attribution utilization can exceed 100% when operations run in parallel.");
+        if (perfSummary.TopOperations.Count > 0)
+        {
+            ImGui.Separator();
+            ImGui.TextColored(ShrinkUColors.Accent, "Top operation cost");
+            for (int i = 0; i < perfSummary.TopOperations.Count; i++)
+            {
+                var op = perfSummary.TopOperations[i];
+                ImGui.Text($"{i + 1}. {op.Name} - total {op.WindowTotalMs} ms, count {op.WindowCount}, max {op.MaxMs} ms, last {op.LastMs} ms");
+            }
+        }
+    }
+
+    private void CaptureSystemPerfSample()
+    {
+        var now = DateTime.UtcNow;
+        if (_lastSystemPerfSampleUtc != DateTime.MinValue && (now - _lastSystemPerfSampleUtc).TotalSeconds < 1.0)
+            return;
+
+        using var process = Process.GetCurrentProcess();
+        process.Refresh();
+        var cpuTotal = process.TotalProcessorTime;
+        var elapsedMs = _lastSystemPerfSampleUtc == DateTime.MinValue ? 0d : (now - _lastSystemPerfSampleUtc).TotalMilliseconds;
+        var cpuPercent = 0d;
+        if (_systemPerfInitialized && elapsedMs > 1)
+        {
+            var cpuDeltaMs = (cpuTotal - _lastProcessCpuTime).TotalMilliseconds;
+            cpuPercent = (cpuDeltaMs / (elapsedMs * Math.Max(1, Environment.ProcessorCount))) * 100d;
+            if (cpuPercent < 0d)
+                cpuPercent = 0d;
+        }
+
+        _lastSystemPerfSampleUtc = now;
+        _lastProcessCpuTime = cpuTotal;
+        _systemPerfInitialized = true;
+
+        _systemPerfSamples.Enqueue(new SystemPerfSample
+        {
+            AtUtc = now,
+            CpuPercent = cpuPercent,
+            WorkingSetBytes = process.WorkingSet64,
+            PrivateBytes = process.PrivateMemorySize64,
+            GcHeapBytes = GC.GetTotalMemory(false),
+            ThreadCount = process.Threads.Count,
+        });
+        while (_systemPerfSamples.Count > 180)
+            _systemPerfSamples.Dequeue();
     }
 
     private void DrawPenumbraModDebugTab()
@@ -411,6 +579,12 @@ public sealed class DebugUI : Window
     private static string SafeText(string? value)
     {
         return string.IsNullOrWhiteSpace(value) ? "-" : value;
+    }
+
+    private static string FormatMiB(long bytes)
+    {
+        var mib = bytes / (1024d * 1024d);
+        return $"{mib.ToString("0.0", CultureInfo.InvariantCulture)} MiB";
     }
 
     private static Vector4 GetTagColor(string tag)

@@ -37,7 +37,7 @@ public sealed class ShrinkUConfig : IPluginConfiguration
     
     // Backup folder configuration
     public string BackupFolderPath { get; set; } = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "ShrinkU", "Backups");
-    public ModStateStorageMode ModStateStorageMode { get; set; } = ModStateStorageMode.JsonStateFiles;
+    public ModStateStorageMode ModStateStorageMode { get; set; } = ModStateStorageMode.SqliteDatabase;
 
     // UI layout persistence
     public float LeftPanelWidthPx { get; set; } = 0f;
