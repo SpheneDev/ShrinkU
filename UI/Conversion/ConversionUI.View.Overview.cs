@@ -274,6 +274,7 @@ public sealed partial class ConversionUI
 
     private void DrawScannedFilesTable_ViewImpl()
     {
+        RefreshLivePenumbraMods(false, "overview-poll");
         if (!_orphanScanInFlight)
         {
             if (_orphaned.Count == 0 || _lastOrphanScanUtc == DateTime.MinValue || (DateTime.UtcNow - _lastOrphanScanUtc) > TimeSpan.FromSeconds(45))
@@ -307,6 +308,7 @@ public sealed partial class ConversionUI
         {
             _visibleByMod.Clear();
             var snap = snapForSig;
+            var staleUncategorizedWithoutBackup = new List<string>();
             HashSet<string>? usedGlobal = null;
             if (_filterPenumbraUsedOnly && _penumbraUsedFiles.Count > 0)
                 usedGlobal = new HashSet<string>(_penumbraUsedFiles.Select(p => (p ?? string.Empty).Replace('/', '\\')), StringComparer.OrdinalIgnoreCase);
@@ -344,6 +346,20 @@ public sealed partial class ConversionUI
                 }
 
                 var isOrphan = orphanedMods != null && orphanedMods.Contains(mod);
+                var hasPath = _modPaths.ContainsKey(mod);
+                var hasBackupAny = GetOrQueryModBackup(mod) || GetOrQueryModTextureBackup(mod) || GetOrQueryModPmp(mod);
+                var existsInPenumbra = _livePenumbraMods.Contains(mod);
+                var isMissingUncategorizedNoBackup = _hasLivePenumbraModsSnapshot
+                    && !isOrphan
+                    && !hasPath
+                    && !existsInPenumbra
+                    && !hasBackupAny
+                    && (files == null || files.Count == 0);
+                if (isMissingUncategorizedNoBackup)
+                {
+                    staleUncategorizedWithoutBackup.Add(mod);
+                    continue;
+                }
                 var totalTexturesForMod = GetTotalTexturesForMod(mod, files);
                 if (_filterNonConvertibleMods && totalTexturesForMod == 0 && !isOrphan)
                     continue;
@@ -380,6 +396,8 @@ public sealed partial class ConversionUI
                     }
                 }
             }
+            if (staleUncategorizedWithoutBackup.Count > 0)
+                QueuePruneNonexistentUncategorizedMods(staleUncategorizedWithoutBackup, "prune-uncategorized-missing");
             _visibleByModSig = visibleSig;
             _modStateSnapshot = snap;
             if (_modPaths.Count == 0 && !_loadingModPaths)

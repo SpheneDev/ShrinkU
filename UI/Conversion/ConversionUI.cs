@@ -50,6 +50,11 @@ public sealed partial class ConversionUI : Window, IDisposable
     private bool _loadingModPaths = false;
     private bool _pendingModPathsRefresh = false;
     private string _pendingModPathsReason = string.Empty;
+    private HashSet<string> _livePenumbraMods = new(StringComparer.OrdinalIgnoreCase);
+    private DateTime _lastLivePenumbraModsRefreshUtc = DateTime.MinValue;
+    private bool _hasLivePenumbraModsSnapshot = false;
+    private int _livePenumbraModsRefreshInFlight = 0;
+    private readonly HashSet<string> _staleEntryPruneInFlight = new(StringComparer.OrdinalIgnoreCase);
     private Dictionary<Guid, string> _collections = new();
     private Guid? _selectedCollectionId = null;
     private Dictionary<string, (bool Enabled, int Priority, bool Inherited, bool Temporary)> _modEnabledStates
@@ -443,6 +448,8 @@ public sealed partial class ConversionUI : Window, IDisposable
     private string _statusMessage = string.Empty;
     private DateTime _statusMessageAt = DateTime.MinValue;
     private bool _statusPersistent = false;
+    private string _pendingDeleteMod = string.Empty;
+    private bool _openDeleteConfirmPopup = false;
     
     // UI refresh flag to force ImGui redraw after async data updates
     private volatile bool _needsUIRefresh = false;
@@ -882,6 +889,7 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
             RequestUiRefresh("penumbra-mods-changed");
             ScheduleOrphanScan("mods-changed", true);
             RefreshModPathsFromPenumbra("mods-changed");
+            RefreshLivePenumbraMods(true, "mods-changed");
 
             if (_filterPenumbraUsedOnly) ReloadPenumbraUsedFiles("mods-changed");
 
@@ -892,10 +900,12 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
         {
             RequestUiRefresh("penumbra-mod-paths-changed");
             RefreshModPathsFromPenumbra(string.IsNullOrWhiteSpace(reason) ? "path-changed" : reason);
+            RefreshLivePenumbraMods(true, "paths-changed");
             _uiThreadActions.Enqueue(() => { _needsUIRefresh = true; });
         };
         _conversionService.OnPenumbraModPathsChanged += _onPenumbraModPathsChanged;
         ScheduleOrphanScan("startup", true);
+        RefreshLivePenumbraMods(true, "startup");
 
         // React to external texture changes (e.g., conversions/restores initiated by Sphene)
         _onExternalTexturesChanged = reason =>
@@ -1342,6 +1352,12 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
             }
         // Trigger initial scan lazily on first draw
         QueueInitialScan();
+        if (_openDeleteConfirmPopup)
+        {
+            ImGui.OpenPopup("Delete entry and backups?###shrinku-delete-entry");
+            _openDeleteConfirmPopup = false;
+        }
+        DrawDeleteEntryAndBackupsConfirmPopup();
 
         // Ensure Used-Only watcher is running/stopped according to current filter state
         if (_filterPenumbraUsedOnly && !_usedWatcherActive)
@@ -2448,6 +2464,45 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
         }
         catch { _modPathsSig = _modPaths.Count.ToString(); }
         _needsUIRefresh = true;
+    }
+
+    private void RefreshLivePenumbraMods(bool force, string reason)
+    {
+        if (Interlocked.Exchange(ref _livePenumbraModsRefreshInFlight, 1) != 0)
+            return;
+
+        if (!force && _lastLivePenumbraModsRefreshUtc != DateTime.MinValue && (DateTime.UtcNow - _lastLivePenumbraModsRefreshUtc) < TimeSpan.FromSeconds(10))
+        {
+            Interlocked.Exchange(ref _livePenumbraModsRefreshInFlight, 0);
+            return;
+        }
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                var live = await _conversionService.GetLivePenumbraModFoldersAsync().ConfigureAwait(false);
+                _uiThreadActions.Enqueue(() =>
+                {
+                    _livePenumbraMods = live ?? new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    _hasLivePenumbraModsSnapshot = true;
+                    _lastLivePenumbraModsRefreshUtc = DateTime.UtcNow;
+                    RequestUiRefresh(string.Concat("live-mods-refresh-", reason));
+                });
+            }
+            catch
+            {
+                _uiThreadActions.Enqueue(() =>
+                {
+                    if (_hasLivePenumbraModsSnapshot)
+                        _lastLivePenumbraModsRefreshUtc = DateTime.UtcNow;
+                });
+            }
+            finally
+            {
+                Interlocked.Exchange(ref _livePenumbraModsRefreshInFlight, 0);
+            }
+        });
     }
 
     private void RefreshModPathsFromPenumbra(string reason)

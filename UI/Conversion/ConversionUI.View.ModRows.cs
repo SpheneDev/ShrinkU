@@ -173,6 +173,14 @@ public sealed partial class ConversionUI
             {
                 TryStartPmpRestoreNewest(mod, "pmp-restore-flat-context-newest", false, true, false, false, true);
             }
+            ImGui.Separator();
+            using (var _d2 = ImRaii.Disabled(ActionsDisabled()))
+            {
+                if (ImGui.MenuItem("Delete entry and backups"))
+                {
+                    OpenDeleteEntryAndBackupsConfirm(mod);
+                }
+            }
             ImGui.EndPopup();
         }
         

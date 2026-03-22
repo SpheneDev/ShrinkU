@@ -1681,6 +1681,29 @@ public TextureConversionService(ILogger logger, PenumbraIpc penumbraIpc, Texture
         return set.ToList();
     }
 
+    public async Task<HashSet<string>> GetLivePenumbraModFoldersAsync()
+    {
+        var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (!_penumbraIpc.APIAvailable)
+            return set;
+
+        try
+        {
+            var list = await _penumbraIpc.GetAllModFoldersAsync().ConfigureAwait(false);
+            foreach (var mod in list)
+            {
+                if (string.IsNullOrWhiteSpace(mod))
+                    continue;
+                if (string.Equals(mod, "mod_state", StringComparison.OrdinalIgnoreCase))
+                    continue;
+                set.Add(mod);
+            }
+        }
+        catch { }
+
+        return set;
+    }
+
     public async Task UpdateAllModTextureCountsAsync()
     {
         try
