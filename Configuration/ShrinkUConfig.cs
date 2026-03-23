@@ -43,7 +43,7 @@ public sealed class ShrinkUConfig : IPluginConfiguration
     public float LeftPanelWidthPx { get; set; } = 0f;
     public float ScannedFilesFirstColWidth { get; set; } = 30f;
     public float ScannedFilesSizeColWidth { get; set; } = 85f;
-    public float ScannedFilesActionColWidth { get; set; } = 60f;
+    public float ScannedFilesActionColWidth { get; set; } = 91f;
 
     // Conversion UI settings (persisted)
     public bool FilterPenumbraUsedOnly { get; set; } = false;

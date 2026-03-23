@@ -606,11 +606,11 @@ public sealed partial class ConversionUI
         var flags = ImGuiTableFlags.BordersOuter | ImGuiTableFlags.BordersV | ImGuiTableFlags.Resizable | ImGuiTableFlags.ScrollY | ImGuiTableFlags.RowBg;
         if (ImGui.BeginTable("ScannedFilesTable", 5, flags))
         {
-            ImGui.TableSetupColumn("", ImGuiTableColumnFlags.WidthFixed, _scannedFirstColWidth);
-            ImGui.TableSetupColumn("Mod", ImGuiTableColumnFlags.WidthStretch);
-            ImGui.TableSetupColumn("Compressed", ImGuiTableColumnFlags.WidthFixed, _scannedCompressedColWidth);
-            ImGui.TableSetupColumn("Uncompressed", ImGuiTableColumnFlags.WidthFixed, _scannedSizeColWidth);
-            ImGui.TableSetupColumn("Action", ImGuiTableColumnFlags.WidthFixed, _scannedActionColWidth);
+            ImGui.TableSetupColumn("", ImGuiTableColumnFlags.WidthFixed| ImGuiTableColumnFlags.NoResize, _scannedFirstColWidth);
+            ImGui.TableSetupColumn("Mod", ImGuiTableColumnFlags.WidthStretch| ImGuiTableColumnFlags.NoResize);
+            ImGui.TableSetupColumn("Compressed", ImGuiTableColumnFlags.WidthFixed| ImGuiTableColumnFlags.NoResize, _scannedCompressedColWidth);
+            ImGui.TableSetupColumn("Uncompressed", ImGuiTableColumnFlags.WidthFixed| ImGuiTableColumnFlags.NoResize, _scannedSizeColWidth);
+            ImGui.TableSetupColumn("Action", ImGuiTableColumnFlags.WidthFixed, FixedActionColumnWidth);
             ImGui.TableSetupScrollFreeze(0, 1);
             ImGui.TableHeadersRow();
             _zebraRowIndex = 0;
@@ -687,15 +687,6 @@ public sealed partial class ConversionUI
             }
 
             ImGui.TableSetColumnIndex(4);
-            var prevActionWidth = _scannedActionColWidth;
-            var currentActionWidth = ImGui.GetColumnWidth();
-            _scannedActionColWidth = currentActionWidth;
-            if (MathF.Abs(currentActionWidth - prevActionWidth) > 0.5f && ImGui.IsMouseReleased(ImGuiMouseButton.Left))
-            {
-                _configService.Current.ScannedFilesActionColWidth = currentActionWidth;
-                _configService.Save();
-                _logger.LogDebug($"Saved action column width: {currentActionWidth}px");
-            }
 
             ImGui.EndTable();
         }
@@ -768,7 +759,7 @@ public sealed partial class ConversionUI
             ImGui.TableSetupColumn("Mod", ImGuiTableColumnFlags.WidthFixed, _scannedFileColWidth);
             ImGui.TableSetupColumn("Compressed", ImGuiTableColumnFlags.WidthFixed, _scannedCompressedColWidth);
             ImGui.TableSetupColumn("Uncompressed", ImGuiTableColumnFlags.WidthFixed, _scannedSizeColWidth);
-            ImGui.TableSetupColumn("Action", ImGuiTableColumnFlags.WidthFixed, _scannedActionColWidth);
+            ImGui.TableSetupColumn("Action", ImGuiTableColumnFlags.WidthFixed | ImGuiTableColumnFlags.NoResize, FixedActionColumnWidth);
 
             ImGui.TableNextRow();
             ImGui.TableSetBgColor(ImGuiTableBgTarget.RowBg0, ImGui.GetColorU32((_zebraRowIndex++ % 2 == 0) ? _zebraEvenColor : _zebraOddColor));

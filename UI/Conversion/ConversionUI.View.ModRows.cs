@@ -173,14 +173,6 @@ public sealed partial class ConversionUI
             {
                 TryStartPmpRestoreNewest(mod, "pmp-restore-flat-context-newest", false, true, false, false, true);
             }
-            ImGui.Separator();
-            using (var _d2 = ImRaii.Disabled(ActionsDisabled()))
-            {
-                if (ImGui.MenuItem("Delete entry and backups"))
-                {
-                    OpenDeleteEntryAndBackupsConfirm(mod);
-                }
-            }
             ImGui.EndPopup();
         }
         
@@ -358,6 +350,21 @@ public sealed partial class ConversionUI
         var hasTexBackup = GetOrQueryModTextureBackup(mod);
         var hasPmpBackup = GetOrQueryModPmp(mod);
         var anyBackup = hasBackup || hasTexBackup || hasPmpBackup;
+        using (var _dDelete = ImRaii.Disabled(ActionsDisabled() || !anyBackup))
+        {
+            ImGui.PushFont(UiBuilder.IconFont);
+            if (ImGui.Button($"{FontAwesomeIcon.Trash.ToIconString()}##delete-icon-{mod}", new Vector2(24, 0)))
+            {
+                if (ImGui.GetIO().KeyCtrl)
+                    TryDeleteModEntryAndBackups(mod, "delete-entry-ctrl");
+                else
+                    SetStatus("Hold CTRL while clicking delete to remove entry and backups.");
+            }
+            ImGui.PopFont();
+        }
+        if (ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
+            ShowTooltip(anyBackup ? "Hold CTRL and click to delete entry and backups." : "Delete is only available when backups exist.");
+        ImGui.SameLine();
         if (totalAll > 0 && !isOrphan)
         {
             var autoMode = _configService.Current.TextureProcessingMode == TextureProcessingMode.Automatic;

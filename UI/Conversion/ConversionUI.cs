@@ -28,11 +28,11 @@ public sealed partial class ConversionUI : Window, IDisposable
     private string _scanFilter = string.Empty;
     private float _leftPanelWidthPx = 0f;
     private bool _leftWidthInitialized = false;
+    private const float FixedActionColumnWidth = 91f;
     private float _scannedFirstColWidth = 28f;
     private float _scannedFileColWidth = 0f;
     private float _scannedSizeColWidth = 85f;
     private float _scannedCompressedColWidth = 85f;
-    private float _scannedActionColWidth = 60f;
     private readonly Vector4 _compressedTextColor = new Vector4(0.60f, 0.95f, 0.65f, 1f);
     private ScanSortKind _scanSortKind = ScanSortKind.ModName;
     private bool _scanSortAsc = true;
@@ -448,8 +448,6 @@ public sealed partial class ConversionUI : Window, IDisposable
     private string _statusMessage = string.Empty;
     private DateTime _statusMessageAt = DateTime.MinValue;
     private bool _statusPersistent = false;
-    private string _pendingDeleteMod = string.Empty;
-    private bool _openDeleteConfirmPopup = false;
     
     // UI refresh flag to force ImGui redraw after async data updates
     private volatile bool _needsUIRefresh = false;
@@ -1250,10 +1248,6 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
         _scannedSizeColWidth = _configService.Current.ScannedFilesSizeColWidth > 0f
             ? _configService.Current.ScannedFilesSizeColWidth
             : 85f;
-        _scannedActionColWidth = _configService.Current.ScannedFilesActionColWidth > 0f
-            ? _configService.Current.ScannedFilesActionColWidth
-            : 120f;
-
         // If Penumbra Used Only is enabled from config, preload used files on first open
         if (_filterPenumbraUsedOnly && _penumbraUsedFiles.Count == 0 && !_loadingPenumbraUsed)
         {
@@ -1352,13 +1346,6 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
             }
         // Trigger initial scan lazily on first draw
         QueueInitialScan();
-        if (_openDeleteConfirmPopup)
-        {
-            ImGui.OpenPopup("Delete entry and backups?###shrinku-delete-entry");
-            _openDeleteConfirmPopup = false;
-        }
-        DrawDeleteEntryAndBackupsConfirmPopup();
-
         // Ensure Used-Only watcher is running/stopped according to current filter state
         if (_filterPenumbraUsedOnly && !_usedWatcherActive)
         {

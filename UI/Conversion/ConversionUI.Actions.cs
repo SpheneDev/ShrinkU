@@ -83,39 +83,6 @@ public sealed partial class ConversionUI
             });
     }
 
-    private void OpenDeleteEntryAndBackupsConfirm(string mod)
-    {
-        if (string.IsNullOrWhiteSpace(mod))
-            return;
-        _pendingDeleteMod = mod;
-        _openDeleteConfirmPopup = true;
-    }
-
-    private void DrawDeleteEntryAndBackupsConfirmPopup()
-    {
-        if (ImGui.BeginPopupModal("Delete entry and backups?###shrinku-delete-entry", ImGuiWindowFlags.AlwaysAutoResize))
-        {
-            var mod = _pendingDeleteMod ?? string.Empty;
-            ImGui.TextWrapped($"Delete entry and all backups for \"{mod}\"?");
-            ImGui.TextWrapped("This removes the ShrinkU state entry and backup folders for this mod.");
-            if (ImGui.Button("Delete", new System.Numerics.Vector2(120, 0)))
-            {
-                var target = _pendingDeleteMod;
-                _pendingDeleteMod = string.Empty;
-                if (!string.IsNullOrWhiteSpace(target))
-                    TryDeleteModEntryAndBackups(target, "delete-entry-confirmed");
-                ImGui.CloseCurrentPopup();
-            }
-            ImGui.SameLine();
-            if (ImGui.Button("Cancel", new System.Numerics.Vector2(120, 0)))
-            {
-                _pendingDeleteMod = string.Empty;
-                ImGui.CloseCurrentPopup();
-            }
-            ImGui.EndPopup();
-        }
-    }
-
     private void RemoveModFromUiState(string mod)
     {
         try { _selectedEmptyMods.Remove(mod); } catch { }
