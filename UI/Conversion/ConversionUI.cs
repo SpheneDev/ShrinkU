@@ -29,7 +29,7 @@ public sealed partial class ConversionUI : Window, IDisposable
     private float _leftPanelWidthPx = 0f;
     private bool _leftWidthInitialized = false;
     private const float FixedActionColumnWidth = 91f;
-    private float _scannedFirstColWidth = 28f;
+    private const float FixedFlatRowHeight = 23f;
     private float _scannedFileColWidth = 0f;
     private float _scannedSizeColWidth = 85f;
     private float _scannedCompressedColWidth = 85f;
@@ -94,6 +94,8 @@ public sealed partial class ConversionUI : Window, IDisposable
     private HashSet<string> _expandedMods = new(StringComparer.OrdinalIgnoreCase);
     private HashSet<string> _selectedEmptyMods = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, int> _selectedCountByMod = new(StringComparer.OrdinalIgnoreCase);
+    private readonly List<string> _modSelectionOrder = new();
+    private string _modSelectionAnchor = string.Empty;
     private bool _footerTotalsDirty = true;
     private string _footerTotalsSignature = string.Empty;
     private long _footerTotalUncompressed = 0;
@@ -184,86 +186,16 @@ public sealed partial class ConversionUI : Window, IDisposable
     }
 
     public void OpenForMod(string modDirectory)
+    {
+        try
         {
-            try
-            {
-                IsOpen = true;
-
-                var searchDir = modDirectory?.Trim() ?? string.Empty;
-                
-                // Try to find the mod name from the directory
-                var modName = _modPaths.FirstOrDefault(x => string.Equals(x.Value, searchDir, StringComparison.OrdinalIgnoreCase)).Key;
-                
-                // Fallback: maybe the input is already the mod name or we can extract it?
-                if (string.IsNullOrEmpty(modName))
-                {
-                    if (_modPaths.ContainsKey(searchDir))
-                    {
-                        modName = searchDir;
-                    }
-                    else
-                    {
-                        // Try extracting folder name
-                        var folderName = Path.GetFileName(searchDir);
-                        if (!string.IsNullOrEmpty(folderName))
-                        {
-                            modName = folderName;
-                        }
-                    }
-                }
-
+            IsOpen = true;
+            var modName = ResolveModNameForOpen(modDirectory);
             if (!string.IsNullOrEmpty(modName))
-                {
-                    _scanFilter = modName;
-
-                    // Ensure mod paths map is ready/populated to find folders
-                    if (!_modPaths.ContainsKey(modName))
-                    {
-                        // Force a quick refresh of paths if missing
-                        var snap = _modStateService.Snapshot();
-                        if (snap.TryGetValue(modName, out var entry))
-                        {
-                            var folder = entry.PenumbraRelativePath ?? string.Empty;
-                            var leaf = entry.RelativeModName ?? string.Empty;
-                            
-                            // Allow folder to be empty (root mod), but leaf must exist
-                            if (!string.IsNullOrWhiteSpace(leaf))
-                            {
-                                var constructedPath = !string.IsNullOrWhiteSpace(folder) ? string.Concat(folder, "/", leaf) : leaf;
-                                _modPaths[modName] = constructedPath;
-                            }
-                        }
-                    }
-
-                    // Expand folders for this mod so it is visible
-                    if (_modPaths.TryGetValue(modName, out var fullPath) && !string.IsNullOrEmpty(fullPath))
-                    {
-                        int lastSlash = fullPath.LastIndexOf('/');
-                        if (lastSlash > 0)
-                        {
-                            var folderOnly = fullPath.Substring(0, lastSlash);
-                            var parts = folderOnly.Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-                            
-                            var currentPath = "";
-                            for (int i = 0; i < parts.Length; i++)
-                            {
-                                if (i > 0) currentPath += "/";
-                                currentPath += parts[i];
-                                _expandedFolders.Add(currentPath);
-                            }
-                        }
-                        else
-                        {
-                             // Root mod -> Expand (Uncategorized)
-                             _expandedFolders.Add("(Uncategorized)");
-                        }
-                    }
-                    else
-                    {
-                        // Even if fullPath is missing, it goes to (Uncategorized)
-                        _expandedFolders.Add("(Uncategorized)");
-                    }
-                    
+            {
+                _scanFilter = modName;
+                EnsureModPathForOpen(modName);
+                ExpandFoldersForOpen(modName);
             }
         }
         catch (Exception ex)
@@ -280,55 +212,69 @@ public sealed partial class ConversionUI : Window, IDisposable
             _scanFilter = string.Empty;
             foreach (var input in modDirectoriesOrNames)
             {
-                var search = input?.Trim() ?? string.Empty;
-                if (string.IsNullOrEmpty(search)) continue;
-
-                var modName = search;
-                if (!_modPaths.ContainsKey(modName))
-                {
-                    var snap = _modStateService.Snapshot();
-                    if (snap.TryGetValue(modName, out var entry))
-                    {
-                        var folder = entry.PenumbraRelativePath ?? string.Empty;
-                        var leaf = entry.RelativeModName ?? string.Empty;
-                        if (!string.IsNullOrWhiteSpace(leaf))
-                        {
-                            var constructedPath = !string.IsNullOrWhiteSpace(folder) ? string.Concat(folder, "/", leaf) : leaf;
-                            _modPaths[modName] = constructedPath;
-                        }
-                    }
-                }
-
-                if (_modPaths.TryGetValue(modName, out var fullPath) && !string.IsNullOrEmpty(fullPath))
-                {
-                    int lastSlash = fullPath.LastIndexOf('/');
-                    if (lastSlash > 0)
-                    {
-                        var folderOnly = fullPath.Substring(0, lastSlash);
-                        var parts = folderOnly.Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-                        var currentPath = "";
-                        for (int i = 0; i < parts.Length; i++)
-                        {
-                            if (i > 0) currentPath += "/";
-                            currentPath += parts[i];
-                            _expandedFolders.Add(currentPath);
-                        }
-                    }
-                    else
-                    {
-                        _expandedFolders.Add("(Uncategorized)");
-                    }
-                }
-                else
-                {
-                    _expandedFolders.Add("(Uncategorized)");
-                }
+                var modName = ResolveModNameForOpen(input);
+                if (string.IsNullOrEmpty(modName))
+                    continue;
+                EnsureModPathForOpen(modName);
+                ExpandFoldersForOpen(modName);
                 _expandedMods.Add(modName);
             }
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error opening ShrinkU for mods");
+        }
+    }
+
+    private string ResolveModNameForOpen(string? input)
+    {
+        var search = input?.Trim() ?? string.Empty;
+        if (string.IsNullOrEmpty(search))
+            return string.Empty;
+        if (_modPaths.ContainsKey(search))
+            return search;
+        var byPath = _modPaths.FirstOrDefault(x => string.Equals(x.Value, search, StringComparison.OrdinalIgnoreCase)).Key;
+        if (!string.IsNullOrEmpty(byPath))
+            return byPath;
+        return Path.GetFileName(search) ?? string.Empty;
+    }
+
+    private void EnsureModPathForOpen(string modName)
+    {
+        if (string.IsNullOrWhiteSpace(modName) || _modPaths.ContainsKey(modName))
+            return;
+        var snap = _modStateService.Snapshot();
+        if (!snap.TryGetValue(modName, out var entry))
+            return;
+        var folder = entry.PenumbraRelativePath ?? string.Empty;
+        var leaf = entry.RelativeModName ?? string.Empty;
+        if (string.IsNullOrWhiteSpace(leaf))
+            return;
+        _modPaths[modName] = string.IsNullOrWhiteSpace(folder) ? leaf : string.Concat(folder, "/", leaf);
+    }
+
+    private void ExpandFoldersForOpen(string modName)
+    {
+        if (!_modPaths.TryGetValue(modName, out var fullPath) || string.IsNullOrEmpty(fullPath))
+        {
+            _expandedFolders.Add("(Uncategorized)");
+            return;
+        }
+        var lastSlash = fullPath.LastIndexOf('/');
+        if (lastSlash <= 0)
+        {
+            _expandedFolders.Add("(Uncategorized)");
+            return;
+        }
+        var folderOnly = fullPath.Substring(0, lastSlash);
+        var parts = folderOnly.Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        var currentPath = string.Empty;
+        for (int i = 0; i < parts.Length; i++)
+        {
+            if (i > 0)
+                currentPath += "/";
+            currentPath += parts[i];
+            _expandedFolders.Add(currentPath);
         }
     }
 
@@ -1241,10 +1187,6 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
         _scanSortAsc = true;
         _scanSortKind = ScanSortKind.ModName;
 
-        // Initialize first column width from config (default 30px on first open)
-        _scannedFirstColWidth = _configService.Current.ScannedFilesFirstColWidth > 0f
-            ? _configService.Current.ScannedFilesFirstColWidth
-            : 28f;
         _scannedSizeColWidth = _configService.Current.ScannedFilesSizeColWidth > 0f
             ? _configService.Current.ScannedFilesSizeColWidth
             : 85f;
@@ -2209,6 +2151,19 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
         ImGui.PopStyleColor();
     }
 
+    private static void PushButtonColors(Vector4 button, Vector4 hovered, Vector4 active, Vector4 text)
+    {
+        ImGui.PushStyleColor(ImGuiCol.Button, button);
+        ImGui.PushStyleColor(ImGuiCol.ButtonHovered, hovered);
+        ImGui.PushStyleColor(ImGuiCol.ButtonActive, active);
+        ImGui.PushStyleColor(ImGuiCol.Text, text);
+    }
+
+    private static void PopButtonColors()
+    {
+        ImGui.PopStyleColor(4);
+    }
+
     // Get per-mod original total bytes, preferring ModState; fallback to computed or backup manifest.
     private long GetOrQueryModOriginalTotal(string mod)
     {
@@ -2363,10 +2318,10 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
         return count;
     }
 
-    private void DrawPenumbraUsedIndicator(string mod, ShrinkU.Services.ModStateEntry? state = null, int totalTexturesHint = 0)
+    private bool DrawPenumbraUsedIndicator(string mod, ShrinkU.Services.ModStateEntry? state = null, int totalTexturesHint = 0)
     {
         if (!IsModUsedByPenumbra(mod, state))
-            return;
+            return false;
         var usedCount = GetUsedTextureCountForMod(mod, state);
         var totalCount = Math.Max(0, state?.TotalTextures ?? totalTexturesHint);
         var ratio = totalCount > 0 ? Math.Clamp((float)usedCount / totalCount, 0f, 1f) : 1f;
@@ -2384,12 +2339,13 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
         ImGui.TextColored(iconColor, FontAwesomeIcon.Eye.ToIconString());
         ImGui.PopFont();
         if (!ImGui.IsItemHovered())
-            return;
+            return false;
 
         var ver = state?.CurrentVersion ?? string.Empty;
         ImGui.BeginTooltip();
         ImGui.TextUnformatted("Used by Penumbra");
         ImGui.Separator();
+        ImGui.TextUnformatted("Indicator is shown because this mod has textures currently used by Penumbra.");
         ImGui.TextUnformatted($"ModDir: {mod}");
         if (!string.IsNullOrWhiteSpace(ver))
             ImGui.TextUnformatted($"Version: {ver}");
@@ -2411,6 +2367,7 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
         drawList.AddLine(new Vector2(indicatorX, p.Y - 2f), new Vector2(indicatorX, p.Y + h + 2f), white, 2f);
         ImGui.Dummy(new Vector2(w, h + 4f));
         ImGui.EndTooltip();
+        return true;
     }
 
     private static string NormalizeModPathValue(string? value)
@@ -2819,6 +2776,96 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                 result.Add(m);
         }
         return result.ToList();
+    }
+
+    private void ClearAllModSelections()
+    {
+        _selectedTextures.Clear();
+        _selectedEmptyMods.Clear();
+        foreach (var mod in _selectedCountByMod.Keys.ToList())
+            _selectedCountByMod[mod] = 0;
+    }
+
+    private bool IsModSelected(string mod, Dictionary<string, List<string>> visibleByMod)
+    {
+        if (string.IsNullOrWhiteSpace(mod))
+            return false;
+        var files = visibleByMod.TryGetValue(mod, out var list) && list != null ? list : new List<string>();
+        var totalAll = GetTotalTexturesForMod(mod, files);
+        if (totalAll <= 0)
+            return _selectedEmptyMods.Contains(mod);
+        return (_selectedCountByMod.TryGetValue(mod, out var selected) ? selected : 0) >= totalAll;
+    }
+
+    private void SetModSelectionState(string mod, bool selected, Dictionary<string, List<string>> visibleByMod)
+    {
+        if (string.IsNullOrWhiteSpace(mod))
+            return;
+        var files = visibleByMod.TryGetValue(mod, out var list) && list != null ? list : new List<string>();
+        var totalAll = GetTotalTexturesForMod(mod, files);
+        var isNonConvertible = totalAll <= 0;
+        if (isNonConvertible)
+        {
+            if (selected) _selectedEmptyMods.Add(mod);
+            else _selectedEmptyMods.Remove(mod);
+            _selectedCountByMod[mod] = 0;
+            return;
+        }
+
+        List<string>? allFilesForMod = null;
+        if (_scannedByMod.TryGetValue(mod, out var all) && all != null && all.Count > 0)
+            allFilesForMod = all;
+        else
+            allFilesForMod = files;
+        if (selected)
+        {
+            foreach (var f in allFilesForMod) _selectedTextures.Add(f);
+            _selectedCountByMod[mod] = totalAll;
+            _selectedEmptyMods.Remove(mod);
+        }
+        else
+        {
+            foreach (var f in allFilesForMod) _selectedTextures.Remove(f);
+            _selectedCountByMod[mod] = 0;
+        }
+    }
+
+    private void HandleModRowClickSelection(string mod, bool disableSelection, Dictionary<string, List<string>> visibleByMod)
+    {
+        if (disableSelection || string.IsNullOrWhiteSpace(mod))
+            return;
+        var io = ImGui.GetIO();
+        var shift = io.KeyShift;
+        var ctrl = io.KeyCtrl;
+
+        if (shift && !string.IsNullOrWhiteSpace(_modSelectionAnchor) && _modSelectionOrder.Count > 0)
+        {
+            var anchorIndex = _modSelectionOrder.FindIndex(m => string.Equals(m, _modSelectionAnchor, StringComparison.OrdinalIgnoreCase));
+            var currentIndex = _modSelectionOrder.FindIndex(m => string.Equals(m, mod, StringComparison.OrdinalIgnoreCase));
+            if (anchorIndex >= 0 && currentIndex >= 0)
+            {
+                if (!ctrl)
+                    ClearAllModSelections();
+                var start = Math.Min(anchorIndex, currentIndex);
+                var end = Math.Max(anchorIndex, currentIndex);
+                for (var i = start; i <= end; i++)
+                    SetModSelectionState(_modSelectionOrder[i], true, visibleByMod);
+                _modSelectionAnchor = mod;
+                return;
+            }
+        }
+
+        if (ctrl)
+        {
+            var selected = IsModSelected(mod, visibleByMod);
+            SetModSelectionState(mod, !selected, visibleByMod);
+            _modSelectionAnchor = mod;
+            return;
+        }
+
+        ClearAllModSelections();
+        SetModSelectionState(mod, true, visibleByMod);
+        _modSelectionAnchor = mod;
     }
 
     private (int convertableMods, int restorableMods) GetSelectedModStates()

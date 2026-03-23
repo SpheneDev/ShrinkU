@@ -4,84 +4,37 @@ using System.Collections.Generic;
 using System.Numerics;
 using System.Linq;
 using Dalamud.Interface;
+using Dalamud.Interface.Utility.Raii;
 using ShrinkU.Configuration;
 namespace ShrinkU.UI;
 public sealed partial class ConversionUI
 {
     private void DrawFolderFlatRow_ViewImpl(FlatRow row, Dictionary<string, List<string>> visibleByMod)
     {
-        ImGui.TableSetColumnIndex(0);
         var fullPath = row.FolderPath;
         var child = row.Node;
-        var hasSelectable = HasSelectableFiles(child, visibleByMod);
-        bool folderSelected = IsFolderFullySelected(child, visibleByMod);
-        ImGui.BeginDisabled(!hasSelectable && child.Mods.Count == 0);
-        if (ImGui.Checkbox($"##cat-sel-{fullPath}", ref folderSelected))
-        {
-            if (folderSelected)
-            {
-                var filesAll = CollectFilesRecursive(child, visibleByMod);
-                for (int i = 0; i < filesAll.Count; i++)
-                    _selectedTextures.Add(filesAll[i]);
-                var stack = new Stack<TableCatNode>();
-                stack.Push(child);
-                while (stack.Count > 0)
-                {
-                    var cur = stack.Pop();
-                    foreach (var mod in cur.Mods)
-                    {
-                        List<string>? src = null;
-                        if (_scannedByMod.TryGetValue(mod, out var all) && all != null && all.Count > 0)
-                            src = all;
-                        else if (visibleByMod.TryGetValue(mod, out var vis) && vis != null)
-                            src = vis;
-                        var cnt = src?.Count ?? 0;
-                        if (cnt > 0)
-                        {
-                            _selectedCountByMod[mod] = cnt;
-                        }
-                        else
-                        {
-                            _selectedEmptyMods.Add(mod);
-                            _selectedCountByMod[mod] = 0;
-                        }
-                    }
-                    foreach (var ch in cur.Children.Values)
-                        stack.Push(ch);
-                }
-            }
-            else
-            {
-                var folderFiles = CollectFilesRecursive(child, visibleByMod);
-                for (int i = 0; i < folderFiles.Count; i++)
-                    _selectedTextures.Remove(folderFiles[i]);
-                var stack = new Stack<TableCatNode>();
-                stack.Push(child);
-                while (stack.Count > 0)
-                {
-                    var cur = stack.Pop();
-                    foreach (var mod in cur.Mods)
-                    {
-                        _selectedEmptyMods.Remove(mod);
-                        if (visibleByMod.ContainsKey(mod) || _scannedByMod.ContainsKey(mod))
-                            _selectedCountByMod[mod] = 0;
-                    }
-                    foreach (var ch in cur.Children.Values)
-                        stack.Push(ch);
-                }
-            }
-        }
-        ImGui.EndDisabled();
-        if (!hasSelectable && ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
-            ImGui.SetTooltip("No selectable files in this folder (filtered or excluded).");
-        else
-            ShowTooltip("Select or deselect all files in this folder.");
-
-        ImGui.TableSetColumnIndex(1);
+        ImGui.TableSetColumnIndex(0);
+        var folderCellMin = ImGui.GetCursorScreenPos();
+        var folderCellWidth = ImGui.GetColumnWidth();
         ImGui.SetCursorPosX(ImGui.GetCursorPosX() + row.Depth * 16f);
         var catDefaultOpen = _filterPenumbraUsedOnly || _expandedFolders.Contains(fullPath);
         ImGui.SetNextItemOpen(catDefaultOpen, ImGuiCond.Always);
+        ImGui.PushStyleColor(ImGuiCol.Header, Vector4.Zero);
+        ImGui.PushStyleColor(ImGuiCol.HeaderHovered, Vector4.Zero);
+        ImGui.PushStyleColor(ImGuiCol.HeaderActive, Vector4.Zero);
         var catOpen = ImGui.TreeNodeEx($"##cat-{fullPath}", ImGuiTreeNodeFlags.SpanFullWidth | ImGuiTreeNodeFlags.FramePadding | ImGuiTreeNodeFlags.NoTreePushOnOpen);
+        ImGui.PopStyleColor(3);
+        var rowHeight = FixedFlatRowHeight;
+        var cellPaddingY = ImGui.GetStyle().CellPadding.Y;
+        var folderHoverMin = new Vector2(folderCellMin.X, folderCellMin.Y - cellPaddingY);
+        var folderHoverMax = new Vector2(folderCellMin.X + folderCellWidth, folderCellMin.Y - cellPaddingY + rowHeight);
+        var folderHovered = ImGui.IsMouseHoveringRect(folderHoverMin, folderHoverMax, true);
+        var folderSelected = IsFolderFullySelected(child, visibleByMod);
+        if (folderHovered)
+        {
+            var hoverColor = folderSelected ? new Vector4(0.28f, 0.49f, 0.84f, 0.52f) : new Vector4(0.30f, 0.34f, 0.40f, 0.34f);
+            ImGui.TableSetBgColor(ImGuiTableBgTarget.RowBg0, ImGui.GetColorU32(hoverColor));
+        }
         var catToggled = ImGui.IsItemToggledOpen();
         if (catToggled)
         {
@@ -98,7 +51,7 @@ public sealed partial class ConversionUI
             cvals = (0, 0, 0, 0);
         ImGui.TextColored(folderColor, $"{child.Name} (mods {cvals.modsConverted}/{cvals.modsTotal}, textures {cvals.texturesConverted}/{cvals.texturesTotal})");
 
-        ImGui.TableSetColumnIndex(3);
+        ImGui.TableSetColumnIndex(2);
         var fSig = string.Concat(_flatRowsSig, "|", _perModSavingsRevision.ToString());
         if (!string.Equals(_folderSizeCacheSig, fSig, StringComparison.Ordinal))
         {
@@ -141,7 +94,7 @@ public sealed partial class ConversionUI
         else
             ImGui.TextUnformatted("");
 
-        ImGui.TableSetColumnIndex(2);
+        ImGui.TableSetColumnIndex(1);
         if (cached.comp > 0)
         {
             var color = cached.comp > cached.orig ? ShrinkUColors.WarningLight : _compressedTextColor;
@@ -150,6 +103,30 @@ public sealed partial class ConversionUI
         else
         {
             DrawRightAlignedTextColored("-", _compressedTextColor);
+        }
+
+        ImGui.TableSetColumnIndex(3);
+        var folderMods = CollectModsRecursive(child)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        using (var _dDeleteFolder = ImRaii.Disabled(ActionsDisabled() || folderMods.Count == 0))
+        {
+            ImGui.PushFont(UiBuilder.IconFont);
+            if (ImGui.Button($"{FontAwesomeIcon.Trash.ToIconString()}##delete-folder-{fullPath}", new Vector2(24, 0)))
+            {
+                if (ImGui.GetIO().KeyCtrl)
+                    TryDeleteSelectedEntriesAndBackups(folderMods, "delete-folder-ctrl");
+                else
+                    SetStatus("Hold CTRL while clicking folder trash to delete all mod entries in this folder.");
+            }
+            ImGui.PopFont();
+        }
+        if (ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
+        {
+            if (folderMods.Count == 0)
+                ImGui.SetTooltip("No mods found in this folder.");
+            else
+                ImGui.SetTooltip("Hold CTRL and click to delete all mod entries and backups in this folder.");
         }
     }
 }

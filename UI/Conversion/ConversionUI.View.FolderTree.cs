@@ -215,7 +215,7 @@ public sealed partial class ConversionUI
                     ImGui.AlignTextToFramePadding();
                     open = ImGui.TreeNodeEx($"{header}##mod-{mod}", nodeFlags);
                     var stateForUsed = _modStateSnapshot != null && _modStateSnapshot.TryGetValue(mod, out var msUsed) ? msUsed : null;
-                    DrawPenumbraUsedIndicator(mod, stateForUsed, totalAll);
+                    _ = DrawPenumbraUsedIndicator(mod, stateForUsed, totalAll);
                     var modToggled = ImGui.IsItemToggledOpen();
                     if (modToggled)
                     {

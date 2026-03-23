@@ -477,8 +477,7 @@ public sealed partial class ConversionUI
         if (selectAllMenuClicked) ImGui.OpenPopup("select_all_popup");
         if (selectAllClicked)
         {
-            _selectedTextures.Clear();
-            _selectedEmptyMods.Clear();
+            ClearAllModSelections();
             foreach (var mod in mods)
             {
                 var files = GetAllFilesForModDisplay(mod, visibleByMod.TryGetValue(mod, out var v) ? v : null);
@@ -495,6 +494,8 @@ public sealed partial class ConversionUI
                     _selectedCountByMod[mod] = 0;
                 }
             }
+            if (_modSelectionOrder.Count > 0)
+                _modSelectionAnchor = _modSelectionOrder[0];
         }
         if (ImGui.BeginPopup("select_all_popup"))
         {
@@ -552,10 +553,8 @@ public sealed partial class ConversionUI
         var clearAllClicked = ImGui.Button("Clear All");
         if (clearAllClicked)
         {
-            _selectedTextures.Clear();
-            _selectedEmptyMods.Clear();
-            foreach (var mod in visibleByMod.Keys)
-                _selectedCountByMod[mod] = 0;
+            ClearAllModSelections();
+            _modSelectionAnchor = string.Empty;
         }
 
         ImGui.SameLine();
@@ -582,7 +581,6 @@ public sealed partial class ConversionUI
             _expandedMods.Clear();
             _expandedFolders.Clear();
         }
-
         if (_filterPenumbraUsedOnly)
         {
             ImGui.SameLine();
@@ -604,12 +602,11 @@ public sealed partial class ConversionUI
         ImGui.BeginChild("ScannedFilesTableRegion", new Vector2(0, childH), false, ImGuiWindowFlags.None);
 
         var flags = ImGuiTableFlags.BordersOuter | ImGuiTableFlags.BordersV | ImGuiTableFlags.Resizable | ImGuiTableFlags.ScrollY | ImGuiTableFlags.RowBg;
-        if (ImGui.BeginTable("ScannedFilesTable", 5, flags))
+        if (ImGui.BeginTable("ScannedFilesTable", 4, flags))
         {
-            ImGui.TableSetupColumn("", ImGuiTableColumnFlags.WidthFixed| ImGuiTableColumnFlags.NoResize, _scannedFirstColWidth);
-            ImGui.TableSetupColumn("Mod", ImGuiTableColumnFlags.WidthStretch| ImGuiTableColumnFlags.NoResize);
-            ImGui.TableSetupColumn("Compressed", ImGuiTableColumnFlags.WidthFixed| ImGuiTableColumnFlags.NoResize, _scannedCompressedColWidth);
-            ImGui.TableSetupColumn("Uncompressed", ImGuiTableColumnFlags.WidthFixed| ImGuiTableColumnFlags.NoResize, _scannedSizeColWidth);
+            ImGui.TableSetupColumn("Mod", ImGuiTableColumnFlags.WidthStretch | ImGuiTableColumnFlags.NoResize);
+            ImGui.TableSetupColumn("Compressed", ImGuiTableColumnFlags.WidthFixed | ImGuiTableColumnFlags.NoResize, _scannedCompressedColWidth);
+            ImGui.TableSetupColumn("Uncompressed", ImGuiTableColumnFlags.WidthFixed | ImGuiTableColumnFlags.NoResize, _scannedSizeColWidth);
             ImGui.TableSetupColumn("Action", ImGuiTableColumnFlags.WidthFixed, FixedActionColumnWidth);
             ImGui.TableSetupScrollFreeze(0, 1);
             ImGui.TableHeadersRow();
@@ -631,6 +628,8 @@ public sealed partial class ConversionUI
                 _folderCountsCacheSig = string.Concat(_flatRowsSig, "|", _perModSavingsRevision.ToString());
                 BuildFolderCountsCache(root, visibleByMod, string.Empty);
             }
+            _modSelectionOrder.Clear();
+            _modSelectionOrder.AddRange(_flatRows.Where(r => r.Kind == FlatRowKind.Mod).Select(r => r.Mod));
             var clipper = ImGui.ImGuiListClipper();
                 clipper.Begin(_cachedTotalRows);
                 while (clipper.Step())
@@ -638,8 +637,16 @@ public sealed partial class ConversionUI
                     for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; i++)
                     {
                         var row = _flatRows[i];
-                        ImGui.TableNextRow();
-                        ImGui.TableSetBgColor(ImGuiTableBgTarget.RowBg0, ImGui.GetColorU32((_zebraRowIndex++ % 2 == 0) ? _zebraEvenColor : _zebraOddColor));
+                        ImGui.TableNextRow(ImGuiTableRowFlags.None, FixedFlatRowHeight);
+                        var rowColor = (_zebraRowIndex++ % 2 == 0) ? _zebraEvenColor : _zebraOddColor;
+                        var selectedHighlight = false;
+                        if (row.Kind == FlatRowKind.Mod)
+                            selectedHighlight = IsModSelected(row.Mod, visibleByMod);
+                        else if (row.Kind == FlatRowKind.Folder)
+                            selectedHighlight = IsFolderFullySelected(row.Node, visibleByMod);
+                        if (selectedHighlight)
+                            rowColor = new Vector4(0.23f, 0.40f, 0.72f, 0.38f);
+                        ImGui.TableSetBgColor(ImGuiTableBgTarget.RowBg0, ImGui.GetColorU32(rowColor));
                         if (row.Kind == FlatRowKind.Folder)
                         {
                             DrawFolderFlatRow(row, visibleByMod);
@@ -657,25 +664,15 @@ public sealed partial class ConversionUI
                 clipper.End();
             
             ImGui.TableSetColumnIndex(0);
-            var currentFirstWidth = ImGui.GetColumnWidth();
-            if (MathF.Abs(currentFirstWidth - _scannedFirstColWidth) > 0.5f && ImGui.IsMouseReleased(ImGuiMouseButton.Left))
-            {
-                _scannedFirstColWidth = currentFirstWidth;
-                _configService.Current.ScannedFilesFirstColWidth = currentFirstWidth;
-                _configService.Save();
-                _logger.LogDebug($"Saved first column width: {currentFirstWidth}px");
-            }
-
-            ImGui.TableSetColumnIndex(1);
             var currentFileWidth = ImGui.GetColumnWidth();
             _scannedFileColWidth = currentFileWidth;
 
-            ImGui.TableSetColumnIndex(2);
+            ImGui.TableSetColumnIndex(1);
             var prevCompressedWidth = _scannedCompressedColWidth;
             var currentCompressedWidth = ImGui.GetColumnWidth();
             _scannedCompressedColWidth = currentCompressedWidth;
 
-            ImGui.TableSetColumnIndex(3);
+            ImGui.TableSetColumnIndex(2);
             var prevUncompressedWidth = _scannedSizeColWidth;
             var currentUncompressedWidth = ImGui.GetColumnWidth();
             _scannedSizeColWidth = currentUncompressedWidth;
@@ -686,7 +683,7 @@ public sealed partial class ConversionUI
                 _logger.LogDebug($"Saved size column width: {currentUncompressedWidth}px");
             }
 
-            ImGui.TableSetColumnIndex(4);
+            ImGui.TableSetColumnIndex(3);
 
             ImGui.EndTable();
         }
@@ -753,9 +750,8 @@ public sealed partial class ConversionUI
         long savedBytes = _footerTotalSaved;
 
         var footerFlags = ImGuiTableFlags.BordersOuter | ImGuiTableFlags.BordersV | ImGuiTableFlags.RowBg | ImGuiTableFlags.SizingFixedFit;
-        if (ImGui.BeginTable("ScannedFilesTotals", 5, footerFlags))
+        if (ImGui.BeginTable("ScannedFilesTotals", 4, footerFlags))
         {
-            ImGui.TableSetupColumn("", ImGuiTableColumnFlags.WidthFixed, _scannedFirstColWidth);
             ImGui.TableSetupColumn("Mod", ImGuiTableColumnFlags.WidthFixed, _scannedFileColWidth);
             ImGui.TableSetupColumn("Compressed", ImGuiTableColumnFlags.WidthFixed, _scannedCompressedColWidth);
             ImGui.TableSetupColumn("Uncompressed", ImGuiTableColumnFlags.WidthFixed, _scannedSizeColWidth);
@@ -763,12 +759,12 @@ public sealed partial class ConversionUI
 
             ImGui.TableNextRow();
             ImGui.TableSetBgColor(ImGuiTableBgTarget.RowBg0, ImGui.GetColorU32((_zebraRowIndex++ % 2 == 0) ? _zebraEvenColor : _zebraOddColor));
-            ImGui.TableSetColumnIndex(1);
+            ImGui.TableSetColumnIndex(0);
             var reduction = totalUncompressed > 0
                 ? MathF.Max(0f, (1f - (float)totalCompressed / totalUncompressed) * 100f)
                 : 0f;
             ImGui.TextUnformatted($"Total saved ({reduction.ToString("0.00")}%)");
-            ImGui.TableSetColumnIndex(2);
+            ImGui.TableSetColumnIndex(1);
             if (totalCompressed > 0)
             {
                 var color = (totalUncompressed > 0 && totalCompressed > totalUncompressed)
@@ -778,12 +774,12 @@ public sealed partial class ConversionUI
             }
             else
                 DrawRightAlignedTextColored("-", _compressedTextColor);
-            ImGui.TableSetColumnIndex(3);
+            ImGui.TableSetColumnIndex(2);
             if (totalUncompressed > 0)
                 DrawRightAlignedSize(totalUncompressed);
             else
                 ImGui.TextUnformatted("");
-            ImGui.TableSetColumnIndex(4);
+            ImGui.TableSetColumnIndex(3);
             ImGui.TextUnformatted("");
 
             ImGui.EndTable();
@@ -833,6 +829,10 @@ public sealed partial class ConversionUI
             if (!hasAnyBackup)
                 convertibleSelectedModsNoBackup.Add(m);
         }
+        var deletableSelectedMods = selectedModsAll
+            .Where(m => GetOrQueryModBackup(m) || GetOrQueryModTextureBackup(m) || GetOrQueryModPmp(m))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
 
         ImGui.PushStyleColor(ImGuiCol.Button, ShrinkUColors.Accent);
         ImGui.PushStyleColor(ImGuiCol.ButtonHovered, ShrinkUColors.AccentHovered);
@@ -1085,6 +1085,27 @@ public sealed partial class ConversionUI
                 ImGui.SetTooltip("No selected mods have backups to restore.");
             else if (someSkippedByAuto)
                 ImGui.SetTooltip("Automatic mode: skipping mods with currently used textures.");
+        }
+
+        ImGui.SameLine();
+        using (var _dDeleteSelected = ImRaii.Disabled(ActionsDisabled() || deletableSelectedMods.Count == 0))
+        {
+            ImGui.PushFont(UiBuilder.IconFont);
+            if (ImGui.Button($"{FontAwesomeIcon.Trash.ToIconString()}##delete-selected-mods", new Vector2(32, 0)))
+            {
+                if (ImGui.GetIO().KeyCtrl)
+                    TryDeleteSelectedEntriesAndBackups(deletableSelectedMods, "delete-selected-ctrl");
+                else
+                    SetStatus("Hold CTRL while clicking trash to delete selected entries and backups.");
+            }
+            ImGui.PopFont();
+        }
+        if (ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
+        {
+            if (deletableSelectedMods.Count == 0)
+                ImGui.SetTooltip("No selected mods with backups to delete.");
+            else
+                ImGui.SetTooltip("Hold CTRL and click to delete all selected entries with backups.");
         }
     }
 }

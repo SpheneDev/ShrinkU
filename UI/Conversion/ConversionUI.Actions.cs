@@ -5,6 +5,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Linq;
 using Dalamud.Bindings.ImGui;
+using Microsoft.Extensions.Logging;
 using ShrinkU.Configuration;
 using ShrinkU.Services;
 
@@ -83,6 +84,48 @@ public sealed partial class ConversionUI
             });
     }
 
+    private void StartLatestTextureRestoreForMod(string mod, string refreshReason, string redrawLogContext)
+    {
+        _running = true;
+        _modsWithBackupCache.TryRemove(mod, out _);
+        ResetBothProgress();
+        _currentRestoreMod = mod;
+        var progress = new Progress<(string, int, int)>(e =>
+        {
+            _currentTexture = e.Item1;
+            _backupIndex = e.Item2;
+            _backupTotal = e.Item3;
+            _currentRestoreModIndex = e.Item2;
+            _currentRestoreModTotal = e.Item3;
+        });
+        _ = _backupService.RestoreLatestForModAsync(mod, progress, CancellationToken.None)
+            .ContinueWith(t =>
+            {
+                try { _backupService.RedrawPlayer(); }
+                catch (Exception ex) { _logger.LogError(ex, "{context} for {mod}", redrawLogContext, mod); }
+                RefreshModState(mod, refreshReason);
+                _ = _backupService.ComputeSavingsForModAsync(mod).ContinueWith(ps =>
+                {
+                    if (ps.Status == TaskStatus.RanToCompletion)
+                    {
+                        try { _cachedPerModSavings[mod] = ps.Result; } catch { }
+                        _uiThreadActions.Enqueue(() => { _perModSavingsRevision++; _footerTotalsDirty = true; _needsUIRefresh = true; });
+                    }
+                }, TaskScheduler.Default);
+                _ = _backupService.HasBackupForModAsync(mod).ContinueWith(bt =>
+                {
+                    if (bt.Status == TaskStatus.RanToCompletion)
+                    {
+                        bool any = bt.Result;
+                        try { any = any || _backupService.HasPmpBackupForModAsync(mod).GetAwaiter().GetResult(); }
+                        catch (Exception ex) { _logger.LogError(ex, "HasPmpBackup check failed for {mod}", mod); }
+                        _cacheService.SetModHasBackup(mod, any);
+                    }
+                });
+                _uiThreadActions.Enqueue(() => { _running = false; });
+            });
+    }
+
     private void RemoveModFromUiState(string mod)
     {
         try { _selectedEmptyMods.Remove(mod); } catch { }
@@ -152,6 +195,70 @@ public sealed partial class ConversionUI
                 ? (deletedAnything ? $"Entry and backups deleted for {mod}" : $"Entry deleted for {mod} (no backups found)")
                 : $"Entry deleted for {mod}, but backup cleanup had issues";
 
+            _uiThreadActions.Enqueue(() =>
+            {
+                SetStatus(status);
+                _running = false;
+            });
+        });
+    }
+
+    private void TryDeleteSelectedEntriesAndBackups(IReadOnlyCollection<string> mods, string origin)
+    {
+        if (mods == null || mods.Count == 0)
+            return;
+
+        if (ActionsDisabled())
+        {
+            SetStatus("Actions are currently disabled.");
+            return;
+        }
+
+        var targets = mods
+            .Where(m => !string.IsNullOrWhiteSpace(m))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        if (targets.Count == 0)
+            return;
+
+        _running = true;
+        SetStatus($"Deleting {targets.Count} selected entries and backups");
+        _ = Task.Run(async () =>
+        {
+            var deleted = 0;
+            var issues = 0;
+            foreach (var mod in targets)
+            {
+                TextureBackupService.DeleteBackupsResult? deleteResult = null;
+                try
+                {
+                    deleteResult = await _backupService.DeleteBackupsForModAsync(mod).ConfigureAwait(false);
+                }
+                catch
+                {
+                    issues++;
+                }
+
+                try { _modStateService.RemoveEntry(mod); } catch { issues++; }
+
+                var targetMod = mod;
+                _uiThreadActions.Enqueue(() =>
+                {
+                    RemoveModFromUiState(targetMod);
+                    _modStateSnapshot = _modStateService.Snapshot();
+                    _footerTotalsDirty = true;
+                    _needsUIRefresh = true;
+                });
+
+                if (deleteResult != null && !deleteResult.Success)
+                    issues++;
+                deleted++;
+            }
+
+            ScheduleOrphanScan(origin, true);
+            var status = issues > 0
+                ? $"Deleted {deleted} selected entries with {issues} issue(s)"
+                : $"Deleted {deleted} selected entries and backups";
             _uiThreadActions.Enqueue(() =>
             {
                 SetStatus(status);

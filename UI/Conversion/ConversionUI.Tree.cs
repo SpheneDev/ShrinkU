@@ -317,6 +317,28 @@ public sealed partial class ConversionUI
         return files;
     }
 
+    private List<string> CollectModsRecursive(TableCatNode node)
+    {
+        var mods = new List<string>();
+        foreach (var mod in node.Mods)
+        {
+            if (!string.IsNullOrWhiteSpace(mod))
+                mods.Add(mod);
+        }
+
+        foreach (var child in node.Children.Values)
+        {
+            var sub = CollectModsRecursive(child);
+            if (sub != null && sub.Count > 0)
+            {
+                for (int i = 0; i < sub.Count; i++)
+                    mods.Add(sub[i]);
+            }
+        }
+
+        return mods;
+    }
+
     private bool IsFolderFullySelected(TableCatNode node, Dictionary<string, List<string>> visibleByMod)
     {
         foreach (var mod in node.Mods)
