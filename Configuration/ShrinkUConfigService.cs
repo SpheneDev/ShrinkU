@@ -32,6 +32,24 @@ public sealed class ShrinkUConfigService
 
     public ShrinkUConfig Current => _current;
 
+    public string GetPluginDataDirectory()
+    {
+        try
+        {
+            var cfgDir = _pi.ConfigDirectory?.FullName ?? string.Empty;
+            if (!string.IsNullOrWhiteSpace(cfgDir))
+            {
+                Directory.CreateDirectory(cfgDir);
+                return cfgDir;
+            }
+        }
+        catch { }
+
+        var fallback = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "XIVLauncher", "pluginConfigs");
+        try { Directory.CreateDirectory(fallback); } catch { }
+        return fallback;
+    }
+
     public void Save()
     {
         try

@@ -13,6 +13,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Diagnostics;
+using Microsoft.Data.Sqlite;
 
 namespace ShrinkU.Services;
 
@@ -36,12 +37,47 @@ public sealed class ModStateService
     private static readonly byte[] s_newLineUtf8 = new[] { (byte)'\n' };
     private static readonly JsonSerializerOptions s_stateFingerprintJsonOptions = new JsonSerializerOptions { WriteIndented = false };
     private static readonly PropertyInfo[] s_stateFingerprintProperties = CreateStateFingerprintProperties();
+    private readonly bool _useSqliteStorage;
+    private readonly string _sqlitePath;
+    private readonly object _sqliteLock = new();
+    private readonly HashSet<string> _sqliteDirtyMods = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _sqliteDeletedMods = new(StringComparer.OrdinalIgnoreCase);
+    private bool _sqliteMetaDirty = true;
+    private bool _sqliteForceFullSync = true;
+    private volatile bool _sqliteSaveInProgress;
+    private long _sqliteMetricSaveCount;
+    private long _sqliteMetricSaveSkippedCount;
+    private long _sqliteMetricFullSaveCount;
+    private long _sqliteMetricIncrementalSaveCount;
+    private long _sqliteMetricUpsertCount;
+    private long _sqliteMetricDeleteCount;
+    private long _sqliteMetricTotalElapsedMs;
+    private long _sqliteMetricMaxElapsedMs;
+    private int _sqliteMetricLastDirtyCount;
+    private int _sqliteMetricLastDeletedCount;
+    private int _sqliteMetricLastUpsertedCount;
+    private int _sqliteMetricLastDeletedRowsCount;
+    private bool _sqliteMetricLastWasFullSave;
+    private long _sqliteMetricLastElapsedMs;
+    private DateTime _sqliteMetricLastSaveUtc = DateTime.MinValue;
 
     public ModStateService(ILogger logger, ShrinkUConfigService config, DebugTraceService? debugTrace = null)
     {
         _logger = logger;
         _config = config;
         _debug = debugTrace;
+        _useSqliteStorage = _config.Current.ModStateStorageMode == ModStateStorageMode.SqliteDatabase;
+        _sqlitePath = Path.Combine(_config.GetPluginDataDirectory(), "ShrinkU.mod_state.db");
+        if (_useSqliteStorage)
+        {
+            var sqliteAlreadyExisted = false;
+            try { sqliteAlreadyExisted = File.Exists(_sqlitePath); } catch { }
+            try { EnsureSqliteSchema(); } catch { }
+            if (!sqliteAlreadyExisted)
+            {
+                try { TryBootstrapFreshSqliteFromJson(); } catch { }
+            }
+        }
         try { Load(); } catch (Exception ex) { try { _logger.LogError(ex, "Failed to initialize mod state"); } catch { } }
     }
 
@@ -54,11 +90,192 @@ public sealed class ModStateService
 
     public string GetStateFilePath()
     {
+        return _useSqliteStorage ? _sqlitePath : GetPath();
+    }
+
+    public string GetSqliteFilePath()
+    {
+        return _sqlitePath;
+    }
+
+    public string GetPathForLegacyJsonState()
+    {
         return GetPath();
+    }
+
+    public ModStateStorageDebugStats GetStorageDebugStats()
+    {
+        lock (_lock)
+        {
+            var totalSaves = _sqliteMetricSaveCount;
+            var avgMs = totalSaves > 0 ? (double)_sqliteMetricTotalElapsedMs / totalSaves : 0d;
+            return new ModStateStorageDebugStats
+            {
+                StorageMode = _useSqliteStorage ? "SQLite" : "JSON",
+                StatePath = GetStateFilePath(),
+                SqliteSaveCount = _sqliteMetricSaveCount,
+                SqliteSaveSkippedCount = _sqliteMetricSaveSkippedCount,
+                SqliteFullSaveCount = _sqliteMetricFullSaveCount,
+                SqliteIncrementalSaveCount = _sqliteMetricIncrementalSaveCount,
+                SqliteUpsertCount = _sqliteMetricUpsertCount,
+                SqliteDeleteCount = _sqliteMetricDeleteCount,
+                SqliteAverageElapsedMs = avgMs,
+                SqliteMaxElapsedMs = _sqliteMetricMaxElapsedMs,
+                LastSaveUtc = _sqliteMetricLastSaveUtc,
+                LastSaveElapsedMs = _sqliteMetricLastElapsedMs,
+                LastSaveWasFullSync = _sqliteMetricLastWasFullSave,
+                LastSaveDirtyCount = _sqliteMetricLastDirtyCount,
+                LastSaveDeletedCount = _sqliteMetricLastDeletedCount,
+                LastSaveUpsertedCount = _sqliteMetricLastUpsertedCount,
+                LastSaveDeletedRowsCount = _sqliteMetricLastDeletedRowsCount,
+                PendingDirtyCount = _sqliteDirtyMods.Count,
+                PendingDeletedCount = _sqliteDeletedMods.Count,
+                SaveInProgress = _sqliteSaveInProgress,
+                ForceFullSyncPending = _sqliteForceFullSync,
+            };
+        }
+    }
+
+    public Task<ModStateMigrationResult> MigrateJsonStateToSqliteAsync(IProgress<ModStateMigrationProgress>? progress = null, CancellationToken cancellationToken = default)
+    {
+        return Task.Run(() =>
+        {
+            var startedUtc = DateTime.UtcNow;
+            var sw = Stopwatch.StartNew();
+            var sourcePath = GetPath();
+            var detailDir = GetDetailDir();
+            var result = new ModStateMigrationResult
+            {
+                SourceJsonPath = sourcePath,
+                TargetSqlitePath = _sqlitePath,
+                StartedUtc = startedUtc,
+            };
+
+            if (!File.Exists(sourcePath))
+            {
+                result.Success = false;
+                result.Message = "Source JSON state file not found.";
+                result.FinishedUtc = DateTime.UtcNow;
+                result.Duration = sw.Elapsed;
+                return result;
+            }
+
+            try
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                progress?.Report(new ModStateMigrationProgress
+                {
+                    Stage = "Loading JSON state",
+                    TotalSteps = 1,
+                    CompletedSteps = 0,
+                });
+
+                var (entries, meta) = LoadJsonStateForMigration(sourcePath);
+                result.MigratedEntries = entries.Count;
+
+                progress?.Report(new ModStateMigrationProgress
+                {
+                    Stage = "Writing state snapshot to SQLite",
+                    TotalSteps = 1 + entries.Count,
+                    CompletedSteps = 1,
+                    MigratedEntries = entries.Count,
+                });
+
+                SaveSnapshotToSqlite(entries, meta);
+
+                var done = 1;
+                var total = 1 + entries.Count;
+                foreach (var mod in entries.Keys.OrderBy(static k => k, StringComparer.OrdinalIgnoreCase))
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    done++;
+
+                    var path = Path.Combine(detailDir, Sanitize(mod) + ".json");
+                    if (!File.Exists(path))
+                    {
+                        result.MissingDetailFiles++;
+                        progress?.Report(new ModStateMigrationProgress
+                        {
+                            Stage = $"Scanning details ({mod})",
+                            TotalSteps = total,
+                            CompletedSteps = done,
+                            MigratedEntries = result.MigratedEntries,
+                            MigratedDetailFiles = result.MigratedDetailFiles,
+                            MissingDetailFiles = result.MissingDetailFiles,
+                        });
+                        continue;
+                    }
+
+                    try
+                    {
+                        var json = File.ReadAllText(path);
+                        if (!string.IsNullOrWhiteSpace(json))
+                        {
+                            WriteDetailToSqlite(mod, json);
+                            result.MigratedDetailFiles++;
+                        }
+                    }
+                    catch
+                    {
+                        result.DetailReadErrors++;
+                    }
+
+                    progress?.Report(new ModStateMigrationProgress
+                    {
+                        Stage = $"Migrating details ({mod})",
+                        TotalSteps = total,
+                        CompletedSteps = done,
+                        MigratedEntries = result.MigratedEntries,
+                        MigratedDetailFiles = result.MigratedDetailFiles,
+                        MissingDetailFiles = result.MissingDetailFiles,
+                        DetailReadErrors = result.DetailReadErrors,
+                    });
+                }
+
+                result.Success = true;
+                result.Message = "Migration completed.";
+            }
+            catch (OperationCanceledException)
+            {
+                result.Success = false;
+                result.Message = "Migration canceled.";
+            }
+            catch (Exception ex)
+            {
+                result.Success = false;
+                result.Message = $"Migration failed: {ex.Message}";
+                try { _logger.LogError(ex, "JSON to SQLite migration failed"); } catch { }
+            }
+            finally
+            {
+                sw.Stop();
+                result.FinishedUtc = DateTime.UtcNow;
+                result.Duration = sw.Elapsed;
+                progress?.Report(new ModStateMigrationProgress
+                {
+                    Stage = result.Success ? "Completed" : "Failed",
+                    TotalSteps = 1,
+                    CompletedSteps = 1,
+                    MigratedEntries = result.MigratedEntries,
+                    MigratedDetailFiles = result.MigratedDetailFiles,
+                    MissingDetailFiles = result.MissingDetailFiles,
+                    DetailReadErrors = result.DetailReadErrors,
+                    IsCompleted = true,
+                    IsSuccess = result.Success,
+                });
+            }
+
+            return result;
+        }, cancellationToken);
     }
 
     public bool ReloadIfChanged()
     {
+        if (_useSqliteStorage)
+        {
+            return false;
+        }
+
         try
         {
             var path = GetPath();
@@ -90,9 +307,42 @@ public sealed class ModStateService
             {
                 e = new ModStateEntry { ModFolderName = mod, LastUpdatedUtc = DateTime.UtcNow };
                 _state[mod] = e;
+                MarkSqliteEntryDirtyInternal(mod);
             }
             return e;
         }
+    }
+
+    private void MarkSqliteEntryDirtyInternal(string mod)
+    {
+        if (!_useSqliteStorage || string.IsNullOrWhiteSpace(mod))
+            return;
+
+        _sqliteDirtyMods.Add(mod);
+        _sqliteDeletedMods.Remove(mod);
+        if (_sqliteSaveInProgress)
+            _sqliteForceFullSync = true;
+    }
+
+    private void MarkSqliteEntryDeletedInternal(string mod)
+    {
+        if (!_useSqliteStorage || string.IsNullOrWhiteSpace(mod))
+            return;
+
+        _sqliteDirtyMods.Remove(mod);
+        _sqliteDeletedMods.Add(mod);
+        if (_sqliteSaveInProgress)
+            _sqliteForceFullSync = true;
+    }
+
+    private void MarkSqliteMetaDirtyInternal()
+    {
+        if (!_useSqliteStorage)
+            return;
+
+        _sqliteMetaDirty = true;
+        if (_sqliteSaveInProgress)
+            _sqliteForceFullSync = true;
     }
 
     public string GetBackupFolderFingerprint()
@@ -145,6 +395,7 @@ public sealed class ModStateService
 
             _meta.BackupFolderFingerprint = fingerprint;
             _meta.BackupFolderFingerprintUtc = DateTime.UtcNow;
+            MarkSqliteMetaDirtyInternal();
             _lastSaveReason = nameof(SetBackupFolderFingerprint);
             ScheduleSave();
         }
@@ -164,6 +415,7 @@ public sealed class ModStateService
             _meta.PenumbraFolderFingerprint = fingerprint;
             _meta.PenumbraRootPath = rootPath;
             _meta.PenumbraFolderFingerprintUtc = DateTime.UtcNow;
+            MarkSqliteMetaDirtyInternal();
             _lastSaveReason = nameof(SetPenumbraFolderFingerprint);
             ScheduleSave();
         }
@@ -195,6 +447,7 @@ public sealed class ModStateService
 
             _meta.StateFingerprint = fingerprint;
             _meta.StateFingerprintUtc = DateTime.UtcNow;
+            MarkSqliteMetaDirtyInternal();
             _lastSaveReason = nameof(SetStateFingerprint);
             ScheduleSave();
         }
@@ -224,6 +477,7 @@ public sealed class ModStateService
             e.HasTextureBackup = hasTexBackup;
             e.HasPmpBackup = hasPmpBackup;
             e.LastUpdatedUtc = DateTime.UtcNow;
+            MarkSqliteEntryDirtyInternal(mod);
             _lastSaveReason = nameof(UpdateBackupFlags);
             _lastChangedMod = mod;
             ScheduleSave();
@@ -264,6 +518,7 @@ public sealed class ModStateService
             }
             e.BytesSaved = Math.Max(0, e.OriginalBytes - e.CurrentBytes);
             e.LastUpdatedUtc = DateTime.UtcNow;
+            MarkSqliteEntryDirtyInternal(mod);
             _lastSaveReason = nameof(UpdateSavings);
             _lastChangedMod = mod;
             try { _logger.LogDebug("[ShrinkU] ModState UpdateSavings: mod={mod} original={orig} current={cur} comparedFiles={cmp}", mod, originalBytes, currentBytes, comparedFiles); } catch { }
@@ -286,6 +541,7 @@ public sealed class ModStateService
             e.ComparedFiles = 0;
             e.BytesSaved = Math.Max(0, e.OriginalBytes - e.CurrentBytes);
             e.LastUpdatedUtc = DateTime.UtcNow;
+            MarkSqliteEntryDirtyInternal(mod);
             _lastSaveReason = nameof(UpdateOriginalBytesFromRestore);
             _lastChangedMod = mod;
             ScheduleSave();
@@ -332,6 +588,7 @@ public sealed class ModStateService
                 try { if (needsSegs) e.PenumbraPathSegments = (rel ?? string.Empty).Replace('\\', '/').Split(new[] { '/' }, StringSplitOptions.RemoveEmptyEntries).ToList(); } catch { e.PenumbraPathSegments = new List<string>(); }
                 try { if (needsUid) e.ModUid = ComputeModUid(mod, e.CurrentAuthor); } catch { }
                 e.LastUpdatedUtc = DateTime.UtcNow;
+                MarkSqliteEntryDirtyInternal(mod);
                 _lastSaveReason = nameof(UpdateCurrentModInfo);
                 ScheduleSave();
                 if (!_batching)
@@ -346,6 +603,7 @@ public sealed class ModStateService
             e.RelativeModName = rname ?? string.Empty;
             try { if (string.IsNullOrWhiteSpace(e.ModUid)) e.ModUid = ComputeModUid(mod, e.CurrentAuthor); } catch { }
             e.LastUpdatedUtc = DateTime.UtcNow;
+            MarkSqliteEntryDirtyInternal(mod);
             _lastSaveReason = nameof(UpdateCurrentModInfo);
             ScheduleSave();
             if (!_batching)
@@ -376,6 +634,7 @@ public sealed class ModStateService
             e.LatestPmpBackupVersion = pv;
             e.LatestPmpBackupCreatedUtc = pmpCreatedUtc;
             e.LastUpdatedUtc = DateTime.UtcNow;
+            MarkSqliteEntryDirtyInternal(mod);
             _lastSaveReason = nameof(UpdateLatestBackupsInfo);
             ScheduleSave();
             if (!_batching)
@@ -391,6 +650,7 @@ public sealed class ModStateService
             if (e.InstalledButNotConverted == flag) return;
             e.InstalledButNotConverted = flag;
             e.LastUpdatedUtc = DateTime.UtcNow;
+            MarkSqliteEntryDirtyInternal(mod);
             _lastSaveReason = nameof(UpdateInstalledButNotConverted);
             ScheduleSave();
             if (!_batching)
@@ -408,6 +668,7 @@ public sealed class ModStateService
             e.Enabled = enabled;
             e.Priority = priority;
             e.LastUpdatedUtc = DateTime.UtcNow;
+            MarkSqliteEntryDirtyInternal(mod);
             _lastSaveReason = nameof(UpdateEnabledState);
             ScheduleSave();
             if (!_batching)
@@ -430,6 +691,7 @@ public sealed class ModStateService
             e.DisplayName = dn;
             e.Tags = tg;
             e.LastUpdatedUtc = DateTime.UtcNow;
+            MarkSqliteEntryDirtyInternal(mod);
             _lastSaveReason = nameof(UpdateDisplayAndTags);
             ScheduleSave();
             if (!_batching)
@@ -439,24 +701,42 @@ public sealed class ModStateService
 
     public void UpdateTextureFiles(string mod, IReadOnlyList<string>? files, DateTime? lastWriteUtc = null)
     {
+        var list = (files ?? Array.Empty<string>()).Where(f => !string.IsNullOrWhiteSpace(f)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        Dictionary<string, long> sizes = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+        for (int i = 0; i < list.Count; i++)
+        {
+            var path = list[i];
+            if (string.IsNullOrWhiteSpace(path))
+                continue;
+            try
+            {
+                var fi = new FileInfo(path);
+                if (fi.Exists)
+                    sizes[path] = fi.Length;
+            }
+            catch { }
+        }
+
+        var shouldNotify = false;
         lock (_lock)
         {
             var e = Get(mod);
-            var list = (files ?? Array.Empty<string>()).Where(f => !string.IsNullOrWhiteSpace(f)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
-            Dictionary<string, long> sizes = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
-            for (int i = 0; i < list.Count; i++)
+            bool sameList = e.TextureFiles != null && e.TextureFiles.Count == list.Count;
+            if (sameList)
             {
-                var path = list[i];
-                if (string.IsNullOrWhiteSpace(path))
-                    continue;
-                try
+                var prevSet = new HashSet<string>(e.TextureFiles ?? new List<string>(), StringComparer.OrdinalIgnoreCase);
+                for (int i = 0; i < list.Count; i++)
                 {
-                    var fi = new FileInfo(path);
-                    if (fi.Exists)
-                        sizes[path] = fi.Length;
+                    if (!prevSet.Contains(list[i]))
+                    {
+                        sameList = false;
+                        break;
+                    }
                 }
-                catch { }
             }
+            var sameWrite = !lastWriteUtc.HasValue || e.LastKnownWriteUtc == lastWriteUtc.Value;
+            if (sameList && e.TotalTextures == list.Count && sameWrite && !e.NeedsRescan)
+                return;
             if (list.Count == 0 && e.TotalTextures > 0)
             {
                 try { _logger.LogDebug("[TRACE-ZERO-BUG] UpdateTextureFiles reset TotalTextures to 0 for {mod}. Prev={prev}. Trace: {trace}", mod, e.TotalTextures, Environment.StackTrace); } catch { }
@@ -470,13 +750,15 @@ public sealed class ModStateService
             }
             e.NeedsRescan = false;
             e.LastUpdatedUtc = DateTime.UtcNow;
-            WriteDetail(mod, list, null, sizes);
+            MarkSqliteEntryDirtyInternal(mod);
             _lastSaveReason = nameof(UpdateTextureFiles);
             _lastChangedMod = mod;
             ScheduleSave();
-            if (!_batching)
-                try { OnEntryChanged?.Invoke(mod); } catch { }
+            shouldNotify = !_batching;
         }
+        WriteDetail(mod, list, null, sizes);
+        if (shouldNotify)
+            try { OnEntryChanged?.Invoke(mod); } catch { }
     }
 
     public void UpdateUsedTextureFiles(string mod, IReadOnlyList<string>? files)
@@ -495,6 +777,7 @@ public sealed class ModStateService
             e.UsedTextureCount = list.Count;
             e.UsedTextureFiles = list;
             e.LastUpdatedUtc = DateTime.UtcNow;
+            MarkSqliteEntryDirtyInternal(mod);
             WriteDetail(mod, null, list, null);
             _lastSaveReason = nameof(UpdateUsedTextureFiles);
             _lastChangedMod = mod;
@@ -517,6 +800,7 @@ public sealed class ModStateService
             e.TotalTextures = Math.Max(0, total);
             e.LastScanUtc = DateTime.UtcNow;
             e.LastUpdatedUtc = DateTime.UtcNow;
+            MarkSqliteEntryDirtyInternal(mod);
             _lastSaveReason = nameof(UpdateTextureCount);
             _lastChangedMod = mod;
             ScheduleSave();
@@ -547,14 +831,21 @@ public sealed class ModStateService
             if (string.IsNullOrWhiteSpace(mod))
                 return;
             var trace = PerfTrace.Step(_logger, $"ModState Detail {mod}");
-            var dir = GetDetailDir();
-            var path = Path.Combine(dir, Sanitize(mod) + ".json");
             List<string> t = textures ?? ReadDetailTextures(mod);
             List<string> u = used ?? ReadDetailUsed(mod);
             Dictionary<string, long> s = sizes ?? ReadDetailTextureSizes(mod);
             var obj = new ModDetail { TextureFiles = t, UsedTextureFiles = u, TextureFileSizes = s };
             var json = JsonSerializer.Serialize(obj, new JsonSerializerOptions { WriteIndented = true });
-            File.WriteAllText(path, json);
+            if (_useSqliteStorage)
+            {
+                WriteDetailToSqlite(mod, json);
+            }
+            else
+            {
+                var dir = GetDetailDir();
+                var path = Path.Combine(dir, Sanitize(mod) + ".json");
+                File.WriteAllText(path, json);
+            }
             trace.Dispose();
         }
         catch { }
@@ -566,10 +857,8 @@ public sealed class ModStateService
         {
             if (string.IsNullOrWhiteSpace(mod))
                 return new List<string>();
-            var dir = GetDetailDir();
-            var path = Path.Combine(dir, Sanitize(mod) + ".json");
-            if (!File.Exists(path)) return new List<string>();
-            var json = File.ReadAllText(path);
+            var json = ReadDetailJson(mod);
+            if (string.IsNullOrWhiteSpace(json)) return new List<string>();
             var obj = JsonSerializer.Deserialize<ModDetail>(json) ?? new ModDetail();
             return obj.TextureFiles ?? new List<string>();
         }
@@ -582,10 +871,8 @@ public sealed class ModStateService
         {
             if (string.IsNullOrWhiteSpace(mod))
                 return new List<string>();
-            var dir = GetDetailDir();
-            var path = Path.Combine(dir, Sanitize(mod) + ".json");
-            if (!File.Exists(path)) return new List<string>();
-            var json = File.ReadAllText(path);
+            var json = ReadDetailJson(mod);
+            if (string.IsNullOrWhiteSpace(json)) return new List<string>();
             var obj = JsonSerializer.Deserialize<ModDetail>(json) ?? new ModDetail();
             return obj.UsedTextureFiles ?? new List<string>();
         }
@@ -598,14 +885,29 @@ public sealed class ModStateService
         {
             if (string.IsNullOrWhiteSpace(mod))
                 return new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
-            var dir = GetDetailDir();
-            var path = Path.Combine(dir, Sanitize(mod) + ".json");
-            if (!File.Exists(path)) return new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
-            var json = File.ReadAllText(path);
+            var json = ReadDetailJson(mod);
+            if (string.IsNullOrWhiteSpace(json)) return new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
             var obj = JsonSerializer.Deserialize<ModDetail>(json) ?? new ModDetail();
             return obj.TextureFileSizes ?? new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
         }
         catch { return new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase); }
+    }
+
+    private string ReadDetailJson(string mod)
+    {
+        if (_useSqliteStorage)
+        {
+            return ReadDetailFromSqlite(mod);
+        }
+
+        var dir = GetDetailDir();
+        var path = Path.Combine(dir, Sanitize(mod) + ".json");
+        if (!File.Exists(path))
+        {
+            return string.Empty;
+        }
+
+        return File.ReadAllText(path);
     }
 
     private sealed class ModDetail
@@ -617,6 +919,12 @@ public sealed class ModStateService
 
     public void Load()
     {
+        if (_useSqliteStorage)
+        {
+            LoadFromSqlite();
+            return;
+        }
+
         var path = GetPath();
         if (!File.Exists(path)) return;
         try
@@ -723,11 +1031,21 @@ public sealed class ModStateService
                 try { ScheduleSave(); } catch { }
                 try
                 {
-                    var dir = GetDetailDir();
-                    for (var i = 0; i < removedKeys.Count; i++)
+                    if (_useSqliteStorage)
                     {
-                        var p = Path.Combine(dir, Sanitize(removedKeys[i]) + ".json");
-                        try { if (File.Exists(p)) File.Delete(p); } catch { }
+                        for (var i = 0; i < removedKeys.Count; i++)
+                        {
+                            try { DeleteDetailFromSqlite(removedKeys[i]); } catch { }
+                        }
+                    }
+                    else
+                    {
+                        var dir = GetDetailDir();
+                        for (var i = 0; i < removedKeys.Count; i++)
+                        {
+                            var p = Path.Combine(dir, Sanitize(removedKeys[i]) + ".json");
+                            try { if (File.Exists(p)) File.Delete(p); } catch { }
+                        }
                     }
                 }
                 catch { }
@@ -863,13 +1181,12 @@ public sealed class ModStateService
             try
             {
                 var trace = PerfTrace.Step(_logger, "ModState Save");
-                var path = GetPath();
-                var pid = System.Diagnostics.Process.GetCurrentProcess().Id;
-                var tmp = path + $".tmp.{pid}.{System.Environment.CurrentManagedThreadId}.{DateTime.UtcNow.Ticks}";
-                try { var dir = Path.GetDirectoryName(path); if (!string.IsNullOrWhiteSpace(dir)) Directory.CreateDirectory(dir); } catch { }
-                
                 Dictionary<string, ModStateEntry> entriesSnapshot;
                 ModStateMeta metaSnapshot;
+                HashSet<string> dirtyModsSnapshot = new(StringComparer.OrdinalIgnoreCase);
+                HashSet<string> deletedModsSnapshot = new(StringComparer.OrdinalIgnoreCase);
+                bool metaDirtySnapshot = false;
+                bool forceFullSnapshot = false;
                 lock (_lock)
                 {
                     entriesSnapshot = new Dictionary<string, ModStateEntry>(_state, StringComparer.OrdinalIgnoreCase);
@@ -888,7 +1205,64 @@ public sealed class ModStateService
                         PenumbraFolderFingerprintUtc = m.PenumbraFolderFingerprintUtc,
                         PenumbraRootPath = m.PenumbraRootPath,
                     };
+
+                    if (_useSqliteStorage)
+                    {
+                        forceFullSnapshot = _sqliteForceFullSync;
+                        metaDirtySnapshot = _sqliteMetaDirty;
+                        dirtyModsSnapshot = new HashSet<string>(_sqliteDirtyMods, StringComparer.OrdinalIgnoreCase);
+                        deletedModsSnapshot = new HashSet<string>(_sqliteDeletedMods, StringComparer.OrdinalIgnoreCase);
+                        if (forceFullSnapshot || dirtyModsSnapshot.Count > 0 || deletedModsSnapshot.Count > 0 || metaDirtySnapshot)
+                        {
+                            _sqliteSaveInProgress = true;
+                        }
+                    }
                 }
+
+                if (_useSqliteStorage)
+                {
+                    if (!forceFullSnapshot && dirtyModsSnapshot.Count == 0 && deletedModsSnapshot.Count == 0 && !metaDirtySnapshot)
+                    {
+                        lock (_lock)
+                        {
+                            _sqliteMetricSaveSkippedCount++;
+                        }
+                        trace.Dispose();
+                        return;
+                    }
+
+                    var sqliteElapsed = Stopwatch.StartNew();
+                    var sqliteStats = SaveSnapshotToSqlite(entriesSnapshot, metaSnapshot, dirtyModsSnapshot, deletedModsSnapshot, metaDirtySnapshot, forceFullSnapshot);
+                    sqliteElapsed.Stop();
+                    lock (_lock)
+                    {
+                        _sqliteSaveInProgress = false;
+                        _sqliteMetaDirty = false;
+                        _sqliteForceFullSync = false;
+                        _sqliteDirtyMods.ExceptWith(dirtyModsSnapshot);
+                        _sqliteDeletedMods.ExceptWith(deletedModsSnapshot);
+                        RecordSqliteSaveMetrics(sqliteElapsed.ElapsedMilliseconds, forceFullSnapshot, dirtyModsSnapshot.Count, deletedModsSnapshot.Count, sqliteStats.UpsertedRows, sqliteStats.DeletedRows);
+                    }
+                    var sqliteElapsedMs = (int)Math.Round(sqliteElapsed.Elapsed.TotalMilliseconds);
+                    try
+                    {
+                        if (_config.Current.DebugTraceModStateChanges)
+                        {
+                            string caller = _lastSaveReason ?? string.Empty;
+                            _logger.LogDebug("mod_state.sqlite saved: caller={caller}, entries={count}, thread={thread}, elapsedMs={elapsed}", caller, _state.Count, System.Environment.CurrentManagedThreadId, sqliteElapsedMs);
+                        }
+                    }
+                    catch { }
+                    try { _logger.LogDebug("ModState save: reason={reason} mod={mod} entries={count}", _lastSaveReason, _lastChangedMod, _state.Count); } catch { }
+                    try { OnStateSaved?.Invoke(); } catch { }
+                    trace.Dispose();
+                    return;
+                }
+
+                var path = GetPath();
+                var pid = System.Diagnostics.Process.GetCurrentProcess().Id;
+                var tmp = path + $".tmp.{pid}.{System.Environment.CurrentManagedThreadId}.{DateTime.UtcNow.Ticks}";
+                try { var dir = Path.GetDirectoryName(path); if (!string.IsNullOrWhiteSpace(dir)) Directory.CreateDirectory(dir); } catch { }
 
                 var sw = Stopwatch.StartNew();
                 using (var fs = new FileStream(tmp, FileMode.Create, FileAccess.Write, FileShare.None, 65536, FileOptions.SequentialScan))
@@ -1018,9 +1392,22 @@ public sealed class ModStateService
             }
             catch (Exception ex)
             {
-                try { _logger.LogError(ex, "Failed to save mod_state.json to {path}", GetPath()); } catch { }
+                if (_useSqliteStorage)
+                {
+                    lock (_lock)
+                    {
+                        _sqliteSaveInProgress = false;
+                        _sqliteForceFullSync = true;
+                        _sqliteMetaDirty = true;
+                    }
+                }
+                try { _logger.LogError(ex, "Failed to save mod state to {path}", GetStateFilePath()); } catch { }
                 try
                 {
+                    if (_useSqliteStorage)
+                    {
+                        return;
+                    }
                     var dir = Path.GetDirectoryName(GetPath()) ?? string.Empty;
                     foreach (var f in Directory.EnumerateFiles(dir, "mod_state.json.tmp.*"))
                     {
@@ -1043,9 +1430,105 @@ public sealed class ModStateService
         {
             if (string.IsNullOrWhiteSpace(mod)) return;
             if (!_state.Remove(mod)) return;
+            try
+            {
+                if (_useSqliteStorage)
+                {
+                    DeleteDetailFromSqlite(mod);
+                }
+                else
+                {
+                    var dir = GetDetailDir();
+                    var p = Path.Combine(dir, Sanitize(mod) + ".json");
+                    if (File.Exists(p))
+                        File.Delete(p);
+                }
+            }
+            catch { }
+            MarkSqliteEntryDeletedInternal(mod);
             ScheduleSave();
             if (!_batching)
                 try { OnEntryChanged?.Invoke(mod); } catch { }
+        }
+    }
+
+    public void MoveEntry(string fromMod, string toMod)
+    {
+        lock (_lock)
+        {
+            if (string.IsNullOrWhiteSpace(fromMod) || string.IsNullOrWhiteSpace(toMod))
+                return;
+            if (string.Equals(fromMod, toMod, StringComparison.OrdinalIgnoreCase))
+                return;
+            if (!_state.TryGetValue(fromMod, out var fromEntry) || fromEntry == null)
+                return;
+
+            if (_state.TryGetValue(toMod, out var toEntry) && toEntry != null)
+            {
+                if ((toEntry.TotalTextures <= 0 && fromEntry.TotalTextures > 0) || (toEntry.ComparedFiles <= 0 && fromEntry.ComparedFiles > 0))
+                {
+                    toEntry.TotalTextures = Math.Max(toEntry.TotalTextures, fromEntry.TotalTextures);
+                    toEntry.ComparedFiles = Math.Max(toEntry.ComparedFiles, fromEntry.ComparedFiles);
+                    toEntry.OriginalBytes = Math.Max(toEntry.OriginalBytes, fromEntry.OriginalBytes);
+                    toEntry.CurrentBytes = Math.Max(toEntry.CurrentBytes, fromEntry.CurrentBytes);
+                    toEntry.BytesSaved = Math.Max(toEntry.BytesSaved, fromEntry.BytesSaved);
+                }
+                if (string.IsNullOrWhiteSpace(toEntry.ModAbsolutePath) && !string.IsNullOrWhiteSpace(fromEntry.ModAbsolutePath))
+                    toEntry.ModAbsolutePath = fromEntry.ModAbsolutePath;
+                if (string.IsNullOrWhiteSpace(toEntry.PenumbraRelativePath) && !string.IsNullOrWhiteSpace(fromEntry.PenumbraRelativePath))
+                    toEntry.PenumbraRelativePath = fromEntry.PenumbraRelativePath;
+                if (string.IsNullOrWhiteSpace(toEntry.RelativeModName) && !string.IsNullOrWhiteSpace(fromEntry.RelativeModName))
+                    toEntry.RelativeModName = fromEntry.RelativeModName;
+                if (string.IsNullOrWhiteSpace(toEntry.CurrentVersion) && !string.IsNullOrWhiteSpace(fromEntry.CurrentVersion))
+                    toEntry.CurrentVersion = fromEntry.CurrentVersion;
+                if (string.IsNullOrWhiteSpace(toEntry.CurrentAuthor) && !string.IsNullOrWhiteSpace(fromEntry.CurrentAuthor))
+                    toEntry.CurrentAuthor = fromEntry.CurrentAuthor;
+                if ((toEntry.UsedTextureFiles == null || toEntry.UsedTextureFiles.Count == 0) && fromEntry.UsedTextureFiles != null && fromEntry.UsedTextureFiles.Count > 0)
+                    toEntry.UsedTextureFiles = fromEntry.UsedTextureFiles;
+                toEntry.UsedTextureCount = Math.Max(toEntry.UsedTextureCount, fromEntry.UsedTextureCount);
+                toEntry.LastUpdatedUtc = DateTime.UtcNow;
+            }
+            else
+            {
+                _state.Remove(fromMod);
+                fromEntry.ModFolderName = toMod;
+                fromEntry.LastUpdatedUtc = DateTime.UtcNow;
+                _state[toMod] = fromEntry;
+            }
+
+            _state.Remove(fromMod);
+            MarkSqliteEntryDeletedInternal(fromMod);
+            MarkSqliteEntryDirtyInternal(toMod);
+            try
+            {
+                if (_useSqliteStorage)
+                {
+                    MoveDetailInSqlite(fromMod, toMod);
+                }
+                else
+                {
+                    var dir = GetDetailDir();
+                    var oldPath = Path.Combine(dir, Sanitize(fromMod) + ".json");
+                    var newPath = Path.Combine(dir, Sanitize(toMod) + ".json");
+                    if (File.Exists(oldPath))
+                    {
+                        if (!File.Exists(newPath))
+                            File.Move(oldPath, newPath);
+                        else
+                            File.Delete(oldPath);
+                    }
+                }
+            }
+            catch { }
+
+            _lastSaveReason = nameof(MoveEntry);
+            _lastChangedMod = toMod;
+            ScheduleSave();
+            if (!_batching)
+            {
+                try { OnEntryChanged?.Invoke(fromMod); } catch { }
+                try { OnEntryChanged?.Invoke(toMod); } catch { }
+            }
         }
     }
 
@@ -1063,6 +1546,7 @@ public sealed class ModStateService
                     e.InstalledButNotConverted = flag;
                     e.LastUpdatedUtc = DateTime.UtcNow;
                     changed.Add(kv.Key);
+                    MarkSqliteEntryDirtyInternal(kv.Key);
                 }
             }
         }
@@ -1098,6 +1582,7 @@ public sealed class ModStateService
             var e = Get(mod);
             e.ExternalChange = marker;
             e.LastUpdatedUtc = DateTime.UtcNow;
+            MarkSqliteEntryDirtyInternal(mod);
             _lastSaveReason = nameof(UpdateExternalChange);
             _lastChangedMod = mod;
             ScheduleSave();
@@ -1114,6 +1599,7 @@ public sealed class ModStateService
             e.LastConvertUtc = at;
             e.LastChangeReason = nameof(SetLastConvertUtc);
             e.LastChangeUtc = DateTime.UtcNow;
+            MarkSqliteEntryDirtyInternal(mod);
             ScheduleSave();
         }
     }
@@ -1126,6 +1612,7 @@ public sealed class ModStateService
             e.LastRestoreUtc = at;
             e.LastChangeReason = nameof(SetLastRestoreUtc);
             e.LastChangeUtc = DateTime.UtcNow;
+            MarkSqliteEntryDirtyInternal(mod);
             ScheduleSave();
         }
     }
@@ -1140,9 +1627,485 @@ public sealed class ModStateService
             e.LatestBackup.EntriesCount = Math.Max(0, entriesCount);
             e.LatestBackup.TotalBytes = Math.Max(0, totalBytes);
             e.LastUpdatedUtc = DateTime.UtcNow;
+            MarkSqliteEntryDirtyInternal(mod);
             _lastSaveReason = nameof(UpdateLatestBackupSummary);
             _lastChangedMod = mod;
             ScheduleSave();
+        }
+    }
+
+    private void EnsureSqliteSchema()
+    {
+        lock (_sqliteLock)
+        {
+            using var conn = new SqliteConnection($"Data Source={_sqlitePath};Pooling=True");
+            conn.Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = """
+                              PRAGMA journal_mode=WAL;
+                              CREATE TABLE IF NOT EXISTS kv_state(
+                                  key TEXT PRIMARY KEY,
+                                  value TEXT NOT NULL
+                              );
+                              CREATE TABLE IF NOT EXISTS mod_state_entry(
+                                  mod TEXT PRIMARY KEY,
+                                  value TEXT NOT NULL
+                              );
+                              CREATE TABLE IF NOT EXISTS mod_detail(
+                                  mod TEXT PRIMARY KEY,
+                                  value TEXT NOT NULL
+                              );
+                              """;
+            cmd.ExecuteNonQuery();
+        }
+    }
+
+    private static (Dictionary<string, ModStateEntry> Entries, ModStateMeta Meta) LoadJsonStateForMigration(string sourcePath)
+    {
+        var json = File.ReadAllText(sourcePath);
+        var dict = new Dictionary<string, ModStateEntry>(StringComparer.OrdinalIgnoreCase);
+        var meta = new ModStateMeta();
+
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            if (doc.RootElement.ValueKind == JsonValueKind.Object
+                && (doc.RootElement.TryGetProperty("entries", out _)
+                    || doc.RootElement.TryGetProperty("Entries", out _)))
+            {
+                var file = JsonSerializer.Deserialize<ModStateFile>(json, new JsonSerializerOptions { PropertyNameCaseInsensitive = true })
+                    ?? new ModStateFile { Meta = new ModStateMeta(), Entries = new Dictionary<string, ModStateEntry>() };
+                dict = new Dictionary<string, ModStateEntry>(file.Entries ?? new Dictionary<string, ModStateEntry>(), StringComparer.OrdinalIgnoreCase);
+                meta = file.Meta ?? new ModStateMeta();
+            }
+            else
+            {
+                var d0 = JsonSerializer.Deserialize<Dictionary<string, ModStateEntry>>(json) ?? new Dictionary<string, ModStateEntry>();
+                dict = new Dictionary<string, ModStateEntry>(d0, StringComparer.OrdinalIgnoreCase);
+            }
+        }
+        catch
+        {
+            var d0 = JsonSerializer.Deserialize<Dictionary<string, ModStateEntry>>(json) ?? new Dictionary<string, ModStateEntry>();
+            dict = new Dictionary<string, ModStateEntry>(d0, StringComparer.OrdinalIgnoreCase);
+        }
+
+        var removed = new List<string>();
+        foreach (var kv in dict)
+        {
+            var key = kv.Key;
+            var entry = kv.Value;
+            if (string.IsNullOrWhiteSpace(key)
+                || string.Equals(key, "Entries", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(key, "Meta", StringComparison.OrdinalIgnoreCase)
+                || IsTempModStateArtifact(key, entry))
+            {
+                removed.Add(key);
+            }
+        }
+
+        for (var i = 0; i < removed.Count; i++)
+        {
+            dict.Remove(removed[i]);
+        }
+
+        return (dict, meta);
+    }
+
+    private void TryBootstrapFreshSqliteFromJson()
+    {
+        try
+        {
+            var sourcePath = GetPath();
+            if (!File.Exists(sourcePath))
+            {
+                _logger.LogDebug("SQLite bootstrap skipped: JSON state file not found at {path}", sourcePath);
+                return;
+            }
+
+            var (entries, meta) = LoadJsonStateForMigration(sourcePath);
+            SaveSnapshotToSqlite(entries, meta);
+
+            var detailDir = GetDetailDir();
+            int migratedDetailFiles = 0;
+            int missingDetailFiles = 0;
+            int detailReadErrors = 0;
+            foreach (var mod in entries.Keys)
+            {
+                var path = Path.Combine(detailDir, Sanitize(mod) + ".json");
+                if (!File.Exists(path))
+                {
+                    missingDetailFiles++;
+                    continue;
+                }
+
+                try
+                {
+                    var detailJson = File.ReadAllText(path);
+                    if (!string.IsNullOrWhiteSpace(detailJson))
+                    {
+                        WriteDetailToSqlite(mod, detailJson);
+                        migratedDetailFiles++;
+                    }
+                }
+                catch
+                {
+                    detailReadErrors++;
+                }
+            }
+
+            _logger.LogInformation(
+                "Initialized new SQLite mod state from JSON: entries={entries} detailMigrated={detailMigrated} detailMissing={detailMissing} detailErrors={detailErrors}",
+                entries.Count, migratedDetailFiles, missingDetailFiles, detailReadErrors);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed one-time bootstrap migration from JSON to fresh SQLite mod state");
+        }
+    }
+
+    private readonly struct SqliteWriteStats
+    {
+        public SqliteWriteStats(int upsertedRows, int deletedRows)
+        {
+            UpsertedRows = upsertedRows;
+            DeletedRows = deletedRows;
+        }
+
+        public int UpsertedRows { get; }
+        public int DeletedRows { get; }
+    }
+
+    private void RecordSqliteSaveMetrics(long elapsedMs, bool wasFullSync, int dirtyCount, int deletedCount, int upsertedRows, int deletedRows)
+    {
+        _sqliteMetricSaveCount++;
+        if (wasFullSync) _sqliteMetricFullSaveCount++;
+        else _sqliteMetricIncrementalSaveCount++;
+        _sqliteMetricUpsertCount += upsertedRows;
+        _sqliteMetricDeleteCount += deletedRows;
+        _sqliteMetricTotalElapsedMs += Math.Max(0, elapsedMs);
+        if (elapsedMs > _sqliteMetricMaxElapsedMs)
+            _sqliteMetricMaxElapsedMs = elapsedMs;
+        _sqliteMetricLastSaveUtc = DateTime.UtcNow;
+        _sqliteMetricLastElapsedMs = elapsedMs;
+        _sqliteMetricLastWasFullSave = wasFullSync;
+        _sqliteMetricLastDirtyCount = dirtyCount;
+        _sqliteMetricLastDeletedCount = deletedCount;
+        _sqliteMetricLastUpsertedCount = upsertedRows;
+        _sqliteMetricLastDeletedRowsCount = deletedRows;
+    }
+
+    private SqliteWriteStats SaveSnapshotToSqlite(
+        Dictionary<string, ModStateEntry> entriesSnapshot,
+        ModStateMeta metaSnapshot,
+        IReadOnlyCollection<string>? dirtyMods = null,
+        IReadOnlyCollection<string>? deletedMods = null,
+        bool metaDirty = true,
+        bool forceFull = true)
+    {
+        metaSnapshot.SchemaVersion = 4;
+        metaSnapshot.GeneratedBy = GetGeneratedBy();
+        if (metaSnapshot.CreatedUtc == DateTime.MinValue)
+            metaSnapshot.CreatedUtc = _lastLoadedWriteUtc == DateTime.MinValue ? DateTime.UtcNow : _lastLoadedWriteUtc;
+        metaSnapshot.LastSavedUtc = DateTime.UtcNow;
+        metaSnapshot.StateFingerprint = ComputeStateFingerprint(entriesSnapshot);
+        metaSnapshot.StateFingerprintUtc = DateTime.UtcNow;
+        var metaJson = JsonSerializer.Serialize(metaSnapshot, new JsonSerializerOptions { WriteIndented = true });
+        var serializedEntries = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        if (forceFull)
+        {
+            foreach (var kv in entriesSnapshot)
+            {
+                if (string.IsNullOrWhiteSpace(kv.Key))
+                    continue;
+                serializedEntries[kv.Key] = JsonSerializer.Serialize(kv.Value ?? new ModStateEntry { ModFolderName = kv.Key }, new JsonSerializerOptions { WriteIndented = true });
+            }
+        }
+        else
+        {
+            foreach (var mod in dirtyMods ?? Array.Empty<string>())
+            {
+                if (string.IsNullOrWhiteSpace(mod))
+                    continue;
+                if (!entriesSnapshot.TryGetValue(mod, out var entry))
+                    continue;
+                serializedEntries[mod] = JsonSerializer.Serialize(entry ?? new ModStateEntry { ModFolderName = mod }, new JsonSerializerOptions { WriteIndented = true });
+            }
+        }
+
+        int upsertedRows = 0;
+        int deletedRows = 0;
+
+        lock (_sqliteLock)
+        {
+            EnsureSqliteSchema();
+            using var conn = new SqliteConnection($"Data Source={_sqlitePath};Pooling=True");
+            conn.Open();
+            using var tx = conn.BeginTransaction();
+            if (metaDirty || forceFull)
+            {
+                using var cmd = conn.CreateCommand();
+                cmd.Transaction = tx;
+                cmd.CommandText = "INSERT INTO kv_state(key,value) VALUES('meta',$value) ON CONFLICT(key) DO UPDATE SET value=excluded.value;";
+                cmd.Parameters.AddWithValue("$value", metaJson);
+                cmd.ExecuteNonQuery();
+            }
+
+            if (forceFull)
+            {
+                using var clear = conn.CreateCommand();
+                clear.Transaction = tx;
+                clear.CommandText = "DELETE FROM mod_state_entry;";
+                clear.ExecuteNonQuery();
+            }
+
+            foreach (var kv in serializedEntries)
+            {
+                using var upsert = conn.CreateCommand();
+                upsert.Transaction = tx;
+                upsert.CommandText = "INSERT INTO mod_state_entry(mod,value) VALUES($mod,$value) ON CONFLICT(mod) DO UPDATE SET value=excluded.value;";
+                upsert.Parameters.AddWithValue("$mod", kv.Key);
+                upsert.Parameters.AddWithValue("$value", kv.Value);
+                upsert.ExecuteNonQuery();
+                upsertedRows++;
+            }
+
+            foreach (var staleMod in deletedMods ?? Array.Empty<string>())
+            {
+                if (string.IsNullOrWhiteSpace(staleMod))
+                    continue;
+                using var del = conn.CreateCommand();
+                del.Transaction = tx;
+                del.CommandText = "DELETE FROM mod_state_entry WHERE mod=$mod;";
+                del.Parameters.AddWithValue("$mod", staleMod);
+                del.ExecuteNonQuery();
+                deletedRows++;
+            }
+
+            tx.Commit();
+        }
+
+        _lastLoadedWriteUtc = DateTime.UtcNow;
+        _lastLoadedLength = metaJson.Length + serializedEntries.Sum(static kv => kv.Value.Length);
+        return new SqliteWriteStats(upsertedRows, deletedRows);
+    }
+
+    private void LoadFromSqlite()
+    {
+        try
+        {
+            EnsureSqliteSchema();
+            string metaJson = string.Empty;
+            string legacySnapshotJson = string.Empty;
+            var entries = new Dictionary<string, ModStateEntry>(StringComparer.OrdinalIgnoreCase);
+            lock (_sqliteLock)
+            {
+                using var conn = new SqliteConnection($"Data Source={_sqlitePath};Pooling=True");
+                conn.Open();
+                using (var cmd = conn.CreateCommand())
+                {
+                    cmd.CommandText = "SELECT value FROM kv_state WHERE key='meta' LIMIT 1;";
+                    var obj = cmd.ExecuteScalar();
+                    metaJson = obj as string ?? string.Empty;
+                }
+
+                using (var readEntries = conn.CreateCommand())
+                {
+                    readEntries.CommandText = "SELECT mod, value FROM mod_state_entry;";
+                    using var reader = readEntries.ExecuteReader();
+                    while (reader.Read())
+                    {
+                        var mod = reader.GetString(0);
+                        if (string.IsNullOrWhiteSpace(mod))
+                            continue;
+                        var value = reader.GetString(1);
+                        try
+                        {
+                            var entry = JsonSerializer.Deserialize<ModStateEntry>(value, new JsonSerializerOptions { PropertyNameCaseInsensitive = true })
+                                ?? new ModStateEntry { ModFolderName = mod };
+                            if (string.IsNullOrWhiteSpace(entry.ModFolderName))
+                                entry.ModFolderName = mod;
+                            entries[mod] = entry;
+                        }
+                        catch
+                        {
+                            entries[mod] = new ModStateEntry { ModFolderName = mod };
+                        }
+                    }
+                }
+
+                if (entries.Count == 0)
+                {
+                    using var legacy = conn.CreateCommand();
+                    legacy.CommandText = "SELECT value FROM kv_state WHERE key='main' LIMIT 1;";
+                    var legacyObj = legacy.ExecuteScalar();
+                    legacySnapshotJson = legacyObj as string ?? string.Empty;
+                }
+            }
+
+            if (entries.Count > 0)
+            {
+                lock (_lock)
+                {
+                    _state = new Dictionary<string, ModStateEntry>(entries, StringComparer.OrdinalIgnoreCase);
+                    _meta = new ModStateMeta();
+                    _sqliteDirtyMods.Clear();
+                    _sqliteDeletedMods.Clear();
+                    _sqliteMetaDirty = false;
+                    _sqliteForceFullSync = false;
+                    if (!string.IsNullOrWhiteSpace(metaJson))
+                    {
+                        try
+                        {
+                            _meta = JsonSerializer.Deserialize<ModStateMeta>(metaJson, new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? new ModStateMeta();
+                        }
+                        catch
+                        {
+                            _meta = new ModStateMeta();
+                        }
+                    }
+                }
+
+                _lastLoadedWriteUtc = DateTime.UtcNow;
+                _lastLoadedLength = metaJson.Length;
+                return;
+            }
+
+            if (string.IsNullOrWhiteSpace(legacySnapshotJson))
+            {
+                lock (_lock)
+                {
+                    _state = new Dictionary<string, ModStateEntry>(StringComparer.OrdinalIgnoreCase);
+                    _meta = new ModStateMeta();
+                    _sqliteDirtyMods.Clear();
+                    _sqliteDeletedMods.Clear();
+                    _sqliteMetaDirty = false;
+                    _sqliteForceFullSync = false;
+                }
+
+                return;
+            }
+
+            var file = JsonSerializer.Deserialize<ModStateFile>(legacySnapshotJson, new JsonSerializerOptions { PropertyNameCaseInsensitive = true })
+                ?? new ModStateFile { Meta = new ModStateMeta(), Entries = new Dictionary<string, ModStateEntry>() };
+            lock (_lock)
+            {
+                _state = new Dictionary<string, ModStateEntry>(file.Entries ?? new Dictionary<string, ModStateEntry>(), StringComparer.OrdinalIgnoreCase);
+                _meta = file.Meta ?? new ModStateMeta();
+                _sqliteDirtyMods.Clear();
+                _sqliteDeletedMods.Clear();
+                _sqliteMetaDirty = false;
+                _sqliteForceFullSync = true;
+            }
+
+            _lastLoadedWriteUtc = DateTime.UtcNow;
+            _lastLoadedLength = legacySnapshotJson.Length;
+            try
+            {
+                var snapshot = new Dictionary<string, ModStateEntry>(_state, StringComparer.OrdinalIgnoreCase);
+                var metaSnapshot = _meta ?? new ModStateMeta();
+                SaveSnapshotToSqlite(snapshot, metaSnapshot);
+            }
+            catch { }
+        }
+        catch (Exception ex)
+        {
+            try { _logger.LogError(ex, "Failed to load mod state from sqlite {path}", _sqlitePath); } catch { }
+        }
+    }
+
+    private string ReadDetailFromSqlite(string mod)
+    {
+        if (string.IsNullOrWhiteSpace(mod))
+            return string.Empty;
+
+        lock (_sqliteLock)
+        {
+            EnsureSqliteSchema();
+            using var conn = new SqliteConnection($"Data Source={_sqlitePath};Pooling=True");
+            conn.Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "SELECT value FROM mod_detail WHERE mod=$mod LIMIT 1;";
+            cmd.Parameters.AddWithValue("$mod", mod);
+            var obj = cmd.ExecuteScalar();
+            return obj as string ?? string.Empty;
+        }
+    }
+
+    private void WriteDetailToSqlite(string mod, string json)
+    {
+        if (string.IsNullOrWhiteSpace(mod))
+            return;
+
+        lock (_sqliteLock)
+        {
+            EnsureSqliteSchema();
+            using var conn = new SqliteConnection($"Data Source={_sqlitePath};Pooling=True");
+            conn.Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "INSERT INTO mod_detail(mod,value) VALUES($mod,$value) ON CONFLICT(mod) DO UPDATE SET value=excluded.value;";
+            cmd.Parameters.AddWithValue("$mod", mod);
+            cmd.Parameters.AddWithValue("$value", json);
+            cmd.ExecuteNonQuery();
+        }
+    }
+
+    private void DeleteDetailFromSqlite(string mod)
+    {
+        if (string.IsNullOrWhiteSpace(mod))
+            return;
+
+        lock (_sqliteLock)
+        {
+            EnsureSqliteSchema();
+            using var conn = new SqliteConnection($"Data Source={_sqlitePath};Pooling=True");
+            conn.Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "DELETE FROM mod_detail WHERE mod=$mod;";
+            cmd.Parameters.AddWithValue("$mod", mod);
+            cmd.ExecuteNonQuery();
+        }
+    }
+
+    private void MoveDetailInSqlite(string fromMod, string toMod)
+    {
+        if (string.IsNullOrWhiteSpace(fromMod) || string.IsNullOrWhiteSpace(toMod))
+            return;
+
+        if (string.Equals(fromMod, toMod, StringComparison.OrdinalIgnoreCase))
+            return;
+
+        lock (_sqliteLock)
+        {
+            EnsureSqliteSchema();
+            using var conn = new SqliteConnection($"Data Source={_sqlitePath};Pooling=True");
+            conn.Open();
+            using var tx = conn.BeginTransaction();
+            string json = string.Empty;
+            using (var read = conn.CreateCommand())
+            {
+                read.Transaction = tx;
+                read.CommandText = "SELECT value FROM mod_detail WHERE mod=$mod LIMIT 1;";
+                read.Parameters.AddWithValue("$mod", fromMod);
+                json = read.ExecuteScalar() as string ?? string.Empty;
+            }
+
+            if (!string.IsNullOrWhiteSpace(json))
+            {
+                using var upsert = conn.CreateCommand();
+                upsert.Transaction = tx;
+                upsert.CommandText = "INSERT INTO mod_detail(mod,value) VALUES($mod,$value) ON CONFLICT(mod) DO UPDATE SET value=excluded.value;";
+                upsert.Parameters.AddWithValue("$mod", toMod);
+                upsert.Parameters.AddWithValue("$value", json);
+                upsert.ExecuteNonQuery();
+            }
+
+            using var del = conn.CreateCommand();
+            del.Transaction = tx;
+            del.CommandText = "DELETE FROM mod_detail WHERE mod=$mod;";
+            del.Parameters.AddWithValue("$mod", fromMod);
+            del.ExecuteNonQuery();
+            tx.Commit();
         }
     }
 
@@ -1310,6 +2273,59 @@ public sealed class ModStateFile
 {
     public ModStateMeta Meta { get; set; } = new ModStateMeta();
     public Dictionary<string, ModStateEntry> Entries { get; set; } = new Dictionary<string, ModStateEntry>(StringComparer.OrdinalIgnoreCase);
+}
+
+public sealed class ModStateMigrationProgress
+{
+    public string Stage { get; set; } = string.Empty;
+    public int TotalSteps { get; set; } = 0;
+    public int CompletedSteps { get; set; } = 0;
+    public int MigratedEntries { get; set; } = 0;
+    public int MigratedDetailFiles { get; set; } = 0;
+    public int MissingDetailFiles { get; set; } = 0;
+    public int DetailReadErrors { get; set; } = 0;
+    public bool IsCompleted { get; set; } = false;
+    public bool IsSuccess { get; set; } = false;
+}
+
+public sealed class ModStateMigrationResult
+{
+    public bool Success { get; set; } = false;
+    public string Message { get; set; } = string.Empty;
+    public DateTime StartedUtc { get; set; } = DateTime.MinValue;
+    public DateTime FinishedUtc { get; set; } = DateTime.MinValue;
+    public TimeSpan Duration { get; set; } = TimeSpan.Zero;
+    public int MigratedEntries { get; set; } = 0;
+    public int MigratedDetailFiles { get; set; } = 0;
+    public int MissingDetailFiles { get; set; } = 0;
+    public int DetailReadErrors { get; set; } = 0;
+    public string SourceJsonPath { get; set; } = string.Empty;
+    public string TargetSqlitePath { get; set; } = string.Empty;
+}
+
+public sealed class ModStateStorageDebugStats
+{
+    public string StorageMode { get; set; } = string.Empty;
+    public string StatePath { get; set; } = string.Empty;
+    public long SqliteSaveCount { get; set; } = 0;
+    public long SqliteSaveSkippedCount { get; set; } = 0;
+    public long SqliteFullSaveCount { get; set; } = 0;
+    public long SqliteIncrementalSaveCount { get; set; } = 0;
+    public long SqliteUpsertCount { get; set; } = 0;
+    public long SqliteDeleteCount { get; set; } = 0;
+    public double SqliteAverageElapsedMs { get; set; } = 0;
+    public long SqliteMaxElapsedMs { get; set; } = 0;
+    public DateTime LastSaveUtc { get; set; } = DateTime.MinValue;
+    public long LastSaveElapsedMs { get; set; } = 0;
+    public bool LastSaveWasFullSync { get; set; } = false;
+    public int LastSaveDirtyCount { get; set; } = 0;
+    public int LastSaveDeletedCount { get; set; } = 0;
+    public int LastSaveUpsertedCount { get; set; } = 0;
+    public int LastSaveDeletedRowsCount { get; set; } = 0;
+    public int PendingDirtyCount { get; set; } = 0;
+    public int PendingDeletedCount { get; set; } = 0;
+    public bool SaveInProgress { get; set; } = false;
+    public bool ForceFullSyncPending { get; set; } = false;
 }
 
 public sealed class LatestBackupInfo

@@ -228,6 +228,13 @@ public sealed class TextureBackupService
         public string? LatestPmpPath { get; set; }
     }
 
+    public sealed class DeleteBackupsResult
+    {
+        public bool Success { get; set; }
+        public bool DeletedAnything { get; set; }
+        public int DeletedDirectoryCount { get; set; }
+    }
+
     // Try to find the real mod directory path (including nested categories) by matching leaf folder name
     private string? TryFindModDirectory(string modFolder)
     {
@@ -2343,20 +2350,115 @@ public sealed class TextureBackupService
         return FindOrphanedBackupsAsync(System.Threading.CancellationToken.None);
     }
 
-    public Task<bool> DeleteOrphanBackupsAsync(string modFolderName)
+    public async Task<DeleteBackupsResult> DeleteBackupsForModAsync(string modFolderName, CancellationToken token = default)
     {
+        var result = new DeleteBackupsResult { Success = true };
+        if (string.IsNullOrWhiteSpace(modFolderName))
+        {
+            result.Success = false;
+            return result;
+        }
+
+        var backupDirectory = _configService.Current.BackupFolderPath;
+        if (string.IsNullOrWhiteSpace(backupDirectory) || !Directory.Exists(backupDirectory))
+            return result;
+
+        await s_backupLock.WaitAsync(token).ConfigureAwait(false);
         try
         {
-            var backupDirectory = _configService.Current.BackupFolderPath;
-            if (string.IsNullOrWhiteSpace(backupDirectory) || !Directory.Exists(backupDirectory))
-                return Task.FromResult(false);
-            var modDir = Path.Combine(backupDirectory, modFolderName);
-            if (!Directory.Exists(modDir))
-                return Task.FromResult(false);
-            try { Directory.Delete(modDir, true); } catch { return Task.FromResult(false); }
-            return Task.FromResult(true);
+            var deletedDirCount = 0;
+            var deletedAny = false;
+            var perModDir = Path.Combine(backupDirectory, modFolderName);
+            if (Directory.Exists(perModDir))
+            {
+                try
+                {
+                    Directory.Delete(perModDir, true);
+                    deletedDirCount++;
+                    deletedAny = true;
+                    _logger.LogDebug("Deleted mod backup directory {dir} for {mod}", perModDir, modFolderName);
+                }
+                catch (Exception ex)
+                {
+                    result.Success = false;
+                    _logger.LogWarning(ex, "Failed to delete mod backup directory {dir} for {mod}", perModDir, modFolderName);
+                }
+            }
+
+            foreach (var sessionDir in Directory.EnumerateDirectories(backupDirectory, "session_*"))
+            {
+                if (token.IsCancellationRequested)
+                    break;
+
+                var modSessionDir = Path.Combine(sessionDir, modFolderName);
+                if (!Directory.Exists(modSessionDir))
+                    continue;
+
+                try
+                {
+                    Directory.Delete(modSessionDir, true);
+                    deletedDirCount++;
+                    deletedAny = true;
+                    _logger.LogDebug("Deleted session mod backup directory {dir} for {mod}", modSessionDir, modFolderName);
+                }
+                catch (Exception ex)
+                {
+                    result.Success = false;
+                    _logger.LogWarning(ex, "Failed to delete session mod backup directory {dir} for {mod}", modSessionDir, modFolderName);
+                }
+            }
+
+            foreach (var sessionDir in Directory.EnumerateDirectories(backupDirectory, "session_*"))
+            {
+                if (token.IsCancellationRequested)
+                    break;
+
+                try
+                {
+                    if (!Directory.EnumerateFileSystemEntries(sessionDir).Any())
+                    {
+                        Directory.Delete(sessionDir, true);
+                        deletedDirCount++;
+                        deletedAny = true;
+                        _logger.LogDebug("Deleted empty backup session directory {dir}", sessionDir);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    result.Success = false;
+                    _logger.LogWarning(ex, "Failed to delete empty backup session directory {dir}", sessionDir);
+                }
+            }
+
+            result.DeletedAnything = deletedAny;
+            result.DeletedDirectoryCount = deletedDirCount;
+            return result;
         }
-        catch { return Task.FromResult(false); }
+        catch (OperationCanceledException)
+        {
+            result.Success = false;
+            return result;
+        }
+        catch (Exception ex)
+        {
+            result.Success = false;
+            _logger.LogWarning(ex, "DeleteBackupsForModAsync failed for {mod}", modFolderName);
+            return result;
+        }
+        finally
+        {
+            s_backupLock.Release();
+        }
+    }
+
+    public Task<bool> DeleteOrphanBackupsAsync(string modFolderName)
+    {
+        return DeleteBackupsForModAsync(modFolderName).ContinueWith(t =>
+        {
+            if (t.Status != TaskStatus.RanToCompletion || t.Result == null)
+                return false;
+            return t.Result.Success && t.Result.DeletedAnything;
+        }, TaskScheduler.Default);
     }
 
     public Task<bool> ReinstallModFromLatestPmpAsync(string modFolderName, IProgress<(string, int, int)>? progress, CancellationToken token)

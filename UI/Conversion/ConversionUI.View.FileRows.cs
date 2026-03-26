@@ -11,14 +11,14 @@ public sealed partial class ConversionUI
     {
         var mod = row.Mod;
         var file = row.File;
-        ImGui.TableSetColumnIndex(1);
+        ImGui.TableSetColumnIndex(0);
         ImGui.SetCursorPosX(ImGui.GetCursorPosX() + row.Depth * 16f);
         var baseName = Path.GetFileName(file);
         ImGui.TextUnformatted(baseName);
         if (ImGui.IsItemHovered())
             ImGui.SetTooltip(file);
 
-        ImGui.TableSetColumnIndex(2);
+        ImGui.TableSetColumnIndex(1);
         var hasBackupForMod = GetOrQueryModBackup(mod);
         var fileSize = GetCachedOrComputeSize(file);
         if (!hasBackupForMod)
@@ -33,7 +33,7 @@ public sealed partial class ConversionUI
                 ImGui.TextUnformatted("");
         }
 
-        ImGui.TableSetColumnIndex(3);
+        ImGui.TableSetColumnIndex(2);
         if (!hasBackupForMod)
         {
             if (fileSize > 0)
@@ -62,6 +62,6 @@ public sealed partial class ConversionUI
                 ImGui.TextUnformatted("");
         }
 
-        ImGui.TableSetColumnIndex(4);
+        ImGui.TableSetColumnIndex(3);
     }
 }

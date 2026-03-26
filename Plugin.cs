@@ -96,8 +96,8 @@ public sealed class Plugin : IDalamudPlugin
         _releaseChangelogUi = new ReleaseChangelogUI(_pluginInterface, _logger, _configService, _changelogService);
 
         // Create UI windows and register
-        _debugUi = new DebugUI(_logger, _configService, _debugTrace, _penumbraFolderWatcher, _backupFolderWatcher);
-        _settingsUi = new SettingsUI(_logger, _configService, _conversionService, _backupService, () => _releaseChangelogUi.OpenLatest(), _debugTrace, () => _debugUi.IsOpen = true);
+        _debugUi = new DebugUI(_logger, _configService, _debugTrace, _penumbraFolderWatcher, _backupFolderWatcher, _conversionService, _modStateService);
+        _settingsUi = new SettingsUI(_logger, _configService, _conversionService, _backupService, _modStateService, () => _releaseChangelogUi.OpenLatest(), _debugTrace, () => _debugUi.IsOpen = true);
         _conversionUi = new ConversionUI(_logger, _configService, _conversionService, _backupService, () => _settingsUi.IsOpen = true, _modStateService, cacheService, _debugTrace);
         _penumbraExtension = new PenumbraExtensionService(_penumbraIpc, _conversionUi, _logger);
         _startupProgressUi = new StartupProgressUI(_logger, _configService, _conversionService, _backupService);

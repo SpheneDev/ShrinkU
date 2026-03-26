@@ -84,6 +84,10 @@ public sealed class PenumbraIpc : IDisposable
     private static readonly TimeSpan s_modTagsCacheFastTtl = TimeSpan.FromSeconds(2);
     private readonly object _modMetaSaveDebounceLock = new();
     private CancellationTokenSource? _modMetaSaveCts;
+    private readonly object _modMetadataSourceLogLock = new();
+    private readonly Dictionary<string, string> _modMetadataSourceLast = new(StringComparer.OrdinalIgnoreCase);
+    private int _modMetadataAdapterMissingLogged = 0;
+    private volatile bool _modMetadataAdapterUnavailable = false;
 
     public PenumbraIpc(IDalamudPluginInterface pi, ILogger logger)
     {
@@ -187,6 +191,7 @@ public sealed class PenumbraIpc : IDisposable
                             catch { }
                         });
                     }
+                    InvalidateModMetaCache(modDir);
                     // Forward specific change details to consumers on every event to preserve behavior.
                     ModSettingChanged?.Invoke(change, collectionId, modDir, inherited);
                 });
@@ -347,6 +352,7 @@ public sealed class PenumbraIpc : IDisposable
 
                         var current = await GetModPathsAsync().ConfigureAwait(false);
                         bool anyChange = false;
+                        bool membershipChanged = false;
 
                         // Detect moved mods
                         foreach (var kv in current)
@@ -359,6 +365,7 @@ public sealed class PenumbraIpc : IDisposable
                                 if (!string.Equals(oldNorm, path, StringComparison.Ordinal))
                                 {
                                     anyChange = true;
+                                    InvalidateModMetaCache(dir);
                                     _logger.LogDebug("Penumbra mod path changed (watcher): {dir} : {old} -> {new}", dir, oldPath, path);
                                     try { ModPathChanged?.Invoke(dir, path); } catch { }
                                 }
@@ -366,6 +373,7 @@ public sealed class PenumbraIpc : IDisposable
                             else
                             {
                                 anyChange = true;
+                                membershipChanged = true;
                                 _logger.LogDebug("Penumbra mod path discovered (watcher): {dir} : {new}", dir, path);
                                 try { ModPathChanged?.Invoke(dir, path); } catch { }
                             }
@@ -377,6 +385,7 @@ public sealed class PenumbraIpc : IDisposable
                             if (!current.ContainsKey(dir))
                             {
                                 anyChange = true;
+                                membershipChanged = true;
                                 _logger.LogDebug("Penumbra mod path missing (watcher): {dir} previously {old}", dir, _lastPaths[dir]);
                             }
                         }
@@ -402,10 +411,13 @@ public sealed class PenumbraIpc : IDisposable
                             if (confirmed && (now - lastBroadcastUtc) > TimeSpan.FromSeconds(5))
                             {
                                 _lastPaths = confirm;
-                                ClearGroupedScanCache();
-                                ClearModMetaCaches();
-                                _logger.LogDebug("Penumbra ModsChanged broadcast: source=PathWatcher");
-                                try { ModsChanged?.Invoke(); } catch { }
+                                if (membershipChanged)
+                                {
+                                    ClearGroupedScanCache();
+                                    ClearModMetaCaches();
+                                    _logger.LogDebug("Penumbra ModsChanged broadcast: source=PathWatcher");
+                                    try { ModsChanged?.Invoke(); } catch { }
+                                }
                                 lastBroadcastUtc = now;
                             }
                             else
@@ -623,8 +635,35 @@ public sealed class PenumbraIpc : IDisposable
     {
         lock (_modMetaCacheLock)
         {
+            _modDisplayNameCache.Clear();
+            _modTagsCache.Clear();
+            _modTagsMetaStampCache.Clear();
             _modDisplayNameCacheUtc = DateTime.MinValue;
             _modTagsCacheUtc = DateTime.MinValue;
+        }
+        lock (_modMetadataSourceLogLock)
+        {
+            _modMetadataSourceLast.Clear();
+        }
+    }
+
+    private void InvalidateModMetaCache(string? modDirectory)
+    {
+        if (string.IsNullOrWhiteSpace(modDirectory))
+            return;
+
+        var modKey = modDirectory.Trim();
+        lock (_modMetaCacheLock)
+        {
+            _modDisplayNameCache.Remove(modKey);
+            _modTagsCache.Remove(modKey);
+            _modTagsMetaStampCache.Remove(modKey);
+            _modDisplayNameCacheUtc = DateTime.MinValue;
+            _modTagsCacheUtc = DateTime.MinValue;
+        }
+        lock (_modMetadataSourceLogLock)
+        {
+            _modMetadataSourceLast.Remove(modKey);
         }
     }
 
@@ -973,23 +1012,42 @@ public sealed class PenumbraIpc : IDisposable
         return Task.FromResult(paths);
     }
 
-    public record ModMetadata(string Name, string? Author, string? Version, string? Description, string? Website);
+    public record ModMetadata(string Name, string? Author, string? Version, string? Description, string? Website, string Source = "unknown");
 
     public Task<ModMetadata?> GetModMetadataAsync(string modDirectory)
     {
         try
         {
-            if (string.IsNullOrWhiteSpace(ModDirectory) || !Directory.Exists(ModDirectory))
-                return Task.FromResult<ModMetadata?>(null);
+            var fromApi = TryGetModMetadataFromApiAdapter(modDirectory, out var apiReason);
+            if (fromApi != null)
+            {
+                LogMetadataSource(modDirectory, fromApi.Source, apiReason);
+                return Task.FromResult<ModMetadata?>(fromApi);
+            }
+            if (string.Equals(apiReason, "adapter-type-missing", StringComparison.Ordinal))
+            {
+                _modMetadataAdapterUnavailable = true;
+                if (Interlocked.Exchange(ref _modMetadataAdapterMissingLogged, 1) == 0)
+                    _logger.LogDebug("Mod metadata API adapter is unavailable in this Penumbra.Api build; metadata falls back to file/state paths.");
+            }
+            else
+            {
+                LogMetadataSource(modDirectory, "api-miss", apiReason);
+            }
 
-            var root = Path.GetFullPath(ModDirectory!);
-            var dir = Path.Combine(root, modDirectory ?? string.Empty);
-            if (!Directory.Exists(dir))
+            var dir = ResolveModDirectoryAbsolutePath(modDirectory);
+            if (string.IsNullOrWhiteSpace(dir) || !Directory.Exists(dir))
+            {
+                LogMetadataSource(modDirectory, "none", "mod-folder-missing-under-root");
                 return Task.FromResult<ModMetadata?>(null);
+            }
 
             var metaPath = Path.Combine(dir, "meta.json");
             if (!File.Exists(metaPath))
+            {
+                LogMetadataSource(modDirectory, "none", "meta-json-missing");
                 return Task.FromResult<ModMetadata?>(null);
+            }
 
             using var s = File.OpenRead(metaPath);
             using var doc = JsonDocument.Parse(s);
@@ -1001,12 +1059,138 @@ public sealed class PenumbraIpc : IDisposable
             var description = rootEl.TryGetProperty("Description", out var pDesc) ? pDesc.GetString() : null;
             var website = rootEl.TryGetProperty("Website", out var pWeb) ? pWeb.GetString() : null;
 
-            return Task.FromResult<ModMetadata?>(new ModMetadata(name, author, version, description, website));
+            var result = new ModMetadata(name, author, version, description, website, "meta.json-fallback");
+            if (!_modMetadataAdapterUnavailable)
+                LogMetadataSource(modDirectory, result.Source, "api-unavailable-or-miss");
+            return Task.FromResult<ModMetadata?>(result);
         }
-        catch
+        catch (Exception ex)
         {
+            LogMetadataSource(modDirectory, "error", ex.GetType().Name);
             return Task.FromResult<ModMetadata?>(null);
         }
+    }
+
+    private ModMetadata? TryGetModMetadataFromApiAdapter(string modDirectory, out string reason)
+    {
+        reason = "unknown";
+        if (string.IsNullOrWhiteSpace(modDirectory))
+        {
+            reason = "invalid-mod-directory";
+            return null;
+        }
+
+        object? listRoot = null;
+        object? listObj = null;
+        try
+        {
+            var adapterType = Type.GetType("Penumbra.Api.IpcSubscribers.GetModListAdapter, Penumbra.Api");
+            if (adapterType == null)
+            {
+                reason = "adapter-type-missing";
+                return null;
+            }
+            var adapter = Activator.CreateInstance(adapterType, _pi);
+            if (adapter == null)
+            {
+                reason = "adapter-create-failed";
+                return null;
+            }
+            var invoke = adapterType.GetMethod("Invoke");
+            if (invoke == null)
+            {
+                reason = "adapter-invoke-missing";
+                return null;
+            }
+            listRoot = invoke.Invoke(adapter, null);
+            if (listRoot == null)
+            {
+                reason = "adapter-returned-null";
+                return null;
+            }
+
+            listObj = listRoot.GetType().GetProperty("Value")?.GetValue(listRoot) ?? listRoot;
+            if (listObj == null)
+            {
+                reason = "adapter-value-null";
+                return null;
+            }
+
+            var countProp = listObj.GetType().GetProperty("Count");
+            if (countProp == null)
+            {
+                reason = "adapter-count-missing";
+                return null;
+            }
+            var countObj = countProp.GetValue(listObj);
+            if (countObj is not int count || count <= 0)
+            {
+                reason = "adapter-empty-list";
+                return null;
+            }
+
+            var indexer = listObj.GetType().GetProperty("Item");
+            if (indexer == null)
+            {
+                reason = "adapter-indexer-missing";
+                return null;
+            }
+
+            for (var i = 0; i < count; i++)
+            {
+                object? item = null;
+                try
+                {
+                    item = indexer.GetValue(listObj, new object[] { i });
+                    if (item == null)
+                        continue;
+                    var identifier = item.GetType().GetProperty("Identifier")?.GetValue(item)?.ToString() ?? string.Empty;
+                    if (!string.Equals(identifier, modDirectory, StringComparison.OrdinalIgnoreCase))
+                        continue;
+                    var name = item.GetType().GetProperty("Name")?.GetValue(item)?.ToString() ?? string.Empty;
+                    var author = item.GetType().GetProperty("Author")?.GetValue(item)?.ToString();
+                    var version = item.GetType().GetProperty("Version")?.GetValue(item)?.ToString();
+                    var description = item.GetType().GetProperty("Description")?.GetValue(item)?.ToString();
+                    var website = item.GetType().GetProperty("Website")?.GetValue(item)?.ToString();
+                    reason = "api-adapter-match";
+                    return new ModMetadata(name, author, version, description, website, "penumbra-ipc-modlist-adapter");
+                }
+                catch { }
+                finally
+                {
+                    try { (item as IDisposable)?.Dispose(); } catch { }
+                }
+            }
+            reason = "adapter-no-identifier-match";
+            return null;
+        }
+        catch (Exception ex)
+        {
+            reason = $"adapter-exception-{ex.GetType().Name}";
+            return null;
+        }
+        finally
+        {
+            try { (listObj as IDisposable)?.Dispose(); } catch { }
+            try { (listRoot as IDisposable)?.Dispose(); } catch { }
+        }
+    }
+
+    private void LogMetadataSource(string? modDirectory, string source, string detail)
+    {
+        try
+        {
+            var mod = string.IsNullOrWhiteSpace(modDirectory) ? "<empty>" : modDirectory!;
+            var payload = $"{source}|{detail}";
+            lock (_modMetadataSourceLogLock)
+            {
+                if (_modMetadataSourceLast.TryGetValue(mod, out var prev) && string.Equals(prev, payload, StringComparison.Ordinal))
+                    return;
+                _modMetadataSourceLast[mod] = payload;
+            }
+            _logger.LogDebug("Mod metadata source: mod={mod} source={source} detail={detail}", mod, source, detail);
+        }
+        catch { }
     }
 
     public Task<string> GetModDisplayNameAsync(string modDirectory)
@@ -1019,11 +1203,8 @@ public sealed class PenumbraIpc : IDisposable
                 if (_modDisplayNameCache.TryGetValue(name, out var cachedName) && !string.IsNullOrWhiteSpace(cachedName))
                     return Task.FromResult(cachedName);
             }
-            if (string.IsNullOrWhiteSpace(ModDirectory) || !Directory.Exists(ModDirectory))
-                return Task.FromResult(name);
-            var root = Path.GetFullPath(ModDirectory!);
-            var dir = Path.Combine(root, modDirectory ?? string.Empty);
-            if (!Directory.Exists(dir))
+            var dir = ResolveModDirectoryAbsolutePath(modDirectory);
+            if (string.IsNullOrWhiteSpace(dir) || !Directory.Exists(dir))
                 return Task.FromResult(name);
             var metaPath = Path.Combine(dir, "meta.json");
             if (!File.Exists(metaPath))
@@ -1060,11 +1241,8 @@ public sealed class PenumbraIpc : IDisposable
             if (string.IsNullOrWhiteSpace(modKey))
                 return Task.FromResult(list);
 
-            if (string.IsNullOrWhiteSpace(ModDirectory) || !Directory.Exists(ModDirectory))
-                return Task.FromResult(list);
-            var root = Path.GetFullPath(ModDirectory!);
-            var dir = Path.Combine(root, modKey);
-            if (!Directory.Exists(dir))
+            var dir = ResolveModDirectoryAbsolutePath(modKey);
+            if (string.IsNullOrWhiteSpace(dir) || !Directory.Exists(dir))
                 return Task.FromResult(list);
             var metaPath = Path.Combine(dir, "meta.json");
             var stamp = GetMetaStamp(metaPath);
@@ -1108,6 +1286,34 @@ public sealed class PenumbraIpc : IDisposable
         }
         catch { }
         return Task.FromResult(list);
+    }
+
+    private string? ResolveModDirectoryAbsolutePath(string? modDirectory)
+    {
+        if (string.IsNullOrWhiteSpace(modDirectory))
+            return null;
+
+        try
+        {
+            var tuple = GetModPath(modDirectory);
+            var fullPath = tuple.FullPath ?? string.Empty;
+            if (!string.IsNullOrWhiteSpace(fullPath) && Directory.Exists(fullPath))
+                return Path.GetFullPath(fullPath);
+        }
+        catch { }
+
+        try
+        {
+            if (string.IsNullOrWhiteSpace(ModDirectory) || !Directory.Exists(ModDirectory))
+                return null;
+            var root = Path.GetFullPath(ModDirectory!);
+            var combined = Path.Combine(root, modDirectory);
+            if (Directory.Exists(combined))
+                return combined;
+        }
+        catch { }
+
+        return null;
     }
 
     // Get all collections and their names.

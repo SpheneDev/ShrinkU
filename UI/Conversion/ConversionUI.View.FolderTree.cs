@@ -214,6 +214,8 @@ public sealed partial class ConversionUI
                         ImGui.SameLine();
                     ImGui.AlignTextToFramePadding();
                     open = ImGui.TreeNodeEx($"{header}##mod-{mod}", nodeFlags);
+                    var stateForUsed = _modStateSnapshot != null && _modStateSnapshot.TryGetValue(mod, out var msUsed) ? msUsed : null;
+                    _ = DrawPenumbraUsedIndicator(mod, stateForUsed, totalAll);
                     var modToggled = ImGui.IsItemToggledOpen();
                     if (modToggled)
                     {
@@ -222,7 +224,6 @@ public sealed partial class ConversionUI
                     }
                     }
                     var headerHoveredTree = ImGui.IsItemHovered();
-
                     if (drawModRow) ImGui.TableSetColumnIndex(0);
                     bool modSelected = (files.Count == 0)
                         ? _selectedEmptyMods.Contains(mod)
@@ -307,6 +308,8 @@ public sealed partial class ConversionUI
                         ImGui.Separator();
                         var snap2 = _modStateSnapshot ?? _modStateService.Snapshot();
                         var entryState = snap2.TryGetValue(mod, out var entry2) ? entry2 : null;
+                        ImGui.TextUnformatted($"Penumbra ModDir: {mod}");
+                        ImGui.TextUnformatted($"Used by Penumbra: {(IsModUsedByPenumbra(mod, entryState) ? "Yes" : "No")}");
                         var showConvertedCount = hasBackup && !(entryState != null && entryState.InstalledButNotConverted);
                         ImGui.TextUnformatted($"Textures: {(showConvertedCount ? convertedAll : 0)}/{totalAll} converted");
                         if (comparedFilesTip > 0)

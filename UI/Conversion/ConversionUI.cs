@@ -28,11 +28,11 @@ public sealed partial class ConversionUI : Window, IDisposable
     private string _scanFilter = string.Empty;
     private float _leftPanelWidthPx = 0f;
     private bool _leftWidthInitialized = false;
-    private float _scannedFirstColWidth = 28f;
+    private const float FixedActionColumnWidth = 91f;
+    private const float FixedFlatRowHeight = 23f;
     private float _scannedFileColWidth = 0f;
     private float _scannedSizeColWidth = 85f;
     private float _scannedCompressedColWidth = 85f;
-    private float _scannedActionColWidth = 60f;
     private readonly Vector4 _compressedTextColor = new Vector4(0.60f, 0.95f, 0.65f, 1f);
     private ScanSortKind _scanSortKind = ScanSortKind.ModName;
     private bool _scanSortAsc = true;
@@ -48,10 +48,24 @@ public sealed partial class ConversionUI : Window, IDisposable
     private Dictionary<string, string> _modPathsStable = new(StringComparer.OrdinalIgnoreCase);
     private string _modPathsSig = string.Empty;
     private bool _loadingModPaths = false;
+    private bool _pendingModPathsRefresh = false;
+    private string _pendingModPathsReason = string.Empty;
+    private HashSet<string> _livePenumbraMods = new(StringComparer.OrdinalIgnoreCase);
+    private DateTime _lastLivePenumbraModsRefreshUtc = DateTime.MinValue;
+    private bool _hasLivePenumbraModsSnapshot = false;
+    private int _livePenumbraModsRefreshInFlight = 0;
+    private readonly HashSet<string> _staleEntryPruneInFlight = new(StringComparer.OrdinalIgnoreCase);
     private Dictionary<Guid, string> _collections = new();
     private Guid? _selectedCollectionId = null;
     private Dictionary<string, (bool Enabled, int Priority, bool Inherited, bool Temporary)> _modEnabledStates
         = new(StringComparer.OrdinalIgnoreCase);
+    private DateTime _lastCollectionStatesRefreshUtc = DateTime.MinValue;
+    private int _collectionStatesRefreshInFlight = 0;
+    private string _debugPenumbraSelectedMod = string.Empty;
+    private bool _debugPenumbraLoading = false;
+    private string _debugPenumbraError = string.Empty;
+    private PenumbraModDebugSnapshot? _debugPenumbraSnapshot;
+    private int _debugPenumbraLoadVersion = 0;
     // Debounce heavy scans to avoid repeated disk IO during rapid Penumbra changes
     private volatile bool _scanInProgress = false;
     private DateTime _lastScanAt = DateTime.MinValue;
@@ -80,6 +94,8 @@ public sealed partial class ConversionUI : Window, IDisposable
     private HashSet<string> _expandedMods = new(StringComparer.OrdinalIgnoreCase);
     private HashSet<string> _selectedEmptyMods = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, int> _selectedCountByMod = new(StringComparer.OrdinalIgnoreCase);
+    private readonly List<string> _modSelectionOrder = new();
+    private string _modSelectionAnchor = string.Empty;
     private bool _footerTotalsDirty = true;
     private string _footerTotalsSignature = string.Empty;
     private long _footerTotalUncompressed = 0;
@@ -135,87 +151,51 @@ public sealed partial class ConversionUI : Window, IDisposable
         public int VisibleFileCount;
     }
 
+    private sealed class PenumbraModDebugSnapshot
+    {
+        public bool ApiAvailable { get; init; }
+        public string ModDirectory { get; init; } = string.Empty;
+        public string PenumbraModRoot { get; init; } = string.Empty;
+        public string PenumbraPath { get; init; } = string.Empty;
+        public bool PenumbraPathFromApi { get; init; }
+        public string UiMappedPath { get; init; } = string.Empty;
+        public string StateRelativePath { get; init; } = string.Empty;
+        public string StateAbsolutePath { get; init; } = string.Empty;
+        public string DisplayName { get; init; } = string.Empty;
+        public string? Author { get; init; }
+        public string? Version { get; init; }
+        public string? Description { get; init; }
+        public string? Website { get; init; }
+        public string MetadataSource { get; init; } = string.Empty;
+        public Guid? CollectionId { get; init; }
+        public string CollectionName { get; init; } = string.Empty;
+        public bool? Enabled { get; init; }
+        public int? Priority { get; init; }
+        public bool? Inherited { get; init; }
+        public bool? Temporary { get; init; }
+        public List<string> Tags { get; init; } = new();
+        public bool UsedByPenumbra { get; init; }
+        public int UsedTextureCount { get; init; }
+        public int StateTextureCount { get; init; }
+        public int StateComparedFiles { get; init; }
+        public bool StateNeedsRescan { get; init; }
+        public DateTime StateLastKnownWriteUtc { get; init; }
+        public DateTime StateLastScanUtc { get; init; }
+        public int ScannedTextureCount { get; init; }
+        public DateTime LoadedAtUtc { get; init; }
+    }
+
     public void OpenForMod(string modDirectory)
+    {
+        try
         {
-            try
-            {
-                IsOpen = true;
-
-                var searchDir = modDirectory?.Trim() ?? string.Empty;
-                
-                // Try to find the mod name from the directory
-                var modName = _modPaths.FirstOrDefault(x => string.Equals(x.Value, searchDir, StringComparison.OrdinalIgnoreCase)).Key;
-                
-                // Fallback: maybe the input is already the mod name or we can extract it?
-                if (string.IsNullOrEmpty(modName))
-                {
-                    if (_modPaths.ContainsKey(searchDir))
-                    {
-                        modName = searchDir;
-                    }
-                    else
-                    {
-                        // Try extracting folder name
-                        var folderName = Path.GetFileName(searchDir);
-                        if (!string.IsNullOrEmpty(folderName))
-                        {
-                            modName = folderName;
-                        }
-                    }
-                }
-
+            IsOpen = true;
+            var modName = ResolveModNameForOpen(modDirectory);
             if (!string.IsNullOrEmpty(modName))
-                {
-                    _scanFilter = modName;
-
-                    // Ensure mod paths map is ready/populated to find folders
-                    if (!_modPaths.ContainsKey(modName))
-                    {
-                        // Force a quick refresh of paths if missing
-                        var snap = _modStateService.Snapshot();
-                        if (snap.TryGetValue(modName, out var entry))
-                        {
-                            var folder = entry.PenumbraRelativePath ?? string.Empty;
-                            var leaf = entry.RelativeModName ?? string.Empty;
-                            
-                            // Allow folder to be empty (root mod), but leaf must exist
-                            if (!string.IsNullOrWhiteSpace(leaf))
-                            {
-                                var constructedPath = !string.IsNullOrWhiteSpace(folder) ? string.Concat(folder, "/", leaf) : leaf;
-                                _modPaths[modName] = constructedPath;
-                            }
-                        }
-                    }
-
-                    // Expand folders for this mod so it is visible
-                    if (_modPaths.TryGetValue(modName, out var fullPath) && !string.IsNullOrEmpty(fullPath))
-                    {
-                        int lastSlash = fullPath.LastIndexOf('/');
-                        if (lastSlash > 0)
-                        {
-                            var folderOnly = fullPath.Substring(0, lastSlash);
-                            var parts = folderOnly.Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-                            
-                            var currentPath = "";
-                            for (int i = 0; i < parts.Length; i++)
-                            {
-                                if (i > 0) currentPath += "/";
-                                currentPath += parts[i];
-                                _expandedFolders.Add(currentPath);
-                            }
-                        }
-                        else
-                        {
-                             // Root mod -> Expand (Uncategorized)
-                             _expandedFolders.Add("(Uncategorized)");
-                        }
-                    }
-                    else
-                    {
-                        // Even if fullPath is missing, it goes to (Uncategorized)
-                        _expandedFolders.Add("(Uncategorized)");
-                    }
-                    
+            {
+                _scanFilter = modName;
+                EnsureModPathForOpen(modName);
+                ExpandFoldersForOpen(modName);
             }
         }
         catch (Exception ex)
@@ -232,55 +212,69 @@ public sealed partial class ConversionUI : Window, IDisposable
             _scanFilter = string.Empty;
             foreach (var input in modDirectoriesOrNames)
             {
-                var search = input?.Trim() ?? string.Empty;
-                if (string.IsNullOrEmpty(search)) continue;
-
-                var modName = search;
-                if (!_modPaths.ContainsKey(modName))
-                {
-                    var snap = _modStateService.Snapshot();
-                    if (snap.TryGetValue(modName, out var entry))
-                    {
-                        var folder = entry.PenumbraRelativePath ?? string.Empty;
-                        var leaf = entry.RelativeModName ?? string.Empty;
-                        if (!string.IsNullOrWhiteSpace(leaf))
-                        {
-                            var constructedPath = !string.IsNullOrWhiteSpace(folder) ? string.Concat(folder, "/", leaf) : leaf;
-                            _modPaths[modName] = constructedPath;
-                        }
-                    }
-                }
-
-                if (_modPaths.TryGetValue(modName, out var fullPath) && !string.IsNullOrEmpty(fullPath))
-                {
-                    int lastSlash = fullPath.LastIndexOf('/');
-                    if (lastSlash > 0)
-                    {
-                        var folderOnly = fullPath.Substring(0, lastSlash);
-                        var parts = folderOnly.Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-                        var currentPath = "";
-                        for (int i = 0; i < parts.Length; i++)
-                        {
-                            if (i > 0) currentPath += "/";
-                            currentPath += parts[i];
-                            _expandedFolders.Add(currentPath);
-                        }
-                    }
-                    else
-                    {
-                        _expandedFolders.Add("(Uncategorized)");
-                    }
-                }
-                else
-                {
-                    _expandedFolders.Add("(Uncategorized)");
-                }
+                var modName = ResolveModNameForOpen(input);
+                if (string.IsNullOrEmpty(modName))
+                    continue;
+                EnsureModPathForOpen(modName);
+                ExpandFoldersForOpen(modName);
                 _expandedMods.Add(modName);
             }
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error opening ShrinkU for mods");
+        }
+    }
+
+    private string ResolveModNameForOpen(string? input)
+    {
+        var search = input?.Trim() ?? string.Empty;
+        if (string.IsNullOrEmpty(search))
+            return string.Empty;
+        if (_modPaths.ContainsKey(search))
+            return search;
+        var byPath = _modPaths.FirstOrDefault(x => string.Equals(x.Value, search, StringComparison.OrdinalIgnoreCase)).Key;
+        if (!string.IsNullOrEmpty(byPath))
+            return byPath;
+        return Path.GetFileName(search) ?? string.Empty;
+    }
+
+    private void EnsureModPathForOpen(string modName)
+    {
+        if (string.IsNullOrWhiteSpace(modName) || _modPaths.ContainsKey(modName))
+            return;
+        var snap = _modStateService.Snapshot();
+        if (!snap.TryGetValue(modName, out var entry))
+            return;
+        var folder = entry.PenumbraRelativePath ?? string.Empty;
+        var leaf = entry.RelativeModName ?? string.Empty;
+        if (string.IsNullOrWhiteSpace(leaf))
+            return;
+        _modPaths[modName] = string.IsNullOrWhiteSpace(folder) ? leaf : string.Concat(folder, "/", leaf);
+    }
+
+    private void ExpandFoldersForOpen(string modName)
+    {
+        if (!_modPaths.TryGetValue(modName, out var fullPath) || string.IsNullOrEmpty(fullPath))
+        {
+            _expandedFolders.Add("(Uncategorized)");
+            return;
+        }
+        var lastSlash = fullPath.LastIndexOf('/');
+        if (lastSlash <= 0)
+        {
+            _expandedFolders.Add("(Uncategorized)");
+            return;
+        }
+        var folderOnly = fullPath.Substring(0, lastSlash);
+        var parts = folderOnly.Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        var currentPath = string.Empty;
+        for (int i = 0; i < parts.Length; i++)
+        {
+            if (i > 0)
+                currentPath += "/";
+            currentPath += parts[i];
+            _expandedFolders.Add(currentPath);
         }
     }
 
@@ -416,7 +410,7 @@ public sealed partial class ConversionUI : Window, IDisposable
     private int _modsChangedDebounceSeq = 0;
     // Timestamp of last heavy scan to rate-limit repeated rescans
     private DateTime _lastHeavyScanAt = DateTime.MinValue;
-    private const int MaxUiActionsPerDraw = 64;
+    private const int MaxUiActionsPerDraw = 16;
     private int _modStateSnapshotRefreshQueued = 0;
     
     private void RequestUiRefresh(string reason)
@@ -443,6 +437,10 @@ public sealed partial class ConversionUI : Window, IDisposable
             try
             {
                 _modStateSnapshot = _modStateService.Snapshot();
+                _visibleByModSig = string.Empty;
+                _flatRowsSig = string.Empty;
+                _rowsSig = string.Empty;
+                _modPathsSig = string.Empty;
                 _footerTotalsDirty = true;
                 _needsUIRefresh = true;
             }
@@ -583,6 +581,7 @@ public sealed partial class ConversionUI : Window, IDisposable
     private readonly Action _onExcludedModsUpdated;
     private readonly Action _onPlayerResourcesChanged;
     private readonly Action<string> _onModStateEntryChanged;
+    private readonly Action<string> _onPenumbraModPathsChanged;
     
     // Track last external conversion/restore notification to surface UI indicator
     private DateTime _lastExternalChangeAt = DateTime.MinValue;
@@ -833,53 +832,24 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
             _logger.LogDebug("Penumbra mods changed (DIAG-v3); refreshing UI state");
             RequestUiRefresh("penumbra-mods-changed");
             ScheduleOrphanScan("mods-changed", true);
-            // Refresh hierarchical mod paths from mod_state snapshot
-            if (!_loadingModPaths)
-            {
-                _loadingModPaths = true;
-                _uiThreadActions.Enqueue(() =>
-                {
-                var snap = _modStateService.Snapshot();
-                var paths = snap.ToDictionary(
-                    kv => kv.Key,
-                    kv => {
-                        var folder = kv.Value?.PenumbraRelativePath ?? string.Empty;
-                        var leaf = kv.Value?.RelativeModName ?? string.Empty;
-                        if (string.IsNullOrWhiteSpace(folder)) return leaf ?? string.Empty;
-                        if (string.IsNullOrWhiteSpace(leaf)) return folder ?? string.Empty;
-                        return string.Concat(folder, "/", leaf);
-                    },
-                    StringComparer.OrdinalIgnoreCase);
-                    try { paths.Remove("mod_state"); } catch { }
-                    foreach (var kvp in paths)
-                    {
-                        var key = kvp.Key;
-                        var val = kvp.Value ?? string.Empty;
-                        if (!string.IsNullOrWhiteSpace(val))
-                            _modPathsStable[key] = val;
-                        else if (_modPathsStable.TryGetValue(key, out var prev) && !string.IsNullOrWhiteSpace(prev))
-                            _modPathsStable[key] = prev;
-                    }
-                    _modPaths = new Dictionary<string, string>(_modPathsStable, StringComparer.OrdinalIgnoreCase);
-                    try
-                    {
-                        var sb = new System.Text.StringBuilder();
-                        foreach (var kv in _modPaths.OrderBy(k => k.Key, StringComparer.OrdinalIgnoreCase))
-                            sb.Append(kv.Key).Append('=').Append(kv.Value).Append(';');
-                        _modPathsSig = sb.ToString();
-                    }
-                    catch { _modPathsSig = _modPaths.Count.ToString(); }
-                    _loadingModPaths = false;
-                    RequestUiRefresh("mod-paths-reloaded");
-                });
-            }
+            RefreshModPathsFromPenumbra("mods-changed");
+            RefreshLivePenumbraMods(true, "mods-changed");
 
             if (_filterPenumbraUsedOnly) ReloadPenumbraUsedFiles("mods-changed");
 
             _uiThreadActions.Enqueue(() => { _needsUIRefresh = true; RequestUiRefresh("mods-changed-light"); });
         };
         _conversionService.OnPenumbraModsChanged += _onPenumbraModsChanged;
+        _onPenumbraModPathsChanged = reason =>
+        {
+            RequestUiRefresh("penumbra-mod-paths-changed");
+            RefreshModPathsFromPenumbra(string.IsNullOrWhiteSpace(reason) ? "path-changed" : reason);
+            RefreshLivePenumbraMods(true, "paths-changed");
+            _uiThreadActions.Enqueue(() => { _needsUIRefresh = true; });
+        };
+        _conversionService.OnPenumbraModPathsChanged += _onPenumbraModPathsChanged;
         ScheduleOrphanScan("startup", true);
+        RefreshLivePenumbraMods(true, "startup");
 
         // React to external texture changes (e.g., conversions/restores initiated by Sphene)
         _onExternalTexturesChanged = reason =>
@@ -1100,6 +1070,19 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
         // Lightweight handling for mod setting changes: only affect current collection and debounce enabled-state reloads.
         _onPenumbraModSettingChanged = (change, collectionId, modDir, inherited) =>
         {
+            if (!string.IsNullOrWhiteSpace(modDir))
+            {
+                _uiThreadActions.Enqueue(() =>
+                {
+                    ClearModCaches(modDir);
+                    _modDisplayNames.Remove(modDir);
+                    _modTags.Remove(modDir);
+                    _needsUIRefresh = true;
+                    RefreshModState(modDir, "mod-setting-metadata");
+                    RequestUiRefresh("mod-setting-metadata");
+                });
+            }
+
             // Ignore changes not belonging to the currently selected collection.
             if (!_selectedCollectionId.HasValue || collectionId != _selectedCollectionId.Value)
             {
@@ -1204,17 +1187,9 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
         _scanSortAsc = true;
         _scanSortKind = ScanSortKind.ModName;
 
-        // Initialize first column width from config (default 30px on first open)
-        _scannedFirstColWidth = _configService.Current.ScannedFilesFirstColWidth > 0f
-            ? _configService.Current.ScannedFilesFirstColWidth
-            : 28f;
         _scannedSizeColWidth = _configService.Current.ScannedFilesSizeColWidth > 0f
             ? _configService.Current.ScannedFilesSizeColWidth
             : 85f;
-        _scannedActionColWidth = _configService.Current.ScannedFilesActionColWidth > 0f
-            ? _configService.Current.ScannedFilesActionColWidth
-            : 120f;
-
         // If Penumbra Used Only is enabled from config, preload used files on first open
         if (_filterPenumbraUsedOnly && _penumbraUsedFiles.Count == 0 && !_loadingPenumbraUsed)
         {
@@ -1313,7 +1288,6 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
             }
         // Trigger initial scan lazily on first draw
         QueueInitialScan();
-
         // Ensure Used-Only watcher is running/stopped according to current filter state
         if (_filterPenumbraUsedOnly && !_usedWatcherActive)
         {
@@ -1329,39 +1303,10 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
             StartModStateWatcher();
         }
 
-        // Preload mod paths lazily from mod_state snapshot
+        // Preload mod paths lazily from penumbra
         if (!_loadingModPaths && _modPaths.Count == 0)
         {
-            _loadingModPaths = true;
-            var snap = _modStateService.Snapshot();
-            var paths2 = snap.ToDictionary(
-                kv => kv.Key,
-                kv => {
-                    var folder = kv.Value?.PenumbraRelativePath ?? string.Empty;
-                    var leaf = kv.Value?.RelativeModName ?? string.Empty;
-                    if (string.IsNullOrWhiteSpace(folder)) return leaf ?? string.Empty;
-                    if (string.IsNullOrWhiteSpace(leaf)) return folder ?? string.Empty;
-                    return string.Concat(folder, "/", leaf);
-                },
-                StringComparer.OrdinalIgnoreCase);
-            try { paths2.Remove("mod_state"); } catch { }
-            foreach (var kvp in paths2)
-            {
-                var key = kvp.Key;
-                var val = kvp.Value ?? string.Empty;
-                if (!string.IsNullOrWhiteSpace(val))
-                    _modPathsStable[key] = val;
-            }
-            _modPaths = new Dictionary<string, string>(_modPathsStable, StringComparer.OrdinalIgnoreCase);
-            try
-            {
-                var sb = new System.Text.StringBuilder();
-                foreach (var kv in _modPaths.OrderBy(k => k.Key, StringComparer.OrdinalIgnoreCase))
-                    sb.Append(kv.Key).Append('=').Append(kv.Value).Append(';');
-                _modPathsSig = sb.ToString();
-            }
-            catch { _modPathsSig = _modPaths.Count.ToString(); }
-            _loadingModPaths = false;
+            RefreshModPathsFromPenumbra("initial-draw");
         }
         // Subtle accent header bar for branding
         var headerStart = ImGui.GetCursorScreenPos();
@@ -1409,6 +1354,8 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
         catch (Exception ex) { _logger.LogError(ex, "Unsubscribe OnModProgress failed"); }
         try { _conversionService.OnPenumbraModsChanged -= _onPenumbraModsChanged; }
         catch (Exception ex) { _logger.LogError(ex, "Unsubscribe OnPenumbraModsChanged failed"); }
+        try { _conversionService.OnPenumbraModPathsChanged -= _onPenumbraModPathsChanged; }
+        catch (Exception ex) { _logger.LogError(ex, "Unsubscribe OnPenumbraModPathsChanged failed"); }
         try { _conversionService.OnPenumbraModAdded -= _onPenumbraModAdded; }
         catch (Exception ex) { _logger.LogError(ex, "Unsubscribe OnPenumbraModAdded failed"); }
         try { _conversionService.OnPenumbraModDeleted -= _onPenumbraModDeleted; }
@@ -1722,21 +1669,38 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                         {
                             _cacheService.SeedFileSizes(kv.Value);
                         }
-                        foreach (var kv in prefetchedFilesByMod)
+                        _knownModFolders = new HashSet<string>(known, StringComparer.OrdinalIgnoreCase);
+                    }
+                });
+
+                const int batchSize = 20;
+                var modBatches = prefetchedFilesByMod.ToList();
+                for (int i = 0; i < modBatches.Count; i += batchSize)
+                {
+                    var chunk = modBatches.Skip(i).Take(batchSize).ToArray();
+                    _uiThreadActions.Enqueue(() =>
+                    {
+                        for (int j = 0; j < chunk.Length; j++)
                         {
+                            var kv = chunk[j];
                             _scannedByMod[kv.Key] = kv.Value;
-                            foreach (var file in kv.Value)
+                            for (int k = 0; k < kv.Value.Count; k++)
                             {
+                                var file = kv.Value[k];
                                 _texturesToConvert[file] = Array.Empty<string>();
                                 _fileOwnerMod[file] = kv.Key;
                             }
                         }
-                        _knownModFolders = new HashSet<string>(known, StringComparer.OrdinalIgnoreCase);
-                    }
+                        _needsUIRefresh = true;
+                    });
+                }
+
+                _uiThreadActions.Enqueue(() =>
+                {
                     _logger.LogDebug("Initial mods loaded: {mods}", _scannedByMod.Count);
                     _needsUIRefresh = true;
-                    Task.Run(async () => { try { await _conversionService.UpdateAllModTextureCountsAsync().ConfigureAwait(false); } catch { } });
                 });
+                _ = Task.Run(async () => { try { await _conversionService.UpdateAllModTextureCountsAsync().ConfigureAwait(false); } catch { } });
             }
             catch (Exception ex) { _logger.LogError(ex, "Startup refresh check failed"); }
         });
@@ -2187,6 +2151,19 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
         ImGui.PopStyleColor();
     }
 
+    private static void PushButtonColors(Vector4 button, Vector4 hovered, Vector4 active, Vector4 text)
+    {
+        ImGui.PushStyleColor(ImGuiCol.Button, button);
+        ImGui.PushStyleColor(ImGuiCol.ButtonHovered, hovered);
+        ImGui.PushStyleColor(ImGuiCol.ButtonActive, active);
+        ImGui.PushStyleColor(ImGuiCol.Text, text);
+    }
+
+    private static void PopButtonColors()
+    {
+        ImGui.PopStyleColor(4);
+    }
+
     // Get per-mod original total bytes, preferring ModState; fallback to computed or backup manifest.
     private long GetOrQueryModOriginalTotal(string mod)
     {
@@ -2276,6 +2253,427 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
         if (_modDisplayNames.TryGetValue(folder, out var name) && !string.IsNullOrWhiteSpace(name))
             return name.Replace('\\', '/');
         return folder;
+    }
+
+    private bool IsModUsedByPenumbra(string mod, ShrinkU.Services.ModStateEntry? state = null)
+    {
+        if (string.IsNullOrWhiteSpace(mod))
+            return false;
+        var liveUsed = GetUsedTextureCountForMod(mod, state);
+        if (liveUsed > 0)
+            return true;
+        var ms = state;
+        if (ms == null)
+        {
+            var snap = _modStateSnapshot ?? _modStateService.Snapshot();
+            snap.TryGetValue(mod, out ms);
+        }
+        if (ms == null)
+            return false;
+        if (ms.UsedTextureCount > 0)
+            return true;
+        return ms.UsedTextureFiles != null && ms.UsedTextureFiles.Count > 0;
+    }
+
+    private int GetUsedTextureCountForMod(string mod, ShrinkU.Services.ModStateEntry? state = null)
+    {
+        if (string.IsNullOrWhiteSpace(mod))
+            return 0;
+        var ms = state;
+        if (ms == null)
+        {
+            var snap = _modStateSnapshot ?? _modStateService.Snapshot();
+            snap.TryGetValue(mod, out ms);
+        }
+
+        var persisted = Math.Max(0, ms?.UsedTextureCount ?? ms?.UsedTextureFiles?.Count ?? 0);
+        if (persisted > 0)
+            return persisted;
+        if (_penumbraUsedFiles.Count == 0)
+            return 0;
+        if (!_scannedByMod.TryGetValue(mod, out var files) || files == null || files.Count == 0)
+            return 0;
+
+        var count = 0;
+        foreach (var f in files)
+        {
+            var p = f ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(p))
+                continue;
+            if (_penumbraUsedFiles.Contains(p))
+            {
+                count++;
+                continue;
+            }
+            var back = p.Replace('/', '\\');
+            if (_penumbraUsedFiles.Contains(back))
+            {
+                count++;
+                continue;
+            }
+            var slash = p.Replace('\\', '/');
+            if (_penumbraUsedFiles.Contains(slash))
+                count++;
+        }
+        return count;
+    }
+
+    private bool DrawPenumbraUsedIndicator(string mod, ShrinkU.Services.ModStateEntry? state = null, int totalTexturesHint = 0)
+    {
+        if (!IsModUsedByPenumbra(mod, state))
+            return false;
+        var usedCount = GetUsedTextureCountForMod(mod, state);
+        var totalCount = Math.Max(0, state?.TotalTextures ?? totalTexturesHint);
+        var ratio = totalCount > 0 ? Math.Clamp((float)usedCount / totalCount, 0f, 1f) : 1f;
+        var cold = new Vector4(0.30f, 0.60f, 1.00f, 1f);
+        var hot = new Vector4(0.95f, 0.30f, 0.55f, 1f);
+        var t = ratio;
+        var iconColor = new Vector4(
+            cold.X + (hot.X - cold.X) * t,
+            cold.Y + (hot.Y - cold.Y) * t,
+            cold.Z + (hot.Z - cold.Z) * t,
+            1f);
+
+        ImGui.SameLine();
+        ImGui.PushFont(UiBuilder.IconFont);
+        ImGui.TextColored(iconColor, FontAwesomeIcon.Eye.ToIconString());
+        ImGui.PopFont();
+        if (!ImGui.IsItemHovered())
+            return false;
+
+        var ver = state?.CurrentVersion ?? string.Empty;
+        ImGui.BeginTooltip();
+        ImGui.TextUnformatted("Used by Penumbra");
+        ImGui.Separator();
+        ImGui.TextUnformatted("Indicator is shown because this mod has textures currently used by Penumbra.");
+        ImGui.TextUnformatted($"ModDir: {mod}");
+        if (!string.IsNullOrWhiteSpace(ver))
+            ImGui.TextUnformatted($"Version: {ver}");
+        ImGui.TextUnformatted($"Used textures: {usedCount}");
+        if (totalCount > 0)
+            ImGui.TextUnformatted($"Used ratio: {ratio * 100f:0.#}% ({usedCount}/{totalCount})");
+
+        var drawList = ImGui.GetWindowDrawList();
+        var p = ImGui.GetCursorScreenPos();
+        var w = 180f;
+        var h = 8f;
+        var red = ImGui.ColorConvertFloat4ToU32(new Vector4(0.92f, 0.33f, 0.33f, 1f));
+        var yellow = ImGui.ColorConvertFloat4ToU32(new Vector4(0.93f, 0.80f, 0.29f, 1f));
+        var green = ImGui.ColorConvertFloat4ToU32(new Vector4(0.35f, 0.88f, 0.45f, 1f));
+        drawList.AddRectFilledMultiColor(new Vector2(p.X, p.Y), new Vector2(p.X + w * 0.5f, p.Y + h), red, yellow, yellow, red);
+        drawList.AddRectFilledMultiColor(new Vector2(p.X + w * 0.5f, p.Y), new Vector2(p.X + w, p.Y + h), yellow, green, green, yellow);
+        var indicatorX = p.X + (w * ratio);
+        var white = ImGui.ColorConvertFloat4ToU32(new Vector4(1f, 1f, 1f, 1f));
+        drawList.AddLine(new Vector2(indicatorX, p.Y - 2f), new Vector2(indicatorX, p.Y + h + 2f), white, 2f);
+        ImGui.Dummy(new Vector2(w, h + 4f));
+        ImGui.EndTooltip();
+        return true;
+    }
+
+    private static string NormalizeModPathValue(string? value)
+    {
+        return (value ?? string.Empty).Replace('\\', '/').Trim().Trim('/');
+    }
+
+    private Dictionary<string, string> BuildModPathsFromSnapshot(IReadOnlyDictionary<string, ShrinkU.Services.ModStateEntry> snap)
+    {
+        var paths = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var kv in snap)
+        {
+            var key = kv.Key ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(key) || string.Equals(key, "mod_state", StringComparison.OrdinalIgnoreCase))
+                continue;
+            var folder = kv.Value?.PenumbraRelativePath ?? string.Empty;
+            var leaf = kv.Value?.RelativeModName ?? string.Empty;
+            var val = string.IsNullOrWhiteSpace(folder)
+                ? leaf
+                : (string.IsNullOrWhiteSpace(leaf) ? folder : string.Concat(folder, "/", leaf));
+            val = NormalizeModPathValue(val);
+            if (!string.IsNullOrWhiteSpace(val))
+                paths[key] = val;
+        }
+        return paths;
+    }
+
+    private void ApplyModPathsState(Dictionary<string, string> paths)
+    {
+        _modPathsStable = new Dictionary<string, string>(paths, StringComparer.OrdinalIgnoreCase);
+        _modPaths = new Dictionary<string, string>(_modPathsStable, StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            var sb = new System.Text.StringBuilder();
+            foreach (var kv in _modPaths.OrderBy(k => k.Key, StringComparer.OrdinalIgnoreCase))
+                sb.Append(kv.Key).Append('=').Append(kv.Value).Append(';');
+            _modPathsSig = sb.ToString();
+        }
+        catch { _modPathsSig = _modPaths.Count.ToString(); }
+        _needsUIRefresh = true;
+    }
+
+    private void RefreshLivePenumbraMods(bool force, string reason)
+    {
+        if (Interlocked.Exchange(ref _livePenumbraModsRefreshInFlight, 1) != 0)
+            return;
+
+        if (!force && _lastLivePenumbraModsRefreshUtc != DateTime.MinValue && (DateTime.UtcNow - _lastLivePenumbraModsRefreshUtc) < TimeSpan.FromSeconds(10))
+        {
+            Interlocked.Exchange(ref _livePenumbraModsRefreshInFlight, 0);
+            return;
+        }
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                var live = await _conversionService.GetLivePenumbraModFoldersAsync().ConfigureAwait(false);
+                _uiThreadActions.Enqueue(() =>
+                {
+                    _livePenumbraMods = live ?? new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    _hasLivePenumbraModsSnapshot = true;
+                    _lastLivePenumbraModsRefreshUtc = DateTime.UtcNow;
+                    RequestUiRefresh(string.Concat("live-mods-refresh-", reason));
+                });
+            }
+            catch
+            {
+                _uiThreadActions.Enqueue(() =>
+                {
+                    if (_hasLivePenumbraModsSnapshot)
+                        _lastLivePenumbraModsRefreshUtc = DateTime.UtcNow;
+                });
+            }
+            finally
+            {
+                Interlocked.Exchange(ref _livePenumbraModsRefreshInFlight, 0);
+            }
+        });
+    }
+
+    private void RefreshModPathsFromPenumbra(string reason)
+    {
+        if (_loadingModPaths)
+        {
+            _pendingModPathsRefresh = true;
+            _pendingModPathsReason = string.IsNullOrWhiteSpace(reason) ? "queued" : reason;
+            return;
+        }
+        _loadingModPaths = true;
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                Dictionary<string, string> live = new(StringComparer.OrdinalIgnoreCase);
+                try
+                {
+                    var paths = await _conversionService.GetModPathsAsync().ConfigureAwait(false);
+                    foreach (var kv in paths)
+                    {
+                        var key = kv.Key ?? string.Empty;
+                        var val = NormalizeModPathValue(kv.Value);
+                        if (string.IsNullOrWhiteSpace(key) || string.IsNullOrWhiteSpace(val))
+                            continue;
+                        if (string.Equals(key, "mod_state", StringComparison.OrdinalIgnoreCase))
+                            continue;
+                        live[key] = val;
+                    }
+                }
+                catch { }
+
+                if (live.Count == 0)
+                {
+                    var snap = _modStateSnapshot ?? _modStateService.Snapshot();
+                    live = BuildModPathsFromSnapshot(snap);
+                }
+
+                _uiThreadActions.Enqueue(() =>
+                {
+                    ApplyModPathsState(live);
+                    _loadingModPaths = false;
+                    RequestUiRefresh(string.Concat("mod-paths-refresh-", reason));
+                    if (_pendingModPathsRefresh)
+                    {
+                        var pendingReason = _pendingModPathsReason;
+                        _pendingModPathsRefresh = false;
+                        _pendingModPathsReason = string.Empty;
+                        RefreshModPathsFromPenumbra(string.IsNullOrWhiteSpace(pendingReason) ? "queued" : pendingReason);
+                    }
+                });
+            }
+            catch
+            {
+                _uiThreadActions.Enqueue(() =>
+                {
+                    _loadingModPaths = false;
+                    if (_pendingModPathsRefresh)
+                    {
+                        var pendingReason = _pendingModPathsReason;
+                        _pendingModPathsRefresh = false;
+                        _pendingModPathsReason = string.Empty;
+                        RefreshModPathsFromPenumbra(string.IsNullOrWhiteSpace(pendingReason) ? "queued" : pendingReason);
+                    }
+                });
+            }
+        });
+    }
+
+    private void SelectDebugPenumbraMod(string mod, bool forceReload = false)
+    {
+        var key = (mod ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(key) || string.Equals(key, "mod_state", StringComparison.OrdinalIgnoreCase))
+            return;
+        if (!forceReload && string.Equals(_debugPenumbraSelectedMod, key, StringComparison.OrdinalIgnoreCase))
+            return;
+        _debugPenumbraSelectedMod = key;
+        _debugPenumbraSnapshot = null;
+        _debugPenumbraError = string.Empty;
+        _debugPenumbraLoadVersion++;
+        var version = _debugPenumbraLoadVersion;
+        _debugPenumbraLoading = true;
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                var api = _conversionService.IsPenumbraApiAvailable();
+                var root = _conversionService.GetPenumbraModDirectory();
+                string modPath = string.Empty;
+                bool modPathFromApi = false;
+                try
+                {
+                    var paths = await _conversionService.GetModPathsAsync().ConfigureAwait(false);
+                    if (paths.TryGetValue(key, out var p))
+                    {
+                        modPath = NormalizeModPathValue(p);
+                        modPathFromApi = !string.IsNullOrWhiteSpace(modPath);
+                    }
+                }
+                catch { }
+
+                var display = await _conversionService.GetModDisplayNameAsync(key).ConfigureAwait(false);
+                var tags = await _conversionService.GetModTagsAsync(key).ConfigureAwait(false);
+                var meta = await _conversionService.GetModMetadataAsync(key).ConfigureAwait(false);
+                var coll = await _conversionService.GetCurrentCollectionAsync().ConfigureAwait(false);
+                bool? enabled = null;
+                int? priority = null;
+                bool? inherited = null;
+                bool? temporary = null;
+                if (coll.HasValue)
+                {
+                    try
+                    {
+                        var states = await _conversionService.GetAllModEnabledStatesAsync(coll.Value.Id).ConfigureAwait(false);
+                        if (states.TryGetValue(key, out var st))
+                        {
+                            enabled = st.Enabled;
+                            priority = st.Priority;
+                            inherited = st.Inherited;
+                            temporary = st.Temporary;
+                        }
+                    }
+                    catch { }
+                }
+
+                var snap = _modStateSnapshot ?? _modStateService.Snapshot();
+                snap.TryGetValue(key, out var entry);
+                var used = IsModUsedByPenumbra(key, entry);
+                var usedCount = GetUsedTextureCountForMod(key, entry);
+                var uiPath = _modPaths.TryGetValue(key, out var up) ? NormalizeModPathValue(up) : string.Empty;
+                var stateRelPath = string.Empty;
+                if (!string.IsNullOrWhiteSpace(entry?.PenumbraRelativePath) && !string.IsNullOrWhiteSpace(entry?.RelativeModName))
+                    stateRelPath = NormalizeModPathValue(string.Concat(entry.PenumbraRelativePath, "/", entry.RelativeModName));
+                else if (!string.IsNullOrWhiteSpace(entry?.RelativeModName))
+                    stateRelPath = NormalizeModPathValue(entry.RelativeModName);
+                else if (!string.IsNullOrWhiteSpace(entry?.PenumbraRelativePath))
+                    stateRelPath = NormalizeModPathValue(entry.PenumbraRelativePath);
+                var scannedCount = _scannedByMod.TryGetValue(key, out var scanned) && scanned != null ? scanned.Count : 0;
+                var snapshot = new PenumbraModDebugSnapshot
+                {
+                    ApiAvailable = api,
+                    ModDirectory = key,
+                    PenumbraModRoot = root ?? string.Empty,
+                    PenumbraPath = modPath,
+                    PenumbraPathFromApi = modPathFromApi,
+                    UiMappedPath = uiPath,
+                    StateRelativePath = stateRelPath,
+                    StateAbsolutePath = entry?.ModAbsolutePath ?? string.Empty,
+                    DisplayName = display ?? string.Empty,
+                    Author = meta?.Author,
+                    Version = meta?.Version,
+                    Description = meta?.Description,
+                    Website = meta?.Website,
+                    MetadataSource = meta?.Source ?? string.Empty,
+                    CollectionId = coll?.Id,
+                    CollectionName = coll?.Name ?? string.Empty,
+                    Enabled = enabled,
+                    Priority = priority,
+                    Inherited = inherited,
+                    Temporary = temporary,
+                    Tags = tags ?? new List<string>(),
+                    UsedByPenumbra = used,
+                    UsedTextureCount = usedCount,
+                    StateTextureCount = Math.Max(0, entry?.TotalTextures ?? 0),
+                    StateComparedFiles = Math.Max(0, entry?.ComparedFiles ?? 0),
+                    StateNeedsRescan = entry?.NeedsRescan ?? false,
+                    StateLastKnownWriteUtc = entry?.LastKnownWriteUtc ?? DateTime.MinValue,
+                    StateLastScanUtc = entry?.LastScanUtc ?? DateTime.MinValue,
+                    ScannedTextureCount = Math.Max(0, scannedCount),
+                    LoadedAtUtc = DateTime.UtcNow
+                };
+
+                _uiThreadActions.Enqueue(() =>
+                {
+                    if (version != _debugPenumbraLoadVersion)
+                        return;
+                    _debugPenumbraSnapshot = snapshot;
+                    _debugPenumbraError = string.Empty;
+                    _debugPenumbraLoading = false;
+                    _needsUIRefresh = true;
+                });
+            }
+            catch (Exception ex)
+            {
+                _uiThreadActions.Enqueue(() =>
+                {
+                    if (version != _debugPenumbraLoadVersion)
+                        return;
+                    _debugPenumbraError = ex.Message;
+                    _debugPenumbraLoading = false;
+                    _needsUIRefresh = true;
+                });
+            }
+        });
+    }
+
+    private void EnsureCollectionEnabledStatesFresh()
+    {
+        if (Interlocked.Exchange(ref _collectionStatesRefreshInFlight, 1) != 0)
+            return;
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                var now = DateTime.UtcNow;
+                if (_selectedCollectionId.HasValue && (now - _lastCollectionStatesRefreshUtc) < TimeSpan.FromSeconds(4))
+                    return;
+
+                var coll = await _conversionService.GetCurrentCollectionAsync().ConfigureAwait(false);
+                if (!coll.HasValue)
+                    return;
+                var states = await _conversionService.GetAllModEnabledStatesAsync(coll.Value.Id).ConfigureAwait(false);
+                _uiThreadActions.Enqueue(() =>
+                {
+                    _selectedCollectionId = coll.Value.Id;
+                    if (states != null)
+                        _modEnabledStates = states;
+                    _lastCollectionStatesRefreshUtc = DateTime.UtcNow;
+                    _needsUIRefresh = true;
+                });
+            }
+            catch { }
+            finally
+            {
+                Interlocked.Exchange(ref _collectionStatesRefreshInFlight, 0);
+            }
+        });
     }
 
     private void RefreshModState(string mod, string origin)
@@ -2378,6 +2776,96 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                 result.Add(m);
         }
         return result.ToList();
+    }
+
+    private void ClearAllModSelections()
+    {
+        _selectedTextures.Clear();
+        _selectedEmptyMods.Clear();
+        foreach (var mod in _selectedCountByMod.Keys.ToList())
+            _selectedCountByMod[mod] = 0;
+    }
+
+    private bool IsModSelected(string mod, Dictionary<string, List<string>> visibleByMod)
+    {
+        if (string.IsNullOrWhiteSpace(mod))
+            return false;
+        var files = visibleByMod.TryGetValue(mod, out var list) && list != null ? list : new List<string>();
+        var totalAll = GetTotalTexturesForMod(mod, files);
+        if (totalAll <= 0)
+            return _selectedEmptyMods.Contains(mod);
+        return (_selectedCountByMod.TryGetValue(mod, out var selected) ? selected : 0) >= totalAll;
+    }
+
+    private void SetModSelectionState(string mod, bool selected, Dictionary<string, List<string>> visibleByMod)
+    {
+        if (string.IsNullOrWhiteSpace(mod))
+            return;
+        var files = visibleByMod.TryGetValue(mod, out var list) && list != null ? list : new List<string>();
+        var totalAll = GetTotalTexturesForMod(mod, files);
+        var isNonConvertible = totalAll <= 0;
+        if (isNonConvertible)
+        {
+            if (selected) _selectedEmptyMods.Add(mod);
+            else _selectedEmptyMods.Remove(mod);
+            _selectedCountByMod[mod] = 0;
+            return;
+        }
+
+        List<string>? allFilesForMod = null;
+        if (_scannedByMod.TryGetValue(mod, out var all) && all != null && all.Count > 0)
+            allFilesForMod = all;
+        else
+            allFilesForMod = files;
+        if (selected)
+        {
+            foreach (var f in allFilesForMod) _selectedTextures.Add(f);
+            _selectedCountByMod[mod] = totalAll;
+            _selectedEmptyMods.Remove(mod);
+        }
+        else
+        {
+            foreach (var f in allFilesForMod) _selectedTextures.Remove(f);
+            _selectedCountByMod[mod] = 0;
+        }
+    }
+
+    private void HandleModRowClickSelection(string mod, bool disableSelection, Dictionary<string, List<string>> visibleByMod)
+    {
+        if (disableSelection || string.IsNullOrWhiteSpace(mod))
+            return;
+        var io = ImGui.GetIO();
+        var shift = io.KeyShift;
+        var ctrl = io.KeyCtrl;
+
+        if (shift && !string.IsNullOrWhiteSpace(_modSelectionAnchor) && _modSelectionOrder.Count > 0)
+        {
+            var anchorIndex = _modSelectionOrder.FindIndex(m => string.Equals(m, _modSelectionAnchor, StringComparison.OrdinalIgnoreCase));
+            var currentIndex = _modSelectionOrder.FindIndex(m => string.Equals(m, mod, StringComparison.OrdinalIgnoreCase));
+            if (anchorIndex >= 0 && currentIndex >= 0)
+            {
+                if (!ctrl)
+                    ClearAllModSelections();
+                var start = Math.Min(anchorIndex, currentIndex);
+                var end = Math.Max(anchorIndex, currentIndex);
+                for (var i = start; i <= end; i++)
+                    SetModSelectionState(_modSelectionOrder[i], true, visibleByMod);
+                _modSelectionAnchor = mod;
+                return;
+            }
+        }
+
+        if (ctrl)
+        {
+            var selected = IsModSelected(mod, visibleByMod);
+            SetModSelectionState(mod, !selected, visibleByMod);
+            _modSelectionAnchor = mod;
+            return;
+        }
+
+        ClearAllModSelections();
+        SetModSelectionState(mod, true, visibleByMod);
+        _modSelectionAnchor = mod;
     }
 
     private (int convertableMods, int restorableMods) GetSelectedModStates()
@@ -2506,7 +2994,7 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
 
     public void TriggerStartupRescan()
     {
-        RefreshScanResults(true, "startup");
+        RefreshScanResults(false, "startup");
     }
 
     public void SetStartupDependencyErrors(System.Collections.Generic.IEnumerable<string> errors)
