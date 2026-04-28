@@ -982,23 +982,24 @@ public sealed partial class ConversionUI
                             _currentRestoreModIndex = 0;
                             _currentRestoreModTotal = 0;
                             var hasPmp = false;
-                            try { hasPmp = _backupService.HasPmpBackupForModAsync(mod).GetAwaiter().GetResult(); }
+                            try { hasPmp = await _backupService.HasPmpBackupForModAsync(mod).ConfigureAwait(false); }
                             catch (Exception ex) { _logger.LogError(ex, "HasPmpBackup check failed for {mod}", mod); }
                             if (hasPmp)
                             {
-                                var latestPmp = _backupService.GetPmpBackupsForModAsync(mod).GetAwaiter().GetResult().FirstOrDefault();
+                                var pmpFiles = await _backupService.GetPmpBackupsForModAsync(mod).ConfigureAwait(false);
+                                var latestPmp = pmpFiles?.FirstOrDefault();
                                 if (!string.IsNullOrEmpty(latestPmp))
                                 {
-                                    await _backupService.RestorePmpAsync(mod, latestPmp, progress, restoreToken);
+                                    await _backupService.RestorePmpAsync(mod, latestPmp, progress, restoreToken).ConfigureAwait(false);
                                 }
                                 else
                                 {
-                                    await _backupService.RestoreLatestForModAsync(mod, progress, restoreToken);
+                                    await _backupService.RestoreLatestForModAsync(mod, progress, restoreToken).ConfigureAwait(false);
                                 }
                             }
                             else
                             {
-                                await _backupService.RestoreLatestForModAsync(mod, progress, restoreToken);
+                                await _backupService.RestoreLatestForModAsync(mod, progress, restoreToken).ConfigureAwait(false);
                             }
                         }
                         catch (Exception ex) { _logger.LogError(ex, "Bulk restore failed for {mod}", mod); }
@@ -1029,18 +1030,26 @@ public sealed partial class ConversionUI
                         catch (Exception ex) { _logger.LogError(ex, "TryRemove _modsWithPmpCache failed for {mod}", m); }
                         try { (string version, string author, DateTime createdUtc, string pmpFileName) _rm; _modsPmpMetaCache.TryRemove(m, out _rm); }
                         catch (Exception ex) { _logger.LogError(ex, "TryRemove _modsPmpMetaCache failed for {mod}", m); }
-                        _ = _backupService.HasBackupForModAsync(m).ContinueWith(bt =>
+                        _ = _backupService.HasBackupForModAsync(m).ContinueWith(async bt =>
                         {
                             if (bt.Status == TaskStatus.RanToCompletion)
                             {
                                 bool any = bt.Result;
-                                try { any = any || _backupService.HasPmpBackupForModAsync(m).GetAwaiter().GetResult(); }
+                                try 
+                                { 
+                                    var hasPmp = await _backupService.HasPmpBackupForModAsync(m).ConfigureAwait(false);
+                                    any = any || hasPmp;
+                                }
                                 catch (Exception ex) { _logger.LogError(ex, "HasPmpBackup check failed for {mod}", m); }
                                 _cacheService.SetModHasBackup(m, any);
-                                try { var hasPmpNow = _backupService.HasPmpBackupForModAsync(m).GetAwaiter().GetResult(); _cacheService.SetModHasPmp(m, hasPmpNow); }
+                                try 
+                                { 
+                                    var hasPmpNow = await _backupService.HasPmpBackupForModAsync(m).ConfigureAwait(false);
+                                    _cacheService.SetModHasPmp(m, hasPmpNow);
+                                }
                                 catch (Exception ex) { _logger.LogError(ex, "SetModHasPmp failed for {mod}", m); }
                             }
-                        });
+                        }, TaskScheduler.Default);
                     }
                     try
                     {

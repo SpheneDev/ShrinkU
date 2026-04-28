@@ -738,15 +738,20 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
                                 _uiThreadActions.Enqueue(() => { _perModSavingsRevision++; _footerTotalsDirty = true; _needsUIRefresh = true; });
                             }
                         }, TaskScheduler.Default);
-                        _ = _backupService.HasBackupForModAsync(target).ContinueWith(bt =>
+                        _ = _backupService.HasBackupForModAsync(target).ContinueWith(async bt =>
                         {
                             if (bt.Status == TaskStatus.RanToCompletion)
                             {
                                 bool any = bt.Result;
-                                try { any = any || _backupService.HasPmpBackupForModAsync(target).GetAwaiter().GetResult(); } catch { }
+                                try 
+                                { 
+                                    var hasPmp = await _backupService.HasPmpBackupForModAsync(target).ConfigureAwait(false);
+                                    any = any || hasPmp;
+                                } 
+                                catch { }
                                 _cacheService.SetModHasBackup(target, any);
                             }
-                        });
+                        }, TaskScheduler.Default);
                         _uiThreadActions.Enqueue(() =>
                         {
                             _running = false;

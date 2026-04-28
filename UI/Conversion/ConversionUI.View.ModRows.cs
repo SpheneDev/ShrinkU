@@ -501,17 +501,21 @@ public sealed partial class ConversionUI
                                     _uiThreadActions.Enqueue(() => { _perModSavingsRevision++; _footerTotalsDirty = true; _needsUIRefresh = true; });
                                 }
                             }, TaskScheduler.Default);
-                            _ = _backupService.HasBackupForModAsync(mod).ContinueWith(bt =>
+                            _ = _backupService.HasBackupForModAsync(mod).ContinueWith(async bt =>
                             {
                                 if (bt.Status == TaskStatus.RanToCompletion)
                                 {
                                     bool any = bt.Result;
-                                    try { any = any || _backupService.HasPmpBackupForModAsync(mod).GetAwaiter().GetResult(); }
+                                    try 
+                                    { 
+                                        var hasPmp = await _backupService.HasPmpBackupForModAsync(mod).ConfigureAwait(false);
+                                        any = any || hasPmp;
+                                    }
                                     catch (Exception ex) { _logger.LogError(ex, "HasPmpBackup check failed for {mod}", mod); }
                                     _cacheService.SetModHasBackup(mod, any);
                                     _modsWithPmpCache[mod] = true;
                                 }
-                            });
+                            }, TaskScheduler.Default);
                             _uiThreadActions.Enqueue(() => { _running = false; ResetBothProgress(); });
                         }, TaskScheduler.Default);
                 }
@@ -563,18 +567,21 @@ public sealed partial class ConversionUI
                         catch (Exception ex) { _logger.LogError(ex, "Update external change after install failed for {mod}", mod); }
                         try { RefreshModState(mod, "orphan-install-flat"); }
                         catch (Exception ex) { _logger.LogError(ex, "RefreshModState after install failed for {mod}", mod); }
-                        try
+                        _ = Task.Run(async () =>
                         {
-                            var orphans = _backupService.FindOrphanedBackupsAsync().GetAwaiter().GetResult();
-                            _uiThreadActions.Enqueue(() =>
+                            try
                             {
-                                _orphaned = orphans ?? new List<ShrinkU.Services.TextureBackupService.OrphanBackupInfo>();
-                                _orphanRevision++;
-                                _needsUIRefresh = true;
-                                RequestUiRefresh("orphan-refresh-after-install");
-                            });
-                        }
-                        catch (Exception ex) { _logger.LogError(ex, "FindOrphanedBackupsAsync after install failed for {mod}", mod); }
+                                var orphans = await _backupService.FindOrphanedBackupsAsync().ConfigureAwait(false);
+                                _uiThreadActions.Enqueue(() =>
+                                {
+                                    _orphaned = orphans ?? new List<ShrinkU.Services.TextureBackupService.OrphanBackupInfo>();
+                                    _orphanRevision++;
+                                    _needsUIRefresh = true;
+                                    RequestUiRefresh("orphan-refresh-after-install");
+                                });
+                            }
+                            catch (Exception ex) { _logger.LogError(ex, "FindOrphanedBackupsAsync after install failed for {mod}", mod); }
+                        });
                         _ = _backupService.ComputeSavingsForModAsync(mod).ContinueWith(ps =>
                         {
                             if (ps.Status == TaskStatus.RanToCompletion)
