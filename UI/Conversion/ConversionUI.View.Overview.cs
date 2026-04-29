@@ -1035,21 +1035,21 @@ public sealed partial class ConversionUI
                             if (bt.Status == TaskStatus.RanToCompletion)
                             {
                                 bool any = bt.Result;
-                                try 
-                                { 
+                                try
+                                {
                                     var hasPmp = await _backupService.HasPmpBackupForModAsync(m).ConfigureAwait(false);
                                     any = any || hasPmp;
                                 }
                                 catch (Exception ex) { _logger.LogError(ex, "HasPmpBackup check failed for {mod}", m); }
                                 _cacheService.SetModHasBackup(m, any);
-                                try 
-                                { 
+                                try
+                                {
                                     var hasPmpNow = await _backupService.HasPmpBackupForModAsync(m).ConfigureAwait(false);
                                     _cacheService.SetModHasPmp(m, hasPmpNow);
                                 }
                                 catch (Exception ex) { _logger.LogError(ex, "SetModHasPmp failed for {mod}", m); }
                             }
-                        }, TaskScheduler.Default);
+                        }, TaskScheduler.Default).Unwrap().ContinueWith(t => { if (t.IsFaulted) _logger.LogError(t.Exception, "HasBackupForModAsync continuation failed for {mod}", m); }, TaskScheduler.Default);
                     }
                     try
                     {
@@ -1082,7 +1082,7 @@ public sealed partial class ConversionUI
                         });
                     }
                     catch { }
-                });
+                }, TaskScheduler.Default);
             }
             ImGui.PopStyleColor(4);
         }

@@ -743,15 +743,15 @@ public ConversionUI(ILogger logger, ShrinkUConfigService configService, TextureC
                             if (bt.Status == TaskStatus.RanToCompletion)
                             {
                                 bool any = bt.Result;
-                                try 
-                                { 
+                                try
+                                {
                                     var hasPmp = await _backupService.HasPmpBackupForModAsync(target).ConfigureAwait(false);
                                     any = any || hasPmp;
-                                } 
+                                }
                                 catch { }
                                 _cacheService.SetModHasBackup(target, any);
                             }
-                        }, TaskScheduler.Default);
+                        }, TaskScheduler.Default).Unwrap().ContinueWith(t => { if (t.IsFaulted) _logger.LogError(t.Exception, "HasBackupForModAsync continuation failed for {target}", target); }, TaskScheduler.Default);
                         _uiThreadActions.Enqueue(() =>
                         {
                             _running = false;
@@ -1749,8 +1749,13 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                 }
 
                 // Global heavy-scan rate limiter: suppress repeated heavy scans within 2 seconds
+                DateTime lastScan;
+                lock (_modsChangedLock)
+                {
+                    lastScan = _lastHeavyScanAt;
+                }
                 var now = DateTime.UtcNow;
-                var since = now - _lastHeavyScanAt;
+                var since = now - lastScan;
                 var allowHeavy = !skipHeavy || force;
                 _logger.LogDebug("Scan decision: origin={origin} skipHeavy={skip} sinceMs={ms} allowHeavyPreLimit={allow}", origin, skipHeavy, (int)since.TotalMilliseconds, allowHeavy);
                 if (allowHeavy && since < TimeSpan.FromSeconds(3) && !force)
@@ -1764,7 +1769,10 @@ private void DrawCategoryTableNode(TableCatNode node, Dictionary<string, List<st
                 {
                     TraceAction(origin, "GetGroupedCandidateTexturesAsync");
                     grouped = await _conversionService.GetGroupedCandidateTexturesAsync(force).ConfigureAwait(false);
-                    _lastHeavyScanAt = DateTime.UtcNow;
+                    lock (_modsChangedLock)
+                    {
+                        _lastHeavyScanAt = DateTime.UtcNow;
+                    }
                     _logger.LogDebug("Heavy scan executed: origin={origin} groupedMods={mods}", origin, grouped?.Count ?? 0);
 
                     try

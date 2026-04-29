@@ -22,6 +22,8 @@ public sealed partial class ConversionUI
         }
         TraceAction(refreshReason, nameof(TryStartPmpRestoreNewest), mod);
 
+        _running = true;
+        var progress = new Progress<(string, int, int)>(e => { _currentTexture = e.Item1; _backupIndex = e.Item2; _backupTotal = e.Item3; _currentRestoreModIndex = e.Item2; _currentRestoreModTotal = e.Item3; });
         _ = Task.Run(async () =>
         {
             try
@@ -43,13 +45,10 @@ public sealed partial class ConversionUI
 
                 _uiThreadActions.Enqueue(() =>
                 {
-                    _running = true;
                     ResetBothProgress();
                     _currentRestoreMod = mod;
                     SetStatus($"PMP restore requested for {mod}: {display}");
                 });
-
-                var progress = new Progress<(string, int, int)>(e => { _currentTexture = e.Item1; _backupIndex = e.Item2; _backupTotal = e.Item3; _currentRestoreModIndex = e.Item2; _currentRestoreModTotal = e.Item3; });
                 var success = await _backupService.RestorePmpAsync(mod, latest, progress, CancellationToken.None).ConfigureAwait(false);
                 TraceAction(refreshReason, "RestorePmpAsync.completed", success ? latest : string.Empty);
                 try { _backupService.RedrawPlayer(); } catch { }
@@ -71,23 +70,18 @@ public sealed partial class ConversionUI
                     if (bt.Status == TaskStatus.RanToCompletion)
                     {
                         bool any = bt.Result;
-                        try 
-                        { 
+                        try
+                        {
                             var hasPmp = await _backupService.HasPmpBackupForModAsync(mod).ConfigureAwait(false);
                             any = any || hasPmp;
-                        } 
+                            _cacheService.SetModHasPmp(mod, hasPmp);
+                        }
                         catch { }
                         _cacheService.SetModHasBackup(mod, any);
                         try { bool _r; _modsWithPmpCache.TryRemove(mod, out _r); } catch { }
                         try { (string version, string author, DateTime createdUtc, string pmpFileName) _rm; _modsPmpMetaCache.TryRemove(mod, out _rm); } catch { }
-                        try 
-                        { 
-                            var hasPmpNow = await _backupService.HasPmpBackupForModAsync(mod).ConfigureAwait(false);
-                            _cacheService.SetModHasPmp(mod, hasPmpNow);
-                        } 
-                        catch { }
                     }
-                }, TaskScheduler.Default);
+                }, TaskScheduler.Default).Unwrap().ContinueWith(t => { if (t.IsFaulted) _logger.LogError(t.Exception, "HasBackupForModAsync continuation failed for {mod}", mod); }, TaskScheduler.Default);
                 _uiThreadActions.Enqueue(() =>
                 {
                     _running = false;
@@ -101,6 +95,7 @@ public sealed partial class ConversionUI
             catch (Exception ex)
             {
                 _logger.LogError(ex, "TryStartPmpRestoreNewest failed for {mod}", mod);
+                _uiThreadActions.Enqueue(() => { _running = false; });
             }
         });
     }
@@ -138,17 +133,17 @@ public sealed partial class ConversionUI
                     if (bt.Status == TaskStatus.RanToCompletion)
                     {
                         bool any = bt.Result;
-                        try 
-                        { 
+                        try
+                        {
                             var hasPmp = await _backupService.HasPmpBackupForModAsync(mod).ConfigureAwait(false);
                             any = any || hasPmp;
                         }
                         catch (Exception ex) { _logger.LogError(ex, "HasPmpBackup check failed for {mod}", mod); }
                         _cacheService.SetModHasBackup(mod, any);
                     }
-                }, TaskScheduler.Default);
+                }, TaskScheduler.Default).Unwrap().ContinueWith(t => { if (t.IsFaulted) _logger.LogError(t.Exception, "HasBackupForModAsync continuation failed for {mod}", mod); }, TaskScheduler.Default);
                 _uiThreadActions.Enqueue(() => { _running = false; });
-            });
+            }, TaskScheduler.Default);
     }
 
     private void RemoveModFromUiState(string mod)

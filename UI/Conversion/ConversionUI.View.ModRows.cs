@@ -506,8 +506,8 @@ public sealed partial class ConversionUI
                                 if (bt.Status == TaskStatus.RanToCompletion)
                                 {
                                     bool any = bt.Result;
-                                    try 
-                                    { 
+                                    try
+                                    {
                                         var hasPmp = await _backupService.HasPmpBackupForModAsync(mod).ConfigureAwait(false);
                                         any = any || hasPmp;
                                     }
@@ -515,7 +515,7 @@ public sealed partial class ConversionUI
                                     _cacheService.SetModHasBackup(mod, any);
                                     _modsWithPmpCache[mod] = true;
                                 }
-                            }, TaskScheduler.Default);
+                            }, TaskScheduler.Default).Unwrap().ContinueWith(t => { if (t.IsFaulted) _logger.LogError(t.Exception, "HasBackupForModAsync continuation failed for {mod}", mod); }, TaskScheduler.Default);
                             _uiThreadActions.Enqueue(() => { _running = false; ResetBothProgress(); });
                         }, TaskScheduler.Default);
                 }
