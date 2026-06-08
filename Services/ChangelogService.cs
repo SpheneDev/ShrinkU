@@ -99,7 +99,22 @@ public sealed class ChangelogService
                                         }
                                         else if (sub.ValueKind == JsonValueKind.Object)
                                         {
-                                            if (sub.TryGetProperty("description", out var sdProp) && sdProp.ValueKind == JsonValueKind.String)
+                                            var subcategory = sub.TryGetProperty("subcategory", out var scProp) && scProp.ValueKind == JsonValueKind.String
+                                                ? scProp.GetString() : null;
+                                            if (sub.TryGetProperty("items", out var itemsProp) && itemsProp.ValueKind == JsonValueKind.Array)
+                                            {
+                                                foreach (var it in itemsProp.EnumerateArray())
+                                                {
+                                                    if (it.ValueKind != JsonValueKind.String) continue;
+                                                    var s = it.GetString();
+                                                    if (string.IsNullOrWhiteSpace(s)) continue;
+                                                    var subText = s!.Trim();
+                                                    if (!string.IsNullOrWhiteSpace(subcategory))
+                                                        subText = $"[{subcategory}] {subText}";
+                                                    view.Sub.Add(subText);
+                                                }
+                                            }
+                                            else if (sub.TryGetProperty("description", out var sdProp) && sdProp.ValueKind == JsonValueKind.String)
                                             {
                                                 var s = sdProp.GetString();
                                                 if (!string.IsNullOrWhiteSpace(s)) view.Sub.Add(s!.Trim());
