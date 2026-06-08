@@ -662,7 +662,10 @@ public sealed partial class ConversionUI
                     }
                 }
                 clipper.End();
-            
+
+            // Need a valid table row to query column widths without triggering ImGui assertions
+            ImGui.TableNextRow();
+
             ImGui.TableSetColumnIndex(0);
             var currentFileWidth = ImGui.GetColumnWidth();
             _scannedFileColWidth = currentFileWidth;
