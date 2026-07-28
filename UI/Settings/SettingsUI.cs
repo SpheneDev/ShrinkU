@@ -208,6 +208,17 @@ public sealed class SettingsUI : Window
                 UiTooltip.Show("Automatically restore the latest backup when a mod becomes larger after conversion.");
 
                 ImGui.Separator();
+                ImGui.TextColored(ShrinkUColors.Accent, "Penumbra Integration");
+                ImGui.Spacing();
+                bool showPenumbraButton = _configService.Current.ShowPenumbraButton;
+                if (ImGui.Checkbox("Show ShrinkU button in Penumbra mod list", ref showPenumbraButton))
+                {
+                    _configService.Current.ShowPenumbraButton = showPenumbraButton;
+                    _configService.Save();
+                }
+                UiTooltip.Show("When enabled, a small ShrinkU button appears next to each mod in Penumbra's mod list.");
+
+                ImGui.Separator();
                 ImGui.TextColored(ShrinkUColors.Accent, "Overview");
                 ImGui.Spacing();
                 bool showFiles = _configService.Current.ShowModFilesInOverview;

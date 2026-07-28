@@ -62,6 +62,9 @@ public sealed class ShrinkUConfig : IPluginConfiguration
 
     public Dictionary<string, ExternalChangeMarker> ExternalConvertedMods { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 
+    // Penumbra integration
+    public bool ShowPenumbraButton { get; set; } = true;
+
     // First-run setup gating
     public bool FirstRunCompleted { get; set; } = false;
 
