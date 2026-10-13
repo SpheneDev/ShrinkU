@@ -1,7 +1,6 @@
 using Dalamud.Plugin;
 using Microsoft.Extensions.Logging;
 using Penumbra.Api.Enums;
-using Penumbra.Api.Helpers;
 using Penumbra.Api.IpcSubscribers;
 using System;
 using System.IO;
@@ -1012,7 +1011,7 @@ public sealed class PenumbraIpc : IDisposable
         return Task.FromResult(paths);
     }
 
-    public record ModMetadata(string Name, string? Author, string? Version, string? Description, string? Website, string Source = "unknown");
+    public record ModMetadata(string Name, string? Author, string? Version, string? Description, string? Website, string Source = "unknown", string? ImagePath = null);
 
     public Task<ModMetadata?> GetModMetadataAsync(string modDirectory)
     {
@@ -1022,7 +1021,9 @@ public sealed class PenumbraIpc : IDisposable
             if (fromApi != null)
             {
                 LogMetadataSource(modDirectory, fromApi.Source, apiReason);
-                return Task.FromResult<ModMetadata?>(fromApi);
+                var apiDir = ResolveModDirectoryAbsolutePath(modDirectory);
+                var apiImage = apiDir == null ? null : ResolveModImagePath(apiDir);
+                return Task.FromResult<ModMetadata?>(apiImage == null ? fromApi : fromApi with { ImagePath = apiImage });
             }
             if (string.Equals(apiReason, "adapter-type-missing", StringComparison.Ordinal))
             {
@@ -1059,7 +1060,9 @@ public sealed class PenumbraIpc : IDisposable
             var description = rootEl.TryGetProperty("Description", out var pDesc) ? pDesc.GetString() : null;
             var website = rootEl.TryGetProperty("Website", out var pWeb) ? pWeb.GetString() : null;
 
-            var result = new ModMetadata(name, author, version, description, website, "meta.json-fallback");
+            var image = rootEl.TryGetProperty("Image", out var pImage) ? pImage.GetString() : null;
+            var result = new ModMetadata(name, author, version, description, website,
+                "meta.json-fallback", ResolveModImagePath(dir, image));
             if (!_modMetadataAdapterUnavailable)
                 LogMetadataSource(modDirectory, result.Source, "api-unavailable-or-miss");
             return Task.FromResult<ModMetadata?>(result);
@@ -1314,6 +1317,46 @@ public sealed class PenumbraIpc : IDisposable
         catch { }
 
         return null;
+    }
+
+    /// <summary>Reads the Image entry of meta.json inside <paramref name="modDir"/> and resolves it.</summary>
+    private static string? ResolveModImagePath(string modDir)
+    {
+        try
+        {
+            var metaPath = Path.Combine(modDir, "meta.json");
+            if (!File.Exists(metaPath)) return null;
+            using var s = File.OpenRead(metaPath);
+            using var doc = JsonDocument.Parse(s);
+            var image = doc.RootElement.TryGetProperty("Image", out var p) ? p.GetString() : null;
+            return ResolveModImagePath(modDir, image);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>Resolves Penumbra's meta.json Image path relative to the mod directory.</summary>
+    private static string? ResolveModImagePath(string modDir, string? image)
+    {
+        if (string.IsNullOrWhiteSpace(image)) return null;
+        if (image.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
+            || image.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+        try
+        {
+            var full = Path.GetFullPath(Path.Combine(modDir, image));
+            var root = Path.GetFullPath(modDir);
+            if (!full.StartsWith(root, StringComparison.Ordinal)) return null;
+            return File.Exists(full) ? full : null;
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     // Get all collections and their names.
